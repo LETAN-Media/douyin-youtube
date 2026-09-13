@@ -128,7 +128,8 @@ def create_job(
         get_db
     ),
 ) -> VideoJob:
-    # Use share_text as initial description so worker can read it as context
+    # Preserve share_text in description as temporary context for the worker.
+    # The worker will replace it with AI-generated metadata after processing.
     initial_description = payload.description
     if not initial_description and payload.share_text:
         initial_description = payload.share_text

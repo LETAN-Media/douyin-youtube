@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 from sqlalchemy import select, update
 
@@ -17,6 +18,49 @@ from app.youtube import upload_video
 logger = logging.getLogger(
     "douyin-youtube-worker"
 )
+
+
+def is_raw_douyin_share_text(text: str | None) -> bool:
+    if not text:
+        return False
+    return (
+        "复制打开抖音" in text
+        or "v.douyin.com" in text.lower()
+        or "看看" in text
+        or "的作品" in text
+        or re.match(r"^\d+\.\d+\s+复制打开抖音", text) is not None
+    )
+
+
+def validate_final_description(text: str) -> bool:
+    lowered = text.lower()
+    if "v.douyin.com" in lowered:
+        return False
+    if "douyin.com" in lowered:
+        return False
+    if "复制打开抖音" in text:
+        return False
+    if "https://" in lowered or "http://" in lowered:
+        return False
+    return True
+
+
+def validate_hashtags(text: str) -> bool:
+    tags = re.findall(r"#\w+", text)
+    if len(tags) != 5:
+        return False
+    if len(set(tags)) != 5:
+        return False
+    lowered_text = text.lower()
+    for tag in tags:
+        tag_lower = tag.lower()
+        if "http" in tag_lower:
+            return False
+        if "douyin" in tag_lower:
+            return False
+        if "tiktok" in tag_lower:
+            return False
+    return True
 
 
 def recover_incomplete_jobs() -> None:
@@ -156,27 +200,45 @@ def process_job(
                 download.source_context.strip()
                 or fallback_title
             )
-            
+
             title = job.title
             description = job.description
-            
-            if description and not title:
-                # Use description as share_text context
-                source_context = description + "\n\n" + source_context
-            
-            if not title or not description:
-                logger.info("Generating AI metadata for job %s using context", job_id)
-                ai_result = generate_youtube_metadata(source_context)
+
+            has_raw_context = is_raw_douyin_share_text(
+                description
+            )
+            needs_ai = (
+                not title
+                or not description
+                or has_raw_context
+            )
+
+            if needs_ai:
+                if description:
+                    source_context = (
+                        description
+                        + "\n\n"
+                        + source_context
+                    )
+
+                logger.info(
+                    "Generating AI metadata for job %s using context",
+                    job_id,
+                )
+                ai_result = generate_youtube_metadata(
+                    source_context
+                )
                 if not ai_result:
-                    raise RuntimeError("AI metadata generation failed")
-                
+                    raise RuntimeError(
+                        "AI metadata generation failed"
+                    )
+
                 ai_title, ai_desc = ai_result
                 if not title:
                     title = ai_title
-                if not description:
+                if not description or has_raw_context:
                     description = ai_desc
-                
-                # Save to database so GET /api/jobs sees the real title
+
                 job.title = title
                 job.description = description
 
@@ -194,6 +256,54 @@ def process_job(
                 raise RuntimeError(
                     "AI metadata/title generation failed; upload blocked"
                 )
+
+            if not validate_final_description(description):
+                logger.warning(
+                    "First-pass description validation failed for job %s, retrying AI once",
+                    job_id,
+                )
+                ai_result = generate_youtube_metadata(
+                    source_context
+                )
+                if not ai_result:
+                    raise RuntimeError(
+                        "AI metadata generation failed on retry; upload blocked"
+                    )
+
+                retry_title, retry_desc = ai_result
+                if not validate_final_description(retry_desc):
+                    raise RuntimeError(
+                        "AI description validation failed after retry; upload blocked"
+                    )
+
+                title = retry_title or title
+                description = retry_desc
+                job.title = title
+                job.description = description
+
+            if not validate_hashtags(description):
+                logger.warning(
+                    "First-pass hashtag validation failed for job %s, retrying AI once",
+                    job_id,
+                )
+                ai_result = generate_youtube_metadata(
+                    source_context
+                )
+                if not ai_result:
+                    raise RuntimeError(
+                        "AI metadata generation failed on retry; upload blocked"
+                    )
+
+                retry_title, retry_desc = ai_result
+                if not validate_hashtags(retry_desc):
+                    raise RuntimeError(
+                        "AI hashtags validation failed after retry; upload blocked"
+                    )
+
+                title = retry_title or title
+                description = retry_desc
+                job.title = title
+                job.description = description
 
             video_id = upload_video(
                 db=db,
