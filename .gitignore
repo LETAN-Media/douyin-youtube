@@ -3,6 +3,7 @@ backend/.env
 __pycache__/
 *.pyc
 backend/test_metadata_fix.py
+backend/test_dual_rcuts.py
 *.log
 .venv/
 .vercel/

@@ -1,6 +1,6 @@
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -12,10 +12,6 @@ from app.config import settings
 
 
 logger = logging.getLogger("douyin-downloader")
-
-RCUTS_API = settings.rcuts_api_url
-RCUTS_PRIMARY_API = settings.rcuts_primary_api_url
-RCUTS_FALLBACK_API = settings.rcuts_fallback_api_url
 
 USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
@@ -29,6 +25,7 @@ class DownloadResult:
     file_path: Path
     title: str
     source_context: str = ""
+    parser_name: str = ""
 
 
 def ensure_temp_dir() -> Path:
@@ -74,73 +71,64 @@ def extract_first_string(data, keys: tuple[str, ...]) -> str | None:
     return None
 
 
-def call_rcuts_parser(source_url: str) -> dict:
+def call_rcuts_parser(
+    api_url: str,
+    source_url: str,
+    share_text: str | None,
+) -> dict:
+    clipboard = share_text.strip() if share_text and share_text.strip() else source_url
+
     payload = urlencode(
         {
             "url": source_url,
             "token": settings.rcuts_token,
-            "clipboard": source_url,
+            "clipboard": clipboard,
         }
     ).encode("utf-8")
 
-    errors = []
+    request = Request(
+        api_url,
+        data=payload,
+        method="POST",
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json,text/plain,*/*",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
 
-    for label, api_url in (
-        ("primary", RCUTS_PRIMARY_API or RCUTS_API),
-        ("fallback", RCUTS_FALLBACK_API or RCUTS_API),
-    ):
-        request = Request(
-            api_url,
-            data=payload,
-            method="POST",
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "application/json,text/plain,*/*",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
+    try:
+        with urlopen(request, timeout=30) as response:
+            raw = response.read()
+    except HTTPError as exc:
+        body = exc.read().decode(
+            "utf-8",
+            errors="replace",
         )
 
-        try:
-            with urlopen(request, timeout=30) as response:
-                raw = response.read()
-        except HTTPError as exc:
-            body = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )
+        raise RuntimeError(
+            f"Rcuts API HTTP {exc.code}: {body[:500]}"
+        ) from exc
 
-            errors.append(
-                f"Rcuts {label} API HTTP {exc.code}: {body[:500]}"
-            )
-            continue
+    except URLError as exc:
+        raise RuntimeError(
+            f"Không kết nối được Rcuts API: {exc}"
+        ) from exc
 
-        except URLError as exc:
-            errors.append(
-                f"Rcuts {label} API connection error: {exc}"
-            )
-            continue
+    try:
+        text = raw.decode("utf-8")
+        data = json.loads(text)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Rcuts API không trả JSON hợp lệ: {exc}"
+        ) from exc
 
-        try:
-            text = raw.decode("utf-8")
-            data = json.loads(text)
-        except Exception as exc:
-            errors.append(
-                f"Rcuts {label} API JSON decode error: {exc}"
-            )
-            continue
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            "Rcuts API trả response không đúng định dạng"
+        )
 
-        if not isinstance(data, dict):
-            errors.append(
-                f"Rcuts {label} API trả response không đúng định dạng"
-            )
-            continue
-
-        return data
-
-    raise RuntimeError(
-        "Rcuts API thất bại sau khi thử primary và fallback: "
-        + "; ".join(errors)
-    )
+    return data
 
 
 def extract_video_url(data: dict) -> str:
@@ -151,7 +139,6 @@ def extract_video_url(data: dict) -> str:
             "videoUrl",
             "play_url",
             "playUrl",
-            "url",
         ),
     )
 
@@ -173,6 +160,7 @@ def extract_title(data: dict) -> str:
             "description",
             "video_title",
             "videoTitle",
+            "video_name",
         ),
     )
 
@@ -182,84 +170,8 @@ def extract_title(data: dict) -> str:
     return title[:100]
 
 
-def download_http_video(
-    video_url: str,
-    job_id: str,
-) -> Path:
-    temp_dir = ensure_temp_dir()
-
-    output = temp_dir / f"{job_id}.mp4"
-
-    request = Request(
-        video_url,
-        method="GET",
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "*/*",
-            "Referer": "https://www.douyin.com/",
-        },
-    )
-
-    try:
-        with urlopen(
-            request,
-            timeout=60,
-        ) as response:
-            content_type = (
-                response.headers
-                .get("Content-Type", "")
-                .lower()
-            )
-
-            if (
-                "video" not in content_type
-                and "octet-stream" not in content_type
-            ):
-                logger.warning(
-                    "Unexpected Content-Type: %s",
-                    content_type,
-                )
-
-            with output.open("wb") as file:
-                while True:
-                    chunk = response.read(
-                        1024 * 1024
-                    )
-
-                    if not chunk:
-                        break
-
-                    file.write(chunk)
-
-    except Exception:
-        output.unlink(
-            missing_ok=True
-        )
-        raise
-
-    if not output.exists():
-        raise RuntimeError(
-            "Không tạo được file video"
-        )
-
-    if output.stat().st_size < 1024:
-        output.unlink(
-            missing_ok=True
-        )
-
-        raise RuntimeError(
-            "Video tải về quá nhỏ"
-        )
-
-    return output
-
-
-
-def build_source_context(
-    data: dict,
-) -> str:
+def build_source_context(data: dict) -> str:
     """Build rich source context for AI from Rcuts metadata."""
-
     interesting_keys = {
         "title",
         "desc",
@@ -276,6 +188,9 @@ def build_source_context(
         "text_extra",
         "challenge",
         "challenges",
+        "video_name",
+        "cover",
+        "sound",
     }
 
     lines: list[str] = []
@@ -349,26 +264,101 @@ def build_source_context(
     return "\n".join(lines)[:6000]
 
 
-def download_with_rcuts(
+def download_http_video(
+    video_url: str,
+    job_id: str,
+) -> Path:
+    temp_dir = ensure_temp_dir()
+
+    output = temp_dir / f"{job_id}.mp4"
+
+    request = Request(
+        video_url,
+        method="GET",
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*",
+            "Referer": "https://www.douyin.com/",
+        },
+    )
+
+    try:
+        with urlopen(
+            request,
+            timeout=60,
+        ) as response:
+            content_type = (
+                response.headers
+                .get("Content-Type", "")
+                .lower()
+            )
+
+            if (
+                "video" not in content_type
+                and "octet-stream" not in content_type
+            ):
+                logger.warning(
+                    "Unexpected Content-Type from video URL: %s",
+                    content_type,
+                )
+
+            with output.open("wb") as file:
+                while True:
+                    chunk = response.read(
+                        1024 * 1024
+                    )
+
+                    if not chunk:
+                        break
+
+                    file.write(chunk)
+
+    except Exception:
+        output.unlink(
+            missing_ok=True
+        )
+        raise
+
+    if not output.exists():
+        raise RuntimeError(
+            "Không tạo được file video"
+        )
+
+    if output.stat().st_size < 1024:
+        output.unlink(
+            missing_ok=True
+        )
+
+        raise RuntimeError(
+            "Video tải về quá nhỏ"
+        )
+
+    return output
+
+
+def try_rcuts_download(
+    api_url: str,
+    parser_name: str,
     source_url: str,
     job_id: str,
-) -> DownloadResult:
+    share_text: str | None,
+) -> DownloadResult | None:
     logger.info(
-        "Trying Rcuts parser for job=%s",
+        "Trying Rcuts %s parser for job=%s url=%s",
+        parser_name,
         job_id,
+        api_url,
     )
 
     data = call_rcuts_parser(
-        source_url
+        api_url=api_url,
+        source_url=source_url,
+        share_text=share_text,
     )
 
-    video_url = extract_video_url(
-        data
-    )
+    video_url = extract_video_url(data)
 
-    title = extract_title(
-        data
-    )
+    title = extract_title(data)
 
     file_path = download_http_video(
         video_url,
@@ -376,19 +366,19 @@ def download_with_rcuts(
     )
 
     logger.info(
-        "Rcuts download OK job=%s size=%s",
+        "Rcuts %s OK job=%s size=%s",
+        parser_name,
         job_id,
         file_path.stat().st_size,
     )
 
-    source_context = build_source_context(
-        data
-    )
+    source_context = build_source_context(data)
 
     return DownloadResult(
         file_path=file_path,
         title=title,
         source_context=source_context,
+        parser_name=parser_name,
     )
 
 
@@ -504,42 +494,67 @@ def download_with_ytdlp(
         source_context="\n".join(
             context_parts
         )[:6000],
+        parser_name="yt_dlp",
     )
 
 
 def download_video(
     url: str,
     job_id: str,
+    share_text: str | None = None,
 ) -> DownloadResult:
     source_url = validate_http_url(
         url
     )
 
-    try:
-        return download_with_rcuts(
-            source_url,
-            job_id,
-        )
+    primary_api = settings.rcuts_primary_api_url or settings.rcuts_api_url
+    fallback_api = settings.rcuts_fallback_api_url or settings.rcuts_api_url
 
-    except Exception as rcuts_error:
-        logger.exception(
-            "Rcuts failed job=%s: %s",
-            job_id,
-            rcuts_error,
-        )
+    if primary_api and primary_api != fallback_api:
+        try:
+            result = try_rcuts_download(
+                api_url=primary_api,
+                parser_name="rcuts_primary",
+                source_url=source_url,
+                job_id=job_id,
+                share_text=share_text,
+            )
+            if result:
+                return result
+        except Exception as exc:
+            logger.warning(
+                "Rcuts primary failed for job=%s: %s",
+                job_id,
+                exc,
+            )
 
-    try:
-        return download_with_ytdlp(
-            source_url,
-            job_id,
-        )
+    if fallback_api:
+        try:
+            result = try_rcuts_download(
+                api_url=fallback_api,
+                parser_name="rcuts_fallback",
+                source_url=source_url,
+                job_id=job_id,
+                share_text=share_text,
+            )
+            if result:
+                return result
+        except Exception as exc:
+            logger.warning(
+                "Rcuts fallback failed for job=%s: %s",
+                job_id,
+                exc,
+            )
 
-    except Exception as ytdlp_error:
-        raise RuntimeError(
-            "Không tải được video Douyin. "
-            f"Rcuts lỗi và yt-dlp fallback cũng lỗi: "
-            f"{ytdlp_error}"
-        ) from ytdlp_error
+    logger.info(
+        "Trying yt-dlp fallback for job=%s",
+        job_id,
+    )
+
+    return download_with_ytdlp(
+        source_url,
+        job_id,
+    )
 
 
 def cleanup_job_files(

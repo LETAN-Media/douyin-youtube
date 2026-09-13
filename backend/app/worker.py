@@ -163,6 +163,13 @@ def process_job(
         download = download_video(
             source_url,
             job_id,
+            share_text=(
+                job.description
+                if is_raw_douyin_share_text(
+                    job.description
+                )
+                else None
+            ),
         )
 
         with SessionLocal.begin() as db:
@@ -199,6 +206,36 @@ def process_job(
             source_context = (
                 download.source_context.strip()
                 or fallback_title
+            )
+
+            original_share_text = (
+                job.description
+                if is_raw_douyin_share_text(
+                    job.description
+                )
+                else None
+            )
+
+            if original_share_text:
+                source_context = (
+                    original_share_text
+                    + "\n\n"
+                    + "Rcuts metadata:\n"
+                    + source_context
+                )
+            elif source_context != fallback_title:
+                source_context = (
+                    fallback_title
+                    + "\n\n"
+                    + "Rcuts metadata:\n"
+                    + source_context
+                )
+
+            logger.info(
+                "Downloaded job=%s parser=%s title=%r",
+                job_id,
+                download.parser_name,
+                download.title,
             )
 
             title = job.title
