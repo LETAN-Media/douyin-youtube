@@ -45,7 +45,10 @@ def validate_final_description(text: str) -> bool:
     return True
 
 
-def validate_hashtags(text: str) -> bool:
+def validate_hashtags(
+    text: str,
+    pipeline: Pipeline | None = None,
+) -> bool:
     tags = re.findall(r"#\w+", text)
     if len(tags) != 5:
         return False
@@ -61,35 +64,30 @@ def validate_hashtags(text: str) -> bool:
         if "tiktok" in tag_lower:
             return False
 
-    channel_identity_required = {
-        tag.lower()
-        for tag in ("#handsomeboy", "#maleaesthetic")
-    }
-    channel_identity_present = {
-        tag.lower()
-        for tag in tags
-    } & channel_identity_required
+    if pipeline is None:
+        return True
 
-    if channel_identity_required != channel_identity_present:
+    fixed_hashtags = [
+        tag.lower()
+        for tag in (pipeline.fixed_hashtags or [])
+    ]
+    adaptive_hashtags = [
+        tag.lower()
+        for tag in (pipeline.adaptive_hashtags or [])
+    ]
+    allowed_hashtags = set(fixed_hashtags) | set(adaptive_hashtags)
+
+    if not allowed_hashtags:
+        return True
+
+    tags_lower = [tag.lower() for tag in tags]
+
+    fixed_required = sum(1 for tag in tags_lower if tag in fixed_hashtags)
+    if fixed_required < len(fixed_hashtags):
         return False
 
-    channel_niche_tags = {
-        "#handsomeboy",
-        "#maleaesthetic",
-        "#fitboy",
-        "#muscle",
-        "#gymboy",
-        "#sixpack",
-        "#broadshoulders",
-        "#mensfashion",
-        "#mensstyle",
-    }
-    channel_niche_count = sum(
-        1
-        for tag in tags
-        if tag.lower() in channel_niche_tags
-    )
-    if channel_niche_count < 3:
+    niche_count = sum(1 for tag in tags_lower if tag in allowed_hashtags)
+    if niche_count < 3:
         return False
 
     return True
@@ -282,6 +280,14 @@ def process_job(
                 or has_raw_context
             )
 
+            pipeline = None
+            if job.pipeline_id:
+                with SessionLocal() as pipeline_db:
+                    pipeline = pipeline_db.get(
+                        Pipeline,
+                        job.pipeline_id,
+                    )
+
             if needs_ai:
                 if description:
                     source_context = (
@@ -289,14 +295,6 @@ def process_job(
                         + "\n\n"
                         + source_context
                     )
-
-                pipeline = None
-                if job.pipeline_id:
-                    with SessionLocal() as pipeline_db:
-                        pipeline = pipeline_db.get(
-                            Pipeline,
-                            job.pipeline_id,
-                        )
 
                 logger.info(
                     "Generating AI metadata for job %s using context",
@@ -360,7 +358,7 @@ def process_job(
                 job.title = title
                 job.description = description
 
-            if not validate_hashtags(description):
+            if not validate_hashtags(description, pipeline=pipeline):
                 logger.warning(
                     "First-pass hashtag validation failed for job %s, retrying AI once",
                     job_id,
@@ -375,7 +373,7 @@ def process_job(
                     )
 
                 retry_title, retry_desc = ai_result
-                if not validate_hashtags(retry_desc):
+                if not validate_hashtags(retry_desc, pipeline=pipeline):
                     raise RuntimeError(
                         "AI hashtags validation failed after retry; upload blocked"
                     )
