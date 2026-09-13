@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = "alims-intl.llm"
 
+    # Optional Rcuts configuration
+    rcuts_api_url: str = "http://api.rcuts.com/Video/DouYin.php"
+    rcuts_token: str = ""
+    rcuts_update_url: str = "http://i.rcuts.com/update/247"
+
+    # Optional Rcuts primary/fallback configuration
+    rcuts_primary_api_url: str = "http://api.rcuts.com/Video/DouYin_All.php"
+    rcuts_primary_update_url: str = "http://i.rcuts.com/update/249"
+    rcuts_fallback_api_url: str = "http://api.rcuts.com/Video/DouYin.php"
+    rcuts_fallback_update_url: str = "http://i.rcuts.com/update/247"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

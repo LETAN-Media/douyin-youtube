@@ -13,7 +13,9 @@ from app.config import settings
 
 logger = logging.getLogger("douyin-downloader")
 
-RCUTS_API = "http://api.rcuts.com/Video/DouYin.php"
+RCUTS_API = settings.rcuts_api_url
+RCUTS_PRIMARY_API = settings.rcuts_primary_api_url
+RCUTS_FALLBACK_API = settings.rcuts_fallback_api_url
 
 USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
@@ -76,54 +78,69 @@ def call_rcuts_parser(source_url: str) -> dict:
     payload = urlencode(
         {
             "url": source_url,
-            "token": "",
+            "token": settings.rcuts_token,
             "clipboard": source_url,
         }
     ).encode("utf-8")
 
-    request = Request(
-        RCUTS_API,
-        data=payload,
-        method="POST",
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json,text/plain,*/*",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
+    errors = []
+
+    for label, api_url in (
+        ("primary", RCUTS_PRIMARY_API or RCUTS_API),
+        ("fallback", RCUTS_FALLBACK_API or RCUTS_API),
+    ):
+        request = Request(
+            api_url,
+            data=payload,
+            method="POST",
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json,text/plain,*/*",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+
+        try:
+            with urlopen(request, timeout=30) as response:
+                raw = response.read()
+        except HTTPError as exc:
+            body = exc.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+
+            errors.append(
+                f"Rcuts {label} API HTTP {exc.code}: {body[:500]}"
+            )
+            continue
+
+        except URLError as exc:
+            errors.append(
+                f"Rcuts {label} API connection error: {exc}"
+            )
+            continue
+
+        try:
+            text = raw.decode("utf-8")
+            data = json.loads(text)
+        except Exception as exc:
+            errors.append(
+                f"Rcuts {label} API JSON decode error: {exc}"
+            )
+            continue
+
+        if not isinstance(data, dict):
+            errors.append(
+                f"Rcuts {label} API trả response không đúng định dạng"
+            )
+            continue
+
+        return data
+
+    raise RuntimeError(
+        "Rcuts API thất bại sau khi thử primary và fallback: "
+        + "; ".join(errors)
     )
-
-    try:
-        with urlopen(request, timeout=30) as response:
-            raw = response.read()
-    except HTTPError as exc:
-        body = exc.read().decode(
-            "utf-8",
-            errors="replace",
-        )
-
-        raise RuntimeError(
-            f"Rcuts API HTTP {exc.code}: {body[:500]}"
-        ) from exc
-
-    except URLError as exc:
-        raise RuntimeError(
-            f"Không kết nối được Rcuts API: {exc}"
-        ) from exc
-
-    try:
-        text = raw.decode("utf-8")
-        data = json.loads(text)
-    except Exception as exc:
-        raise RuntimeError(
-            "Rcuts API không trả JSON hợp lệ"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise RuntimeError(
-            "Rcuts API trả response không đúng định dạng"
-        )
-
-    return data
 
 
 def extract_video_url(data: dict) -> str:
