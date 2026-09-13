@@ -1,9 +1,9 @@
 import asyncio
-import json
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import yt_dlp
 from sqlalchemy import select
@@ -35,16 +35,10 @@ def extract_video_id_from_url(url: str | None) -> str | None:
     return None
 
 
-def fetch_latest_videos_from_source(source: DouyinSource) -> list[dict[str, Any]]:
-    if not source.profile_url and not source.douyin_sec_uid:
-        return []
-
-    profile_url = source.profile_url or ""
-    user_id = source.douyin_sec_uid or source.douyin_user_id or ""
-
-    if user_id and not profile_url:
-        profile_url = f"https://www.douyin.com/user/{user_id}"
-
+def fetch_latest_videos_from_source(
+    profile_url: str,
+    source_id: str,
+) -> list[dict[str, Any]]:
     if not profile_url:
         return []
 
@@ -108,7 +102,7 @@ def fetch_latest_videos_from_source(source: DouyinSource) -> list[dict[str, Any]
     except Exception as exc:
         logger.warning(
             "Failed to fetch videos from source=%s profile=%s: %s",
-            source.id,
+            source_id,
             profile_url,
             exc,
         )
@@ -116,74 +110,18 @@ def fetch_latest_videos_from_source(source: DouyinSource) -> list[dict[str, Any]
     return videos
 
 
-def already_processed(db: Session, source_id: str, video_id: str) -> bool:
-    existing = db.execute(
-        select(VideoJob)
-        .where(
-            VideoJob.pipeline_id == source_id,
-            VideoJob.source_video_id == video_id,
-        )
-        .limit(1)
-    ).scalar_one_or_none()
+def _build_source_context(profile_url: str, videos: list[dict[str, Any]]) -> str:
+    parts = [f"profile_url: {profile_url}"]
 
-    return existing is not None
+    for video in videos[:5]:
+        title = video.get("title", "")
+        desc = video.get("description", "")
+        if title:
+            parts.append(f"video_title: {title}")
+        if desc:
+            parts.append(f"video_description: {desc}")
 
-
-def process_source(source: DouyinSource) -> None:
-    if not source.enabled:
-        return
-
-    pipeline = source.pipeline
-    if pipeline is None:
-        logger.warning("Source %s has no pipeline", source.id)
-        return
-
-    if not pipeline.enabled:
-        logger.info("Pipeline %s is disabled, skipping source %s", pipeline.id, source.id)
-        return
-
-    logger.info("Checking source=%s pipeline=%s", source.id, pipeline.id)
-
-    videos = fetch_latest_videos_from_source(source)
-    if not videos:
-        logger.info("No videos found for source=%s", source.id)
-        return
-
-    new_count = 0
-
-    with SessionLocal.begin() as db:
-        for video in videos:
-            video_id = video["video_id"]
-
-            if already_processed(db, source.id, video_id):
-                continue
-
-            title = video.get("title") or ""
-            description = video.get("description") or video.get("url") or ""
-
-            job = VideoJob(
-                source_url=video.get("url") or source.profile_url or "",
-                source_title=title,
-                title=None,
-                description=description,
-                privacy_status=pipeline.default_privacy,
-                status="pending",
-                pipeline_id=pipeline.id,
-                source_video_id=video_id,
-            )
-
-            db.add(job)
-            new_count += 1
-
-        source.last_checked_at = utcnow()
-        if videos:
-            source.last_video_id = videos[0]["video_id"]
-
-    logger.info(
-        "Source %s produced %s new jobs",
-        source.id,
-        new_count,
-    )
+    return "\n".join(parts)[:6000]
 
 
 def run_monitor_once() -> None:
@@ -198,22 +136,114 @@ def run_monitor_once() -> None:
 
     for source in sources:
         try:
-            process_source(source)
+            if not source.enabled:
+                continue
+
+            pipeline_id = source.pipeline_id
+            profile_url = source.profile_url or ""
+            user_id = source.douyin_sec_uid or source.douyin_user_id or ""
+
+            if user_id and not profile_url:
+                profile_url = f"https://www.douyin.com/user/{user_id}"
+
+            if not profile_url:
+                logger.info("Source %s has no profile_url, skipping", source.id)
+                continue
+
+            pipeline = None
+            if pipeline_id:
+                with SessionLocal() as pipeline_db:
+                    pipeline = pipeline_db.get(Pipeline, pipeline_id)
+
+            if pipeline is None:
+                logger.warning("Source %s has no pipeline, skipping", source.id)
+                continue
+
+            if not pipeline.enabled:
+                logger.info("Pipeline %s is disabled, skipping source %s", pipeline.id, source.id)
+                continue
+
+            logger.info("Checking source=%s pipeline=%s profile=%s", source.id, pipeline.id, profile_url)
+
+            videos = fetch_latest_videos_from_source(profile_url, source.id)
+            if not videos:
+                logger.info("No videos found for source=%s", source.id)
+                continue
+
+            new_count = 0
+
+            with SessionLocal.begin() as db:
+                for video in videos:
+                    video_id = video["video_id"]
+
+                    existing = db.execute(
+                        select(VideoJob)
+                        .where(
+                            VideoJob.pipeline_id == pipeline.id,
+                            VideoJob.source_video_id == video_id,
+                        )
+                        .limit(1)
+                    ).scalar_one_or_none()
+
+                    if existing is not None:
+                        continue
+
+                    title = video.get("title") or ""
+                    description = video.get("description") or video.get("url") or ""
+
+                    job = VideoJob(
+                        source_url=video.get("url") or profile_url,
+                        source_title=title,
+                        title=None,
+                        description=description,
+                        privacy_status=pipeline.default_privacy,
+                        status="pending",
+                        pipeline_id=pipeline.id,
+                        source_video_id=video_id,
+                    )
+
+                    db.add(job)
+                    new_count += 1
+
+                db.execute(
+                    __import__("sqlalchemy")
+                    .update(DouyinSource)
+                    .where(DouyinSource.id == source.id)
+                    .values(
+                        last_checked_at=utcnow(),
+                        last_video_id=videos[0]["video_id"],
+                    )
+                )
+
+            logger.info(
+                "Source %s produced %s new jobs",
+                source.id,
+                new_count,
+            )
+
         except Exception:
             logger.exception("Failed to process source=%s", source.id)
 
 
 async def monitor_loop() -> None:
-    logger.info("Douyin source monitor started")
+    if not getattr(settings, "monitor_enabled", True):
+        logger.info("Douyin source monitor is disabled")
+        return
+
+    startup_delay = getattr(settings, "monitor_startup_delay_seconds", 10)
+    poll_interval = getattr(settings, "monitor_poll_seconds", 300)
+
+    logger.info("Douyin source monitor started, waiting %s seconds before first run", startup_delay)
+    await asyncio.sleep(startup_delay)
 
     while True:
         try:
-            run_monitor_once()
+            logger.info("Starting monitor cycle")
+            await asyncio.to_thread(run_monitor_once)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Monitor loop error")
 
-        await asyncio.sleep(
-            getattr(settings, "monitor_poll_seconds", 300)
-        )
+        logger.info("Monitor sleeping for %s seconds", poll_interval)
+        await asyncio.sleep(poll_interval)

@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     rcuts_fallback_update_url: str = "http://i.rcuts.com/update/247"
 
     # Monitor configuration
+    monitor_enabled: bool = True
     monitor_poll_seconds: int = 300
+    monitor_startup_delay_seconds: int = 10
 
     model_config = SettingsConfigDict(
         env_file=".env",

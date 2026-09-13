@@ -88,11 +88,15 @@ async def lifespan(
             )
         )
 
-    monitor_task = (
-        asyncio.create_task(
-            monitor_loop()
+    if getattr(settings, "monitor_enabled", True):
+        monitor_task = (
+            asyncio.create_task(
+                monitor_loop()
+            )
         )
-    )
+    else:
+        monitor_task = None
+        logger.info("Douyin monitor is disabled via MONITOR_ENABLED=false")
 
     yield
 
@@ -104,7 +108,7 @@ async def lifespan(
         except asyncio.CancelledError:
             pass
 
-    if monitor_task:
+    if monitor_task is not None:
         monitor_task.cancel()
 
         try:
@@ -140,6 +144,10 @@ def health() -> dict:
         ),
         "worker": (
             settings.worker_enabled
+        ),
+        "monitor": (
+            getattr(settings, "monitor_enabled", True)
+            and monitor_task is not None
         ),
     }
 
