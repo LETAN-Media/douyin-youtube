@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from urllib.parse import urlencode
 
 from fastapi import (
     Depends,
@@ -308,18 +307,7 @@ def youtube_callback(
         get_db
     ),
 ):
-    query = urlencode(
-        {
-            "state": state,
-            "code": code,
-        }
-    )
-
-    authorization_response = (
-        settings.youtube_callback_url
-        + "?"
-        + query
-    )
+    authorization_response = str(request.url)
 
     try:
         complete_oauth(
