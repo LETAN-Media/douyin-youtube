@@ -6,7 +6,94 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class PipelineBase(BaseModel):
+    name: str = Field(
+        max_length=200,
+    )
+    slug: str = Field(
+        max_length=100,
+    )
+    niche: str | None = Field(
+        default=None,
+        max_length=500,
+    )
+    language: str | None = Field(
+        default=None,
+        max_length=10,
+    )
+    fixed_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    adaptive_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    prompt_profile: str | None = Field(
+        default=None,
+    )
+    default_privacy: Literal[
+        "private",
+        "unlisted",
+        "public",
+    ] = "public"
+    enabled: bool = True
+
+
+class PipelineCreate(PipelineBase):
+    pass
+
+
+class PipelineUpdate(BaseModel):
+    name: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    slug: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+    niche: str | None = Field(
+        default=None,
+        max_length=500,
+    )
+    language: str | None = Field(
+        default=None,
+        max_length=10,
+    )
+    fixed_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    adaptive_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    prompt_profile: str | None = Field(
+        default=None,
+    )
+    default_privacy: Literal[
+        "private",
+        "unlisted",
+        "public",
+    ] | None = Field(
+        default=None,
+    )
+    enabled: bool | None = Field(
+        default=None,
+    )
+
+
+class PipelineOut(PipelineBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class JobCreate(BaseModel):
+    pipeline_id: str | None = Field(
+        default=None,
+        max_length=36,
+    )
+
     douyin_url: str | None = Field(
         default=None,
         max_length=2000,
@@ -89,6 +176,8 @@ class JobOut(BaseModel):
     youtube_url: str | None
 
     error: str | None
+
+    pipeline_id: str | None
 
     created_at: datetime
     updated_at: datetime

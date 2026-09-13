@@ -6,6 +6,8 @@ from pathlib import Path
 
 import httpx
 
+from app.models import Pipeline
+
 
 logger = logging.getLogger("ai-metadata")
 
@@ -83,6 +85,7 @@ def clean_hashtag(value: str) -> str:
 
 def generate_youtube_metadata(
     context_text: str,
+    pipeline: Pipeline | None = None,
 ) -> tuple[str, str] | None:
     """
     Generate YouTube metadata using AI.
@@ -117,6 +120,31 @@ def generate_youtube_metadata(
         encoding="utf-8",
     )
 
+    pipeline_profile = ""
+    if pipeline is not None:
+        fixed_hashtags = pipeline.fixed_hashtags or []
+        adaptive_hashtags = pipeline.adaptive_hashtags or []
+
+        pipeline_profile = (
+            "\n\nPIPELINE PROFILE:\n"
+            f"Name: {pipeline.name}\n"
+            f"Niche: {pipeline.niche or ''}\n"
+            f"Language: {pipeline.language or 'en'}\n"
+            f"Fixed hashtags: {', '.join(fixed_hashtags)}\n"
+            f"Adaptive hashtags: {', '.join(adaptive_hashtags)}\n"
+            "\n"
+            "Use this pipeline profile to keep channel identity in the metadata.\n"
+            "You must include all fixed hashtags.\n"
+            "For the remaining slots, prefer adaptive hashtags supported by the content,\n"
+            "then add video-specific topic hashtags if needed."
+        )
+
+    user_content = (
+        "ORIGINAL DOUYIN CONTEXT/SHARE TEXT:\n\n"
+        + context_text
+        + pipeline_profile
+    )
+
     payload = {
         "model": model,
         "messages": [
@@ -126,10 +154,7 @@ def generate_youtube_metadata(
             },
             {
                 "role": "user",
-                "content": (
-                    "ORIGINAL DOUYIN CONTEXT/SHARE TEXT:\n\n"
-                    + context_text
-                ),
+                "content": user_content,
             },
         ],
         "temperature": 0.5,

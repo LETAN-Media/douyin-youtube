@@ -11,7 +11,7 @@ from app.douyin import (
     cleanup_job_files,
     download_video,
 )
-from app.models import VideoJob
+from app.models import Pipeline, VideoJob
 from app.youtube import upload_video
 
 
@@ -290,12 +290,21 @@ def process_job(
                         + source_context
                     )
 
+                pipeline = None
+                if job.pipeline_id:
+                    with SessionLocal() as pipeline_db:
+                        pipeline = pipeline_db.get(
+                            Pipeline,
+                            job.pipeline_id,
+                        )
+
                 logger.info(
                     "Generating AI metadata for job %s using context",
                     job_id,
                 )
                 ai_result = generate_youtube_metadata(
-                    source_context
+                    source_context,
+                    pipeline=pipeline,
                 )
                 if not ai_result:
                     raise RuntimeError(
@@ -332,7 +341,8 @@ def process_job(
                     job_id,
                 )
                 ai_result = generate_youtube_metadata(
-                    source_context
+                    source_context,
+                    pipeline=pipeline,
                 )
                 if not ai_result:
                     raise RuntimeError(
@@ -356,7 +366,8 @@ def process_job(
                     job_id,
                 )
                 ai_result = generate_youtube_metadata(
-                    source_context
+                    source_context,
+                    pipeline=pipeline,
                 )
                 if not ai_result:
                     raise RuntimeError(

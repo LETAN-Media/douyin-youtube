@@ -24,10 +24,14 @@ from app.db import (
     engine,
     get_db,
 )
-from app.models import VideoJob
+from app.migrate import run_migrations
+from app.models import Pipeline, VideoJob
 from app.schemas import (
     JobCreate,
     JobOut,
+    PipelineCreate,
+    PipelineOut,
+    PipelineUpdate,
 )
 from app.security import require_admin
 from app.worker import (
@@ -63,6 +67,8 @@ async def lifespan(
     Base.metadata.create_all(
         bind=engine
     )
+
+    run_migrations()
 
     recover_incomplete_jobs()
 
@@ -128,8 +134,37 @@ def create_job(
         get_db
     ),
 ) -> VideoJob:
-    # Preserve share_text in description as temporary context for the worker.
-    # The worker will replace it with AI-generated metadata after processing.
+    pipeline_id = payload.pipeline_id
+    if not pipeline_id:
+        pipeline = db.execute(
+            select(Pipeline)
+            .where(Pipeline.slug == "vibe-men-world")
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if not pipeline:
+            raise HTTPException(
+                status_code=400,
+                detail="Không tìm thấy default pipeline",
+            )
+
+        pipeline_id = pipeline.id
+
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Pipeline không tồn tại",
+        )
+
+    if not pipeline.enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Pipeline đang bị disabled",
+        )
+
+    privacy_status = payload.privacy_status or pipeline.default_privacy
+
     initial_description = payload.description
     if not initial_description and payload.share_text:
         initial_description = payload.share_text
@@ -140,10 +175,9 @@ def create_job(
         ),
         title=payload.title,
         description=initial_description,
-        privacy_status=(
-            payload.privacy_status
-        ),
+        privacy_status=privacy_status,
         status="pending",
+        pipeline_id=pipeline_id,
     )
 
     db.add(job)
@@ -250,6 +284,129 @@ def retry_job(
     db.refresh(job)
 
     return job
+
+
+@app.get(
+    "/api/pipelines",
+    response_model=list[PipelineOut],
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def list_pipelines(
+    db: Session = Depends(
+        get_db
+    ),
+) -> list[Pipeline]:
+    statement = (
+        select(Pipeline)
+        .order_by(Pipeline.created_at.asc())
+        .limit(100)
+    )
+
+    return list(
+        db.execute(statement)
+        .scalars()
+        .all()
+    )
+
+
+@app.post(
+    "/api/pipelines",
+    response_model=PipelineOut,
+    status_code=201,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def create_pipeline(
+    payload: PipelineCreate,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Pipeline:
+    pipeline = Pipeline(
+        name=payload.name,
+        slug=payload.slug,
+        niche=payload.niche,
+        language=payload.language,
+        fixed_hashtags=payload.fixed_hashtags,
+        adaptive_hashtags=payload.adaptive_hashtags,
+        prompt_profile=payload.prompt_profile,
+        default_privacy=payload.default_privacy,
+        enabled=payload.enabled,
+    )
+
+    db.add(pipeline)
+    db.commit()
+    db.refresh(pipeline)
+
+    return pipeline
+
+
+@app.get(
+    "/api/pipelines/{pipeline_id}",
+    response_model=PipelineOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def get_pipeline(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Pipeline:
+    pipeline = db.get(
+        Pipeline,
+        pipeline_id,
+    )
+
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    return pipeline
+
+
+@app.patch(
+    "/api/pipelines/{pipeline_id}",
+    response_model=PipelineOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def update_pipeline(
+    pipeline_id: str,
+    payload: PipelineUpdate,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Pipeline:
+    pipeline = db.get(
+        Pipeline,
+        pipeline_id,
+    )
+
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    update_data = payload.model_dump(
+        exclude_none=True,
+    )
+
+    for key, value in update_data.items():
+        setattr(pipeline, key, value)
+
+    db.commit()
+    db.refresh(pipeline)
+
+    return pipeline
 
 
 @app.get(
