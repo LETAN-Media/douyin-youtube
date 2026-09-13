@@ -25,8 +25,15 @@ from app.db import (
     get_db,
 )
 from app.migrate import run_migrations
-from app.models import Pipeline, VideoJob
+from app.models import (
+    DouyinSource,
+    Pipeline,
+    VideoJob,
+)
 from app.schemas import (
+    DouyinSourceCreate,
+    DouyinSourceOut,
+    DouyinSourceUpdate,
     JobCreate,
     JobOut,
     PipelineCreate,
@@ -407,6 +414,159 @@ def update_pipeline(
     db.refresh(pipeline)
 
     return pipeline
+
+
+@app.get(
+    "/api/pipelines/{pipeline_id}/sources",
+    response_model=list[DouyinSourceOut],
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def list_pipeline_sources(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> list[DouyinSource]:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    return list(
+        db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == pipeline_id)
+            .order_by(DouyinSource.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+@app.post(
+    "/api/pipelines/{pipeline_id}/sources",
+    response_model=DouyinSourceOut,
+    status_code=201,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def create_pipeline_source(
+    pipeline_id: str,
+    payload: DouyinSourceCreate,
+    db: Session = Depends(
+        get_db
+    ),
+) -> DouyinSource:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    source = DouyinSource(
+        pipeline_id=pipeline_id,
+        name=payload.name,
+        profile_url=payload.profile_url,
+        douyin_sec_uid=payload.douyin_sec_uid,
+        douyin_user_id=payload.douyin_user_id,
+        enabled=payload.enabled,
+    )
+
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    return source
+
+
+@app.get(
+    "/api/sources/{source_id}",
+    response_model=DouyinSourceOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def get_source(
+    source_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> DouyinSource:
+    source = db.get(DouyinSource, source_id)
+
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy source",
+        )
+
+    return source
+
+
+@app.patch(
+    "/api/sources/{source_id}",
+    response_model=DouyinSourceOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def update_source(
+    source_id: str,
+    payload: DouyinSourceUpdate,
+    db: Session = Depends(
+        get_db
+    ),
+) -> DouyinSource:
+    source = db.get(DouyinSource, source_id)
+
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy source",
+        )
+
+    update_data = payload.model_dump(
+        exclude_none=True,
+    )
+
+    for key, value in update_data.items():
+        setattr(source, key, value)
+
+    db.commit()
+    db.refresh(source)
+
+    return source
+
+
+@app.delete(
+    "/api/sources/{source_id}",
+    status_code=204,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def delete_source(
+    source_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> None:
+    source = db.get(DouyinSource, source_id)
+
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy source",
+        )
+
+    db.delete(source)
+    db.commit()
 
 
 @app.get(

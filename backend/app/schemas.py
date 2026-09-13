@@ -88,6 +88,72 @@ class PipelineOut(PipelineBase):
     updated_at: datetime
 
 
+class DouyinSourceBase(BaseModel):
+    name: str = Field(
+        max_length=200,
+    )
+    profile_url: str | None = Field(
+        default=None,
+        max_length=2000,
+    )
+    douyin_sec_uid: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    douyin_user_id: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    enabled: bool = True
+
+
+class DouyinSourceCreate(DouyinSourceBase):
+    pipeline_id: str | None = Field(
+        default=None,
+        max_length=36,
+    )
+
+
+class DouyinSourceUpdate(BaseModel):
+    name: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    profile_url: str | None = Field(
+        default=None,
+        max_length=2000,
+    )
+    douyin_sec_uid: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    douyin_user_id: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    enabled: bool | None = Field(
+        default=None,
+    )
+    last_video_id: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    last_checked_at: datetime | None = Field(
+        default=None,
+    )
+
+
+class DouyinSourceOut(DouyinSourceBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    pipeline_id: str | None
+    last_video_id: str | None
+    last_checked_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class JobCreate(BaseModel):
     pipeline_id: str | None = Field(
         default=None,

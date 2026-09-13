@@ -5,12 +5,17 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     DateTime,
+    ForeignKey,
     Integer,
     JSON,
     String,
     Text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import (
+    Mapped,
+    mapped_column,
+    relationship,
+)
 
 from app.db import Base
 
@@ -110,6 +115,80 @@ class Pipeline(Base):
         nullable=True,
     )
 
+    sources: Mapped[list["DouyinSource"]] = relationship(
+        back_populates="pipeline",
+        lazy="selectin",
+    )
+
+
+class DouyinSource(Base):
+    __tablename__ = "douyin_sources"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    pipeline_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("pipelines.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    pipeline: Mapped["Pipeline | None"] = relationship(
+        back_populates="sources",
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    profile_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    douyin_sec_uid: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    douyin_user_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    last_video_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
 
 class VideoJob(Base):
     __tablename__ = "video_jobs"
@@ -182,6 +261,7 @@ class VideoJob(Base):
 
     pipeline_id: Mapped[str | None] = mapped_column(
         String(36),
+        ForeignKey("pipelines.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -230,6 +310,7 @@ class OAuthState(Base):
 
     pipeline_id: Mapped[str | None] = mapped_column(
         String(36),
+        ForeignKey("pipelines.id", ondelete="SET NULL"),
         nullable=True,
     )
 

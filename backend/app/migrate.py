@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import engine
-from app.models import Base, Pipeline
+from app.models import Base, DouyinSource, Pipeline
 
 logger = logging.getLogger("douyin-youtube-migrate")
 
@@ -49,6 +49,13 @@ def run_migrations() -> None:
 
         if not table_exists(connection, "pipelines"):
             logger.info("Pipelines table already exists via metadata")
+
+        if not table_exists(connection, "douyin_sources"):
+            logger.info("Creating douyin_sources table")
+            Base.metadata.create_all(
+                bind=connection,
+                tables=[DouyinSource.__table__],
+            )
 
         if not column_exists(connection, "video_jobs", "pipeline_id"):
             logger.info("Adding pipeline_id to video_jobs")
