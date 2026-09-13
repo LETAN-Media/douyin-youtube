@@ -63,6 +63,8 @@ logging.basicConfig(
     ),
 )
 
+logger = logging.getLogger("douyin-youtube-api")
+
 worker_task: asyncio.Task | None = None
 monitor_task: asyncio.Task | None = None
 
