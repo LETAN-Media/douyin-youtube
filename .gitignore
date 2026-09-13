@@ -8,3 +8,9 @@ __pycache__/
 .vercel/
 node_modules/
 .DS_Store
+backend/.env
+.env
+*.env
+.venv/
+__pycache__/
+*.pyc
