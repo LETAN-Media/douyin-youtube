@@ -60,6 +60,38 @@ def validate_hashtags(text: str) -> bool:
             return False
         if "tiktok" in tag_lower:
             return False
+
+    channel_identity_required = {
+        tag.lower()
+        for tag in ("#handsomeboy", "#maleaesthetic")
+    }
+    channel_identity_present = {
+        tag.lower()
+        for tag in tags
+    } & channel_identity_required
+
+    if channel_identity_required != channel_identity_present:
+        return False
+
+    channel_niche_tags = {
+        "#handsomeboy",
+        "#maleaesthetic",
+        "#fitboy",
+        "#muscle",
+        "#gymboy",
+        "#sixpack",
+        "#broadshoulders",
+        "#mensfashion",
+        "#mensstyle",
+    }
+    channel_niche_count = sum(
+        1
+        for tag in tags
+        if tag.lower() in channel_niche_tags
+    )
+    if channel_niche_count < 3:
+        return False
+
     return True
 
 
