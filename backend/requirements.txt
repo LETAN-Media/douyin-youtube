@@ -1,0 +1,11 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+SQLAlchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+pydantic>=2.9,<3
+pydantic-settings>=2.5,<3
+yt-dlp
+google-api-python-client>=2.140,<3
+google-auth>=2.35,<3
+google-auth-oauthlib>=1.2,<2
+python-multipart>=0.0.9,<1

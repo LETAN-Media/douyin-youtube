@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: douyin-youtube-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
