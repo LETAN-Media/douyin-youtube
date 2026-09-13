@@ -128,14 +128,17 @@ def create_job(
         get_db
     ),
 ) -> VideoJob:
+    # Use share_text as initial description so worker can read it as context
+    initial_description = payload.description
+    if not initial_description and payload.share_text:
+        initial_description = payload.share_text
+
     job = VideoJob(
         source_url=(
             payload.douyin_url
         ),
         title=payload.title,
-        description=(
-            payload.description
-        ),
+        description=initial_description,
         privacy_status=(
             payload.privacy_status
         ),

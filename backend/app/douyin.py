@@ -26,6 +26,7 @@ USER_AGENT = (
 class DownloadResult:
     file_path: Path
     title: str
+    source_context: str = ""
 
 
 def ensure_temp_dir() -> Path:
@@ -159,7 +160,7 @@ def extract_title(data: dict) -> str:
     )
 
     if not title:
-        return "Douyin video"
+        return ""
 
     return title[:100]
 
@@ -236,6 +237,101 @@ def download_http_video(
     return output
 
 
+
+def build_source_context(
+    data: dict,
+) -> str:
+    """Build rich source context for AI from Rcuts metadata."""
+
+    interesting_keys = {
+        "title",
+        "desc",
+        "description",
+        "caption",
+        "content",
+        "text",
+        "author",
+        "nickname",
+        "hashtags",
+        "hashtag",
+        "tags",
+        "tag_list",
+        "text_extra",
+        "challenge",
+        "challenges",
+    }
+
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    def walk(value, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                walk(
+                    child_value,
+                    str(child_key),
+                )
+            return
+
+        if isinstance(value, list):
+            for item in value:
+                walk(item, key)
+            return
+
+        if not isinstance(
+            value,
+            (str, int, float),
+        ):
+            return
+
+        text = str(value).strip()
+
+        if not text:
+            return
+
+        key_lower = key.lower()
+
+        useful = (
+            key_lower in interesting_keys
+            or "title" in key_lower
+            or "desc" in key_lower
+            or "tag" in key_lower
+            or "author" in key_lower
+            or "caption" in key_lower
+        )
+
+        if not useful:
+            return
+
+        fingerprint = (
+            key_lower
+            + ":"
+            + text
+        )
+
+        if fingerprint in seen:
+            return
+
+        seen.add(fingerprint)
+
+        lines.append(
+            f"{key}: {text}"
+        )
+
+    walk(data)
+
+    if not lines:
+        try:
+            return json.dumps(
+                data,
+                ensure_ascii=False,
+            )[:6000]
+        except Exception:
+            return ""
+
+    return "\n".join(lines)[:6000]
+
+
 def download_with_rcuts(
     source_url: str,
     job_id: str,
@@ -268,9 +364,14 @@ def download_with_rcuts(
         file_path.stat().st_size,
     )
 
+    source_context = build_source_context(
+        data
+    )
+
     return DownloadResult(
         file_path=file_path,
         title=title,
+        source_context=source_context,
     )
 
 
@@ -349,12 +450,43 @@ def download_with_ytdlp(
     title = str(
         (info or {}).get("title")
         or (info or {}).get("description")
-        or "Douyin video"
+        or ""
     ).strip()
+
+    tags = (
+        (info or {}).get("tags")
+        or []
+    )
+
+    description = str(
+        (info or {}).get("description")
+        or ""
+    ).strip()
+
+    context_parts = [
+        f"title: {title}",
+    ]
+
+    if description:
+        context_parts.append(
+            f"description: {description}"
+        )
+
+    if tags:
+        context_parts.append(
+            "hashtags/tags: "
+            + " ".join(
+                str(tag)
+                for tag in tags
+            )
+        )
 
     return DownloadResult(
         file_path=file_path,
         title=title[:100],
+        source_context="\n".join(
+            context_parts
+        )[:6000],
     )
 
 

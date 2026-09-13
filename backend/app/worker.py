@@ -4,6 +4,7 @@ import logging
 from sqlalchemy import select, update
 
 from app.config import settings
+from app.ai_metadata import generate_youtube_metadata
 from app.db import SessionLocal
 from app.douyin import (
     cleanup_job_files,
@@ -135,29 +136,64 @@ def process_job(
 
             job.status = "uploading"
             job.progress = 55
-
-        with SessionLocal() as db:
+            
+        with SessionLocal.begin() as db:
             job = db.get(
                 VideoJob,
                 job_id,
             )
-
+            
             if job is None:
                 return
 
-            title = (
-                job.title
-                or download.title
-                or "Douyin video"
+            fallback_title = (
+                download.title
+                or job.source_title
+                or ""
             )
 
-            description = (
-                job.description
-                or (
-                    "Source: "
-                    + job.source_url
-                )
+            source_context = (
+                download.source_context.strip()
+                or fallback_title
             )
+            
+            title = job.title
+            description = job.description
+            
+            if description and not title:
+                # Use description as share_text context
+                source_context = description + "\n\n" + source_context
+            
+            if not title or not description:
+                logger.info("Generating AI metadata for job %s using context", job_id)
+                ai_result = generate_youtube_metadata(source_context)
+                if not ai_result:
+                    raise RuntimeError("AI metadata generation failed")
+                
+                ai_title, ai_desc = ai_result
+                if not title:
+                    title = ai_title
+                if not description:
+                    description = ai_desc
+                
+                # Save to database so GET /api/jobs sees the real title
+                job.title = title
+                job.description = description
+
+            title = title.strip()
+
+            invalid_titles = {
+                "",
+                "douyin video",
+                "short video",
+                "video",
+                "untitled"
+            }
+
+            if title.lower() in invalid_titles:
+                raise RuntimeError(
+                    "AI metadata/title generation failed; upload blocked"
+                )
 
             video_id = upload_video(
                 db=db,

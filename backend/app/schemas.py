@@ -1,14 +1,20 @@
 from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
+import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class JobCreate(BaseModel):
-    douyin_url: str = Field(
-        min_length=10,
+    douyin_url: str | None = Field(
+        default=None,
         max_length=2000,
+    )
+
+    share_text: str | None = Field(
+        default=None,
+        max_length=10000,
     )
 
     title: str | None = Field(
@@ -25,19 +31,30 @@ class JobCreate(BaseModel):
         "private",
         "unlisted",
         "public",
-    ] = "private"
+    ] = "public"
 
-    @field_validator("douyin_url")
+    @model_validator(mode="before")
     @classmethod
-    def validate_douyin_url(cls, value: str) -> str:
-        value = value.strip()
-        parsed = urlparse(value)
+    def validate_inputs(cls, data: dict) -> dict:
+        douyin_url = data.get("douyin_url")
+        share_text = data.get("share_text")
+
+        if not douyin_url and share_text:
+            match = re.search(r'https?://v\.douyin\.com/[a-zA-Z0-9]+/?', share_text)
+            if match:
+                douyin_url = match.group(0)
+                data["douyin_url"] = douyin_url
+
+        if not douyin_url:
+            raise ValueError("Thiếu douyin_url hoặc share_text không chứa URL hợp lệ.")
+            
+        douyin_url = douyin_url.strip()
+        parsed = urlparse(douyin_url)
 
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("URL phải dùng http hoặc https")
 
         hostname = (parsed.hostname or "").lower()
-
         allowed = (
             hostname == "douyin.com"
             or hostname.endswith(".douyin.com")
@@ -48,7 +65,8 @@ class JobCreate(BaseModel):
         if not allowed:
             raise ValueError("Chỉ chấp nhận URL Douyin")
 
-        return value
+        data["douyin_url"] = douyin_url
+        return data
 
 
 class JobOut(BaseModel):

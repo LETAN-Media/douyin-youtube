@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     # Optional Netscape cookies.txt encoded with base64.
     douyin_cookies_b64: str = ""
 
+    # Optional AI metadata generator
+    ai_enabled: bool = True
+    ai_base_url: str = "https://api.toolnet.tech/v1"
+    ai_api_key: str = ""
+    ai_model: str = "alims-intl.llm"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
