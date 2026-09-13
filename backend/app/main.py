@@ -15,7 +15,7 @@ from fastapi.middleware.cors import (
 from fastapi.responses import (
     HTMLResponse,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -142,6 +142,325 @@ def health() -> dict:
             settings.worker_enabled
         ),
     }
+
+
+@app.get(
+    "/api/dashboard",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def dashboard_stats(
+    db: Session = Depends(
+        get_db
+    ),
+) -> dict:
+    pipelines = db.execute(
+        select(Pipeline).order_by(Pipeline.created_at.asc())
+    ).scalars().all()
+
+    pipeline_ids = [p.id for p in pipelines]
+
+    stats: dict[str, dict[str, Any]] = {}
+
+    if pipeline_ids:
+        job_stats = db.execute(
+            select(
+                VideoJob.pipeline_id,
+                func.count(VideoJob.id).label("total"),
+                func.sum(
+                    __import__("sqlalchemy")
+                    .case(
+                        (VideoJob.status == "published", 1),
+                        else_=0,
+                    )
+                ).label("published"),
+                func.sum(
+                    __import__("sqlalchemy")
+                    .case(
+                        (VideoJob.status == "pending", 1),
+                        else_=0,
+                    )
+                ).label("pending"),
+            )
+            .where(VideoJob.pipeline_id.in_(pipeline_ids))
+            .group_by(VideoJob.pipeline_id)
+        ).all()
+
+        for row in job_stats:
+            stats[str(row.pipeline_id)] = {
+                "total": int(row.total or 0),
+                "published": int(row.published or 0),
+                "pending": int(row.pending or 0),
+            }
+
+    source_counts: dict[str, int] = {}
+    if pipeline_ids:
+        source_rows = db.execute(
+            select(
+                DouyinSource.pipeline_id,
+                func.count(DouyinSource.id).label("count"),
+            )
+            .where(DouyinSource.pipeline_id.in_(pipeline_ids))
+            .group_by(DouyinSource.pipeline_id)
+        ).all()
+
+        for row in source_rows:
+            source_counts[str(row.pipeline_id)] = int(row.count or 0)
+
+    result = []
+
+    for pipeline in pipelines:
+        pipeline_id = str(pipeline.id)
+        job_stat = stats.get(pipeline_id, {"total": 0, "published": 0, "pending": 0})
+
+        result.append({
+            "id": pipeline_id,
+            "name": pipeline.name,
+            "slug": pipeline.slug,
+            "enabled": pipeline.enabled,
+            "youtube_connected": pipeline.youtube_connected,
+            "youtube_channel_title": pipeline.youtube_channel_title,
+            "sources_count": source_counts.get(pipeline_id, 0),
+            "jobs_total": job_stat["total"],
+            "jobs_published": job_stat["published"],
+            "jobs_pending": job_stat["pending"],
+            "default_privacy": pipeline.default_privacy,
+        })
+
+    return {
+        "pipelines": result,
+    }
+
+
+@app.get("/", include_in_schema=False)
+def dashboard_page() -> HTMLResponse:
+    return HTMLResponse(
+        """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Douyin YouTube Dashboard</title>
+          <style>
+            * { box-sizing: border-box; }
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+              background: #f5f5f5;
+              margin: 0;
+              padding: 20px;
+            }
+            .container {
+              max-width: 1200px;
+              margin: 0 auto;
+            }
+            h1 {
+              color: #333;
+              margin-bottom: 30px;
+            }
+            .grid {
+              display: grid;
+              grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+              gap: 20px;
+            }
+            .card {
+              background: white;
+              border-radius: 12px;
+              padding: 24px;
+              box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+              transition: transform 0.2s, box-shadow 0.2s;
+            }
+            .card:hover {
+              transform: translateY(-2px);
+              box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+            }
+            .card-header {
+              display: flex;
+              justify-content: space-between;
+              align-items: start;
+              margin-bottom: 16px;
+            }
+            .pipeline-name {
+              font-size: 18px;
+              font-weight: 600;
+              color: #111;
+              margin: 0;
+            }
+            .status-badge {
+              display: inline-block;
+              padding: 4px 12px;
+              border-radius: 20px;
+              font-size: 12px;
+              font-weight: 500;
+              text-transform: uppercase;
+            }
+            .status-active {
+              background: #d4f4dd;
+              color: #1e7e34;
+            }
+            .status-inactive {
+              background: #f8d7da;
+              color: #721c24;
+            }
+            .card-body {
+              space-y: 12px;
+            }
+            .stat-row {
+              display: flex;
+              justify-content: space-between;
+              padding: 8px 0;
+              border-bottom: 1px solid #f0f0f0;
+            }
+            .stat-row:last-child {
+              border-bottom: none;
+            }
+            .stat-label {
+              color: #666;
+              font-size: 14px;
+            }
+            .stat-value {
+              font-weight: 600;
+              color: #333;
+            }
+            .youtube-status {
+              display: flex;
+              align-items: center;
+              gap: 6px;
+            }
+            .dot {
+              width: 8px;
+              height: 8px;
+              border-radius: 50%;
+              display: inline-block;
+            }
+            .dot-connected {
+              background: #28a745;
+            }
+            .dot-disconnected {
+              background: #dc3545;
+            }
+            .create-card {
+              border: 2px dashed #ccc;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              min-height: 200px;
+              cursor: pointer;
+              transition: all 0.2s;
+            }
+            .create-card:hover {
+              border-color: #007bff;
+              background: #f8f9fa;
+            }
+            .create-text {
+              font-size: 16px;
+              color: #666;
+              font-weight: 500;
+            }
+            .loading {
+              text-align: center;
+              padding: 40px;
+              color: #666;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>Pipelines</h1>
+            <div id="app" class="loading">Loading...</div>
+          </div>
+
+          <script>
+            async function loadDashboard() {
+              try {
+                const response = await fetch('/api/dashboard');
+                const data = await response.json();
+
+                const app = document.getElementById('app');
+
+                if (!data.pipelines || data.pipelines.length === 0) {
+                  app.innerHTML = '<div class="loading">No pipelines found. Create one to get started.</div>';
+                  return;
+                }
+
+                let html = '<div class="grid">';
+
+                for (const pipeline of data.pipelines) {
+                  const statusClass = pipeline.enabled ? 'status-active' : 'status-inactive';
+                  const statusText = pipeline.enabled ? 'Active' : 'Inactive';
+                  const youtubeDot = pipeline.youtube_connected ? 'dot-connected' : 'dot-disconnected';
+                  const youtubeText = pipeline.youtube_connected ? 'Connected' : 'Not Connected';
+                  const youtubeTitle = pipeline.youtube_channel_title || 'Not Connected';
+
+                  html += `
+                    <div class="card">
+                      <div class="card-header">
+                        <h2 class="pipeline-name">${escapeHtml(pipeline.name)}</h2>
+                        <span class="status-badge ${statusClass}">${statusText}</span>
+                      </div>
+                      <div class="card-body">
+                        <div class="stat-row">
+                          <span class="stat-label">YouTube</span>
+                          <span class="stat-value youtube-status">
+                            <span class="dot ${youtubeDot}"></span>
+                            ${escapeHtml(youtubeTitle)}
+                          </span>
+                        </div>
+                        <div class="stat-row">
+                          <span class="stat-label">Douyin Sources</span>
+                          <span class="stat-value">${pipeline.sources_count}</span>
+                        </div>
+                        <div class="stat-row">
+                          <span class="stat-label">Published</span>
+                          <span class="stat-value">${pipeline.jobs_published}</span>
+                        </div>
+                        <div class="stat-row">
+                          <span class="stat-label">Pending</span>
+                          <span class="stat-value">${pipeline.jobs_pending}</span>
+                        </div>
+                        <div class="stat-row">
+                          <span class="stat-label">Total Jobs</span>
+                          <span class="stat-value">${pipeline.jobs_total}</span>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                }
+
+                html += `
+                  <div class="card create-card" onclick="alert('Create Pipeline API: POST /api/pipelines')">
+                    <div class="create-text">+ Create Pipeline</div>
+                  </div>
+                `;
+
+                html += '</div>';
+                app.innerHTML = html;
+
+              } catch (error) {
+                document.getElementById('app').innerHTML = `
+                  <div class="loading">
+                    Failed to load dashboard: ${error.message}
+                    <br><br>
+                    <a href="/health">Check Health</a>
+                  </div>
+                `;
+              }
+            }
+
+            function escapeHtml(text) {
+              const div = document.createElement('div');
+              div.textContent = text;
+              return div.innerHTML;
+            }
+
+            loadDashboard();
+            setInterval(loadDashboard, 30000);
+          </script>
+        </body>
+        </html>
+        """
+    )
 
 
 @app.post(
