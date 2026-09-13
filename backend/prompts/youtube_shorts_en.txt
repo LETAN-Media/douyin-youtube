@@ -141,20 +141,6 @@ Treat the fixed hashtags as mandatory when the content supports them.
 Treat the adaptive hashtags as preferred options when the content supports them.
 Do not invent unrelated channel hashtags outside this profile.
 
-Return ONLY JSON:
-
-{
-  "title": "...",
-  "description": "...",
-  "hashtags": [
-    "#tag1",
-    "#tag2",
-    "#tag3",
-    "#tag4",
-    "#tag5"
-  ]
-}
-
 DESCRIPTION:
 - English ONLY. No Chinese characters at all.
 - 1-2 short natural sentences.

@@ -395,6 +395,7 @@ def process_job(
                 privacy_status=(
                     job.privacy_status
                 ),
+                pipeline_id=job.pipeline_id,
             )
 
         with SessionLocal.begin() as db:

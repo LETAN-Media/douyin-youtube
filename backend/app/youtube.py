@@ -1,8 +1,10 @@
 import json
+import logging
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
@@ -13,7 +15,10 @@ from googleapiclient.http import MediaFileUpload
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import AppSetting, OAuthState
+from app.models import AppSetting, OAuthState, Pipeline
+
+
+logger = logging.getLogger("douyin-youtube-youtube")
 
 
 SCOPES = [
@@ -21,7 +26,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
 
-TOKEN_SETTING_KEY = "youtube_credentials"
+GLOBAL_TOKEN_SETTING_KEY = "youtube_credentials"
 
 
 def utcnow() -> datetime:
@@ -99,6 +104,7 @@ def read_setting(
 
 def create_oauth_url(
     db: Session,
+    pipeline_id: str | None = None,
 ) -> str:
     validate_google_config()
 
@@ -107,6 +113,7 @@ def create_oauth_url(
     db.add(
         OAuthState(
             state=state,
+            pipeline_id=pipeline_id,
             expires_at=(
                 utcnow()
                 + timedelta(minutes=15)
@@ -142,6 +149,7 @@ def complete_oauth(
     db: Session,
     state: str,
     authorization_response: str,
+    pipeline_id: str | None = None,
 ) -> None:
     state_row = db.get(
         OAuthState,
@@ -168,11 +176,13 @@ def complete_oauth(
             "OAuth state đã hết hạn"
         )
 
+    resolved_pipeline_id = pipeline_id or state_row.pipeline_id
+
     old_refresh_token = None
 
     existing = read_setting(
         db,
-        TOKEN_SETTING_KEY,
+        GLOBAL_TOKEN_SETTING_KEY,
     )
 
     if existing:
@@ -219,11 +229,31 @@ def complete_oauth(
         ),
     }
 
-    save_setting(
-        db,
-        TOKEN_SETTING_KEY,
-        json.dumps(data),
-    )
+    token_json = json.dumps(data)
+
+    if resolved_pipeline_id:
+        pipeline = db.get(Pipeline, resolved_pipeline_id)
+        if pipeline is None:
+            raise RuntimeError(
+                "Pipeline không tồn tại khi lưu OAuth"
+            )
+
+        pipeline.youtube_credentials = token_json
+        pipeline.youtube_connected = True
+        db.commit()
+        logger.info(
+            "Saved YouTube OAuth for pipeline=%s",
+            resolved_pipeline_id,
+        )
+    else:
+        save_setting(
+            db,
+            GLOBAL_TOKEN_SETTING_KEY,
+            token_json,
+        )
+        logger.info(
+            "Saved YouTube OAuth globally"
+        )
 
     state_row = db.get(
         OAuthState,
@@ -235,14 +265,9 @@ def complete_oauth(
         db.commit()
 
 
-def load_credentials(
-    db: Session,
+def _load_from_json(
+    raw: str | None,
 ) -> Credentials:
-    raw = read_setting(
-        db,
-        TOKEN_SETTING_KEY,
-    )
-
     if not raw:
         raise RuntimeError(
             "YouTube chưa được kết nối OAuth"
@@ -283,21 +308,41 @@ def load_credentials(
             credentials.token
         )
 
-        save_setting(
+    return credentials
+
+
+def load_credentials(
+    db: Session,
+    pipeline_id: str | None = None,
+) -> Credentials:
+    raw = None
+
+    if pipeline_id:
+        pipeline = db.get(Pipeline, pipeline_id)
+        if pipeline is not None and pipeline.youtube_credentials:
+            raw = pipeline.youtube_credentials
+
+    if not raw:
+        raw = read_setting(
             db,
-            TOKEN_SETTING_KEY,
-            json.dumps(data),
+            GLOBAL_TOKEN_SETTING_KEY,
         )
 
-    return credentials
+    return _load_from_json(raw)
 
 
 def youtube_connected(
     db: Session,
+    pipeline_id: str | None = None,
 ) -> bool:
+    if pipeline_id:
+        pipeline = db.get(Pipeline, pipeline_id)
+        if pipeline is not None:
+            return bool(pipeline.youtube_connected)
+
     raw = read_setting(
         db,
-        TOKEN_SETTING_KEY,
+        GLOBAL_TOKEN_SETTING_KEY,
     )
 
     if not raw:
@@ -319,6 +364,7 @@ def upload_video(
     title: str,
     description: str,
     privacy_status: str,
+    pipeline_id: str | None = None,
 ) -> str:
     if not file_path.exists():
         raise RuntimeError(
@@ -326,7 +372,8 @@ def upload_video(
         )
 
     credentials = load_credentials(
-        db
+        db,
+        pipeline_id=pipeline_id,
     )
 
     youtube = build(
@@ -416,7 +463,7 @@ def upload_video(
                 raise RuntimeError(
                     "YouTube upload thất bại "
                     "sau nhiều lần retry"
-                ) from exc
+                )
 
             time.sleep(
                 min(

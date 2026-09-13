@@ -89,6 +89,27 @@ class Pipeline(Base):
         nullable=False,
     )
 
+    youtube_credentials: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    youtube_connected: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    youtube_channel_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    youtube_channel_title: Mapped[str | None] = mapped_column(
+        String(300),
+        nullable=True,
+    )
+
 
 class VideoJob(Base):
     __tablename__ = "video_jobs"
@@ -205,6 +226,11 @@ class OAuthState(Base):
     state: Mapped[str] = mapped_column(
         String(255),
         primary_key=True,
+    )
+
+    pipeline_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
     )
 
     expires_at: Mapped[datetime] = mapped_column(

@@ -416,17 +416,21 @@ def update_pipeline(
     ],
 )
 def youtube_status(
+    pipeline_id: str | None = Query(
+        default=None,
+    ),
     db: Session = Depends(
         get_db
     ),
 ) -> dict:
     return {
         "connected": (
-            youtube_connected(db)
+            youtube_connected(db, pipeline_id=pipeline_id)
         ),
         "callback_url": (
             settings.youtube_callback_url
         ),
+        "pipeline_id": pipeline_id,
     }
 
 
@@ -437,13 +441,17 @@ def youtube_status(
     ],
 )
 def youtube_oauth_url(
+    pipeline_id: str | None = Query(
+        default=None,
+    ),
     db: Session = Depends(
         get_db
     ),
 ) -> dict:
     try:
         url = create_oauth_url(
-            db
+            db=db,
+            pipeline_id=pipeline_id,
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -464,6 +472,9 @@ def youtube_callback(
     request: Request,
     state: str = Query(...),
     code: str = Query(...),
+    pipeline_id: str | None = Query(
+        default=None,
+    ),
     db: Session = Depends(
         get_db
     ),
@@ -477,6 +488,7 @@ def youtube_callback(
             authorization_response=(
                 authorization_response
             ),
+            pipeline_id=pipeline_id,
         )
     except Exception as exc:
         return HTMLResponse(

@@ -59,6 +59,51 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "pipelines", "youtube_credentials"):
+            logger.info("Adding youtube_credentials to pipelines")
+            connection.execute(
+                text(
+                    "ALTER TABLE pipelines "
+                    "ADD COLUMN IF NOT EXISTS youtube_credentials TEXT"
+                )
+            )
+
+        if not column_exists(connection, "pipelines", "youtube_connected"):
+            logger.info("Adding youtube_connected to pipelines")
+            connection.execute(
+                text(
+                    "ALTER TABLE pipelines "
+                    "ADD COLUMN IF NOT EXISTS youtube_connected BOOLEAN DEFAULT FALSE"
+                )
+            )
+
+        if not column_exists(connection, "pipelines", "youtube_channel_id"):
+            logger.info("Adding youtube_channel_id to pipelines")
+            connection.execute(
+                text(
+                    "ALTER TABLE pipelines "
+                    "ADD COLUMN IF NOT EXISTS youtube_channel_id VARCHAR(200)"
+                )
+            )
+
+        if not column_exists(connection, "pipelines", "youtube_channel_title"):
+            logger.info("Adding youtube_channel_title to pipelines")
+            connection.execute(
+                text(
+                    "ALTER TABLE pipelines "
+                    "ADD COLUMN IF NOT EXISTS youtube_channel_title VARCHAR(300)"
+                )
+            )
+
+        if not column_exists(connection, "oauth_states", "pipeline_id"):
+            logger.info("Adding pipeline_id to oauth_states")
+            connection.execute(
+                text(
+                    "ALTER TABLE oauth_states "
+                    "ADD COLUMN IF NOT EXISTS pipeline_id VARCHAR(36)"
+                )
+            )
+
         default_pipeline_id = ensure_default_pipeline(connection)
 
         if default_pipeline_id is not None:
