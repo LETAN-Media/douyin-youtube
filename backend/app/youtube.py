@@ -120,6 +120,7 @@ def create_oauth_url(
         client_config(),
         scopes=SCOPES,
         state=state,
+        autogenerate_code_verifier=False,
     )
 
     flow.redirect_uri = (
@@ -187,6 +188,7 @@ def complete_oauth(
         client_config(),
         scopes=SCOPES,
         state=state,
+        autogenerate_code_verifier=False,
     )
 
     flow.redirect_uri = (
