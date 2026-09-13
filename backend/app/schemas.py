@@ -245,5 +245,7 @@ class JobOut(BaseModel):
 
     pipeline_id: str | None
 
+    source_video_id: str | None
+
     created_at: datetime
     updated_at: datetime

@@ -111,6 +111,15 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "video_jobs", "source_video_id"):
+            logger.info("Adding source_video_id to video_jobs")
+            connection.execute(
+                text(
+                    "ALTER TABLE video_jobs "
+                    "ADD COLUMN IF NOT EXISTS source_video_id VARCHAR(200)"
+                )
+            )
+
         default_pipeline_id = ensure_default_pipeline(connection)
 
         if default_pipeline_id is not None:

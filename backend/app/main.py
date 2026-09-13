@@ -50,6 +50,7 @@ from app.youtube import (
     create_oauth_url,
     youtube_connected,
 )
+from app.monitor import monitor_loop
 
 
 logging.basicConfig(
@@ -63,13 +64,14 @@ logging.basicConfig(
 )
 
 worker_task: asyncio.Task | None = None
+monitor_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
 ):
-    global worker_task
+    global worker_task, monitor_task
 
     Base.metadata.create_all(
         bind=engine
@@ -86,6 +88,12 @@ async def lifespan(
             )
         )
 
+    monitor_task = (
+        asyncio.create_task(
+            monitor_loop()
+        )
+    )
+
     yield
 
     if worker_task:
@@ -93,6 +101,14 @@ async def lifespan(
 
         try:
             await worker_task
+        except asyncio.CancelledError:
+            pass
+
+    if monitor_task:
+        monitor_task.cancel()
+
+        try:
+            await monitor_task
         except asyncio.CancelledError:
             pass
 
