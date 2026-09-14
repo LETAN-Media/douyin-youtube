@@ -292,5 +292,134 @@ class JobOut(BaseModel):
 
     source_video_id: str | None
 
+    destination_id: str | None
+
+    created_at: datetime
+    updated_at: datetime
+
+
+class DestinationBase(BaseModel):
+    pipeline_id: str = Field(
+        max_length=36,
+    )
+    platform: Literal["youtube", "facebook"] = "youtube"
+    name: str = Field(
+        max_length=200,
+    )
+    external_account_id: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    external_account_name: str | None = Field(
+        default=None,
+        max_length=300,
+    )
+    enabled: bool = True
+    daily_upload_limit: int = 6
+    timezone: str = "UTC"
+    upload_slots: list[str] | None = Field(
+        default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+    )
+    publish_strategy: Literal["broadcast", "rotate", "selected"] = "broadcast"
+    metadata_language: str | None = Field(
+        default=None,
+        max_length=10,
+    )
+    metadata_profile: str | None = Field(
+        default=None,
+    )
+    fixed_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    adaptive_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    prompt_override: str | None = Field(
+        default=None,
+    )
+
+
+class DestinationCreate(DestinationBase):
+    pass
+
+
+class DestinationUpdate(BaseModel):
+    platform: Literal["youtube", "facebook"] | None = Field(
+        default=None,
+    )
+    name: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    external_account_id: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    external_account_name: str | None = Field(
+        default=None,
+        max_length=300,
+    )
+    enabled: bool | None = Field(
+        default=None,
+    )
+    daily_upload_limit: int | None = Field(
+        default=None,
+        ge=1,
+    )
+    timezone: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+    upload_slots: list[str] | None = Field(
+        default=None,
+    )
+    publish_strategy: Literal["broadcast", "rotate", "selected"] | None = Field(
+        default=None,
+    )
+    metadata_language: str | None = Field(
+        default=None,
+        max_length=10,
+    )
+    metadata_profile: str | None = Field(
+        default=None,
+    )
+    fixed_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    adaptive_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    prompt_override: str | None = Field(
+        default=None,
+    )
+
+
+class DestinationOut(DestinationBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    connected: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class PublicationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    pipeline_id: str
+    douyin_video_id: str
+    destination_id: str
+    platform: str
+    status: str
+    scheduled_at: datetime | None
+    started_at: datetime | None
+    published_at: datetime | None
+    external_post_id: str | None
+    external_url: str | None
+    title: str | None
+    description: str | None
+    attempts: int
+    error: str | None
     created_at: datetime
     updated_at: datetime

@@ -15,7 +15,7 @@ from googleapiclient.http import MediaFileUpload
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import AppSetting, OAuthState, Pipeline
+from app.models import AppSetting, Destination, OAuthState, Pipeline
 
 
 logger = logging.getLogger("douyin-youtube-youtube")
@@ -105,15 +105,30 @@ def read_setting(
 def create_oauth_url(
     db: Session,
     pipeline_id: str | None = None,
+    destination_id: str | None = None,
 ) -> str:
     validate_google_config()
 
     state = secrets.token_urlsafe(48)
 
+    resolved_destination_id = destination_id
+
+    if not resolved_destination_id and pipeline_id:
+        destination = db.execute(
+            select(Destination)
+            .where(Destination.pipeline_id == pipeline_id)
+            .where(Destination.platform == "youtube")
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if destination:
+            resolved_destination_id = destination.id
+
     db.add(
         OAuthState(
             state=state,
             pipeline_id=pipeline_id,
+            destination_id=resolved_destination_id,
             expires_at=(
                 utcnow()
                 + timedelta(minutes=15)
@@ -150,6 +165,7 @@ def complete_oauth(
     state: str,
     authorization_response: str,
     pipeline_id: str | None = None,
+    destination_id: str | None = None,
 ) -> None:
     state_row = db.get(
         OAuthState,
@@ -176,13 +192,34 @@ def complete_oauth(
             "OAuth state đã hết hạn"
         )
 
-    resolved_pipeline_id = pipeline_id or state_row.pipeline_id
+    resolved_destination_id = (
+        destination_id or state_row.destination_id
+    )
+    resolved_pipeline_id = (
+        pipeline_id or state_row.pipeline_id
+    )
 
     old_refresh_token = None
-    pipeline = None
+    destination = None
 
-    if resolved_pipeline_id:
-        pipeline = db.get(Pipeline, resolved_pipeline_id)
+    if resolved_destination_id:
+        destination = db.get(
+            Destination,
+            resolved_destination_id,
+        )
+        if destination is not None and destination.credentials:
+            try:
+                old_refresh_token = (
+                    json.loads(destination.credentials)
+                    .get("refresh_token")
+                )
+            except Exception:
+                old_refresh_token = None
+    elif resolved_pipeline_id:
+        pipeline = db.get(
+            Pipeline,
+            resolved_pipeline_id,
+        )
         if pipeline is not None and pipeline.youtube_credentials:
             try:
                 old_refresh_token = (
@@ -271,9 +308,32 @@ def complete_oauth(
     channel_id = channel["id"]
     channel_title = channel["snippet"]["title"]
 
-    if resolved_pipeline_id:
+    if resolved_destination_id:
+        if destination is None:
+            destination = db.get(
+                Destination,
+                resolved_destination_id,
+            )
+            if destination is None:
+                raise RuntimeError(
+                    "Destination không tồn tại khi lưu OAuth"
+                )
+
+        destination.credentials = token_json
+        destination.external_account_id = channel_id
+        destination.external_account_name = channel_title
+        destination.connected = True
+        db.commit()
+        logger.info(
+            "Saved YouTube OAuth for destination=%s",
+            resolved_destination_id,
+        )
+    elif resolved_pipeline_id:
         if pipeline is None:
-            pipeline = db.get(Pipeline, resolved_pipeline_id)
+            pipeline = db.get(
+                Pipeline,
+                resolved_pipeline_id,
+            )
             if pipeline is None:
                 raise RuntimeError(
                     "Pipeline không tồn tại khi lưu OAuth"
@@ -357,10 +417,16 @@ def _load_from_json(
 def load_credentials(
     db: Session,
     pipeline_id: str | None = None,
+    destination_id: str | None = None,
 ) -> Credentials:
     raw = None
 
-    if pipeline_id:
+    if destination_id:
+        destination = db.get(Destination, destination_id)
+        if destination is not None and destination.credentials:
+            raw = destination.credentials
+
+    if not raw and pipeline_id:
         pipeline = db.get(Pipeline, pipeline_id)
         if pipeline is not None and pipeline.youtube_credentials:
             raw = pipeline.youtube_credentials
@@ -404,7 +470,23 @@ def youtube_connected(
 def get_youtube_status(
     db: Session,
     pipeline_id: str | None = None,
+    destination_id: str | None = None,
 ) -> dict:
+    if destination_id:
+        destination = db.get(Destination, destination_id)
+        if destination is not None:
+            return {
+                "connected": destination.connected,
+                "destination_id": destination.id,
+                "pipeline_id": destination.pipeline_id,
+                "channel_id": destination.external_account_id,
+                "channel_title": destination.external_account_name,
+            }
+        return {
+            "connected": False,
+            "destination_id": destination_id,
+        }
+
     connected = False
     channel_id = None
     channel_title = None
@@ -437,6 +519,7 @@ def upload_video(
     description: str,
     privacy_status: str,
     pipeline_id: str | None = None,
+    destination_id: str | None = None,
 ) -> str:
     if not file_path.exists():
         raise RuntimeError(
@@ -446,6 +529,7 @@ def upload_video(
     credentials = load_credentials(
         db,
         pipeline_id=pipeline_id,
+        destination_id=destination_id,
     )
 
     youtube = build(

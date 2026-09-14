@@ -1,6 +1,11 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
 
 from fastapi import (
     Depends,
@@ -26,12 +31,17 @@ from app.db import (
 )
 from app.migrate import run_migrations
 from app.models import (
+    Destination,
     DouyinSource,
     DouyinVideo,
     Pipeline,
+    Publication,
     VideoJob,
 )
 from app.schemas import (
+    DestinationCreate,
+    DestinationOut,
+    DestinationUpdate,
     DouyinSourceCreate,
     DouyinSourceOut,
     DouyinSourceUpdate,
@@ -40,6 +50,7 @@ from app.schemas import (
     PipelineCreate,
     PipelineOut,
     PipelineUpdate,
+    PublicationOut,
 )
 from app.security import require_admin
 from app.worker import (
@@ -1057,12 +1068,285 @@ def delete_source(
 
 
 @app.get(
+    "/api/pipelines/{pipeline_id}/destinations",
+    response_model=list[DestinationOut],
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def list_pipeline_destinations(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> list[Destination]:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    return list(
+        db.execute(
+            select(Destination)
+            .where(Destination.pipeline_id == pipeline_id)
+            .order_by(Destination.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+@app.post(
+    "/api/pipelines/{pipeline_id}/destinations",
+    response_model=DestinationOut,
+    status_code=201,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def create_pipeline_destination(
+    pipeline_id: str,
+    payload: DestinationCreate,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Destination:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    destination = Destination(
+        pipeline_id=pipeline_id,
+        platform=payload.platform,
+        name=payload.name,
+        external_account_id=payload.external_account_id,
+        external_account_name=payload.external_account_name,
+        enabled=payload.enabled,
+        daily_upload_limit=payload.daily_upload_limit,
+        timezone=payload.timezone,
+        upload_slots=payload.upload_slots,
+        publish_strategy=payload.publish_strategy,
+        metadata_language=payload.metadata_language,
+        metadata_profile=payload.metadata_profile,
+        fixed_hashtags=payload.fixed_hashtags,
+        adaptive_hashtags=payload.adaptive_hashtags,
+        prompt_override=payload.prompt_override,
+    )
+
+    db.add(destination)
+    db.commit()
+    db.refresh(destination)
+
+    return destination
+
+
+@app.get(
+    "/api/destinations/{destination_id}",
+    response_model=DestinationOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def get_destination(
+    destination_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Destination:
+    destination = db.get(Destination, destination_id)
+
+    if destination is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy destination",
+        )
+
+    return destination
+
+
+@app.patch(
+    "/api/destinations/{destination_id}",
+    response_model=DestinationOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def update_destination(
+    destination_id: str,
+    payload: DestinationUpdate,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Destination:
+    destination = db.get(Destination, destination_id)
+
+    if destination is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy destination",
+        )
+
+    update_data = payload.model_dump(
+        exclude_none=True,
+    )
+
+    for key, value in update_data.items():
+        setattr(destination, key, value)
+
+    db.commit()
+    db.refresh(destination)
+
+    return destination
+
+
+@app.delete(
+    "/api/destinations/{destination_id}",
+    status_code=204,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def delete_destination(
+    destination_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> None:
+    destination = db.get(Destination, destination_id)
+
+    if destination is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy destination",
+        )
+
+    db.delete(destination)
+    db.commit()
+
+
+@app.get(
+    "/api/publications",
+    response_model=list[PublicationOut],
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def list_publications(
+    pipeline_id: str | None = Query(
+        default=None,
+    ),
+    destination_id: str | None = Query(
+        default=None,
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+) -> list[Publication]:
+    query = select(Publication)
+
+    if pipeline_id:
+        query = query.where(Publication.pipeline_id == pipeline_id)
+
+    if destination_id:
+        query = query.where(Publication.destination_id == destination_id)
+
+    return list(
+        db.execute(
+            query.order_by(Publication.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+@app.get(
+    "/api/destinations/{destination_id}/status",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def destination_status(
+    destination_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> dict:
+    destination = db.get(Destination, destination_id)
+
+    if destination is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy destination",
+        )
+
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    today_published = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == destination_id)
+        .where(Publication.status == "published")
+        .where(Publication.published_at >= today_start)
+    ).scalar_one_or_none()
+    today_published = today_published or 0
+
+    next_upload = None
+    if destination.upload_slots:
+        slot_times = []
+        for slot_str in destination.upload_slots:
+            try:
+                hour, minute = map(int, slot_str.split(":"))
+                slot_time = datetime.combine(
+                    datetime.now().date(),
+                    datetime.min.time().replace(hour=hour, minute=minute),
+                )
+                if slot_time.tzinfo is None:
+                    slot_time = slot_time.replace(tzinfo=timezone.utc)
+                slot_times.append(slot_time)
+            except ValueError:
+                continue
+
+        future_slots = [s for s in slot_times if s >= datetime.now(timezone.utc)]
+        if future_slots:
+            next_upload = min(future_slots).isoformat()
+        elif slot_times:
+            tomorrow = datetime.now().date() + timedelta(days=1)
+            hour, minute = map(int, destination.upload_slots[0].split(":"))
+            slot_time = datetime.combine(
+                tomorrow,
+                datetime.min.time().replace(hour=hour, minute=minute),
+            )
+            if slot_time.tzinfo is None:
+                slot_time = slot_time.replace(tzinfo=timezone.utc)
+            next_upload = slot_time.isoformat()
+
+    return {
+        "connected": destination.connected,
+        "platform": destination.platform,
+        "name": destination.name,
+        "daily_upload_limit": destination.daily_upload_limit,
+        "today_published": today_published,
+        "next_upload": next_upload,
+        "enabled": destination.enabled,
+    }
+
+
+@app.get(
     "/api/youtube/status",
     dependencies=[
         Depends(require_admin)
     ],
 )
 def youtube_status(
+    destination_id: str | None = Query(
+        default=None,
+    ),
     pipeline_id: str | None = Query(
         default=None,
     ),
@@ -1070,6 +1354,23 @@ def youtube_status(
         get_db
     ),
 ) -> dict:
+    if destination_id:
+        destination = db.get(Destination, destination_id)
+        if destination is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Không tìm thấy destination",
+            )
+
+        return {
+            "connected": destination.connected,
+            "destination_id": destination.id,
+            "pipeline_id": destination.pipeline_id,
+            "platform": destination.platform,
+            "name": destination.name,
+            "callback_url": settings.youtube_callback_url,
+        }
+
     status = get_youtube_status(
         db,
         pipeline_id=pipeline_id,
@@ -1087,6 +1388,9 @@ def youtube_status(
     ],
 )
 def youtube_oauth_url(
+    destination_id: str | None = Query(
+        default=None,
+    ),
     pipeline_id: str | None = Query(
         default=None,
     ),
@@ -1094,10 +1398,24 @@ def youtube_oauth_url(
         get_db
     ),
 ) -> dict:
+    resolved_destination_id = destination_id
+
+    if not resolved_destination_id and pipeline_id:
+        destination = db.execute(
+            select(Destination)
+            .where(Destination.pipeline_id == pipeline_id)
+            .where(Destination.platform == "youtube")
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if destination:
+            resolved_destination_id = destination.id
+
     try:
         url = create_oauth_url(
             db=db,
             pipeline_id=pipeline_id,
+            destination_id=resolved_destination_id,
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -1106,7 +1424,8 @@ def youtube_oauth_url(
         ) from exc
 
     return {
-        "url": url
+        "url": url,
+        "destination_id": resolved_destination_id,
     }
 
 
@@ -1118,6 +1437,9 @@ def youtube_callback(
     request: Request,
     state: str = Query(...),
     code: str = Query(...),
+    destination_id: str | None = Query(
+        default=None,
+    ),
     pipeline_id: str | None = Query(
         default=None,
     ),
@@ -1135,6 +1457,7 @@ def youtube_callback(
                 authorization_response
             ),
             pipeline_id=pipeline_id,
+            destination_id=destination_id,
         )
     except Exception as exc:
         return HTMLResponse(

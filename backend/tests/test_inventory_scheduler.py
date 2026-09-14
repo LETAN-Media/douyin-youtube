@@ -13,7 +13,7 @@ from app.config import Settings
 from app.db import Base
 from app.douyin_url import parse_douyin_profile_url
 from app.inventory import fetch_all_videos_from_source, sync_source_inventory
-from app.models import DouyinSource, DouyinVideo, Pipeline
+from app.models import Destination, DouyinSource, DouyinVideo, Pipeline
 from app.scheduler import pick_video, schedule_for_pipeline
 
 
@@ -150,6 +150,22 @@ class TestScheduler(unittest.TestCase):
         self.db.flush()
         return pipeline
 
+    def _make_destination(self, pipeline, **kwargs):
+        destination = Destination(
+            id=str(uuid4()),
+            pipeline_id=pipeline.id,
+            platform="youtube",
+            name="YouTube",
+            enabled=True,
+            daily_upload_limit=pipeline.daily_upload_limit,
+            timezone=pipeline.timezone,
+            upload_slots=pipeline.upload_slots,
+            **kwargs,
+        )
+        self.db.add(destination)
+        self.db.flush()
+        return destination
+
     def _make_source(self, pipeline, **kwargs):
         source = DouyinSource(
             id=str(uuid4()),
@@ -182,6 +198,7 @@ class TestScheduler(unittest.TestCase):
 
     def test_timezone_ho_chi_minh(self):
         pipeline = self._make_pipeline(timezone="Asia/Ho_Chi_Minh")
+        self._make_destination(pipeline)
         source = self._make_source(pipeline)
         video = self._make_video(source, pipeline)
 
@@ -201,6 +218,7 @@ class TestScheduler(unittest.TestCase):
 
     def test_six_daily_slots(self):
         pipeline = self._make_pipeline()
+        self._make_destination(pipeline)
         source = self._make_source(pipeline)
 
         slot_utc_times = [
@@ -218,6 +236,7 @@ class TestScheduler(unittest.TestCase):
 
     def test_one_job_per_slot_poll_10_times(self):
         pipeline = self._make_pipeline()
+        self._make_destination(pipeline)
         source = self._make_source(pipeline)
         video = self._make_video(source, pipeline)
 
@@ -248,6 +267,19 @@ class TestScheduler(unittest.TestCase):
                 timezone="UTC",
             )
             db.add(pipeline)
+            db.flush()
+
+            destination = Destination(
+                id=str(uuid4()),
+                pipeline_id=pipeline.id,
+                platform="youtube",
+                name="YouTube",
+                enabled=True,
+                daily_upload_limit=6,
+                timezone="UTC",
+                upload_slots=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+            )
+            db.add(destination)
             db.flush()
 
             source = DouyinSource(
@@ -325,6 +357,19 @@ class TestScheduler(unittest.TestCase):
             db.add(pipeline)
             db.flush()
 
+            destination = Destination(
+                id=str(uuid4()),
+                pipeline_id=pipeline.id,
+                platform="youtube",
+                name="YouTube",
+                enabled=True,
+                daily_upload_limit=6,
+                timezone="UTC",
+                upload_slots=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+            )
+            db.add(destination)
+            db.flush()
+
             source = DouyinSource(
                 id=str(uuid4()),
                 pipeline_id=pipeline.id,
@@ -363,6 +408,7 @@ class TestScheduler(unittest.TestCase):
 
     def test_local_day_daily_limit(self):
         pipeline = self._make_pipeline(timezone="Asia/Ho_Chi_Minh", daily_upload_limit=3)
+        self._make_destination(pipeline)
         source = self._make_source(pipeline)
 
         slot_utc_times = [
@@ -385,6 +431,7 @@ class TestScheduler(unittest.TestCase):
 
     def test_backlog_new_ratio(self):
         pipeline = self._make_pipeline()
+        self._make_destination(pipeline)
         source = self._make_source(pipeline)
 
         for i in range(4):
@@ -393,7 +440,7 @@ class TestScheduler(unittest.TestCase):
             self._make_video(source, pipeline, is_backlog=False, video_id=f"n{i}")
 
         slot_times = [
-            datetime.datetime(2026, 9, 14, h, 0, tzinfo=datetime.timezone.utc)
+            datetime.datetime(2026, 9, 14, h, 5, tzinfo=datetime.timezone.utc)
             for h in [8, 11, 14, 17, 20, 23]
         ]
 

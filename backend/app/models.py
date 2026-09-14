@@ -126,6 +126,16 @@ class Pipeline(Base):
         lazy="selectin",
     )
 
+    destinations: Mapped[list["Destination"]] = relationship(
+        back_populates="pipeline",
+        lazy="selectin",
+    )
+
+    publications: Mapped[list["Publication"]] = relationship(
+        back_populates="pipeline",
+        lazy="selectin",
+    )
+
     daily_upload_limit: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -193,6 +203,12 @@ class DouyinSource(Base):
     pipeline_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("pipelines.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    destination_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("destinations.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -368,6 +384,266 @@ class DouyinVideo(Base):
         back_populates="videos",
     )
 
+    publications: Mapped[list["Publication"]] = relationship(
+        back_populates="douyin_video",
+        lazy="selectin",
+    )
+
+
+class Destination(Base):
+    __tablename__ = "destinations"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    pipeline_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("pipelines.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    pipeline: Mapped["Pipeline"] = relationship(
+        back_populates="destinations",
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    external_account_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    external_account_name: Mapped[str | None] = mapped_column(
+        String(300),
+        nullable=True,
+    )
+
+    credentials: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    connected: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    daily_upload_limit: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=6,
+    )
+
+    backlog_slots_per_day: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=4,
+    )
+
+    new_slots_per_day: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=2,
+    )
+
+    timezone: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="UTC",
+    )
+
+    upload_slots: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        default=lambda: ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+    )
+
+    publish_strategy: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="broadcast",
+    )
+
+    metadata_language: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
+    )
+
+    metadata_profile: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    fixed_hashtags: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    adaptive_hashtags: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    prompt_override: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    publications: Mapped[list["Publication"]] = relationship(
+        back_populates="destination",
+        lazy="selectin",
+    )
+
+
+class Publication(Base):
+    __tablename__ = "publications"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    pipeline_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("pipelines.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    pipeline: Mapped["Pipeline"] = relationship(
+        back_populates="publications",
+    )
+
+    douyin_video_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("douyin_videos.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    douyin_video: Mapped["DouyinVideo"] = relationship(
+        back_populates="publications",
+    )
+
+    destination_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    destination: Mapped["Destination"] = relationship(
+        back_populates="publications",
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="queued",
+        index=True,
+    )
+
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    external_post_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    external_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    title: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    description: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "douyin_video_id",
+            "destination_id",
+            name="uq_publication_video_destination",
+        ),
+    )
+
 
 class VideoJob(Base):
     __tablename__ = "video_jobs"
@@ -444,6 +720,12 @@ class VideoJob(Base):
         nullable=True,
     )
 
+    destination_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("destinations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     source_video_id: Mapped[str | None] = mapped_column(
         String(200),
         nullable=True,
@@ -508,6 +790,12 @@ class OAuthState(Base):
     pipeline_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("pipelines.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    destination_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("destinations.id", ondelete="SET NULL"),
         nullable=True,
     )
 

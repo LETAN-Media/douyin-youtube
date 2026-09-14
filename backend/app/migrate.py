@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import engine
-from app.models import Base, DouyinSource, DouyinVideo, Pipeline
+from app.models import Base, Destination, DouyinSource, DouyinVideo, Pipeline, Publication
 
 logger = logging.getLogger("douyin-youtube-migrate")
 
@@ -64,6 +64,20 @@ def run_migrations() -> None:
                 tables=[DouyinVideo.__table__],
             )
 
+        if not table_exists(connection, "destinations"):
+            logger.info("Creating destinations table")
+            Base.metadata.create_all(
+                bind=connection,
+                tables=[Destination.__table__],
+            )
+
+        if not table_exists(connection, "publications"):
+            logger.info("Creating publications table")
+            Base.metadata.create_all(
+                bind=connection,
+                tables=[Publication.__table__],
+            )
+
         if not column_exists(connection, "video_jobs", "pipeline_id"):
             logger.info("Adding pipeline_id to video_jobs")
             connection.execute(
@@ -118,6 +132,15 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "oauth_states", "destination_id"):
+            logger.info("Adding destination_id to oauth_states")
+            connection.execute(
+                text(
+                    "ALTER TABLE oauth_states "
+                    "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
+                )
+            )
+
         if not column_exists(connection, "video_jobs", "source_video_id"):
             logger.info("Adding source_video_id to video_jobs")
             connection.execute(
@@ -133,6 +156,15 @@ def run_migrations() -> None:
                 text(
                     "ALTER TABLE video_jobs "
                     "ADD COLUMN IF NOT EXISTS schedule_slot_key VARCHAR(100)"
+                )
+            )
+
+        if not column_exists(connection, "video_jobs", "destination_id"):
+            logger.info("Adding destination_id to video_jobs")
+            connection.execute(
+                text(
+                    "ALTER TABLE video_jobs "
+                    "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
                 )
             )
 
@@ -179,6 +211,7 @@ def run_migrations() -> None:
         default_pipeline_id = ensure_default_pipeline(connection)
 
         if default_pipeline_id is not None:
+            migrate_existing_youtube_to_destination(connection)
             assign_existing_jobs_to_default(connection, default_pipeline_id)
 
 
@@ -234,3 +267,52 @@ def assign_existing_jobs_to_default(connection: Any, default_pipeline_id: str) -
             "Assigned %s existing jobs to default pipeline",
             result.rowcount,
         )
+
+
+def migrate_existing_youtube_to_destination(connection: Any) -> None:
+    with Session(bind=connection) as db:
+        pipelines = db.execute(
+            text(
+                "SELECT id, youtube_channel_title, youtube_credentials, youtube_channel_id "
+                "FROM pipelines "
+                "WHERE youtube_credentials IS NOT NULL "
+                "AND youtube_channel_id IS NOT NULL"
+            ),
+        ).fetchall()
+
+        for row in pipelines:
+            pipeline_id = row[0]
+            channel_title = row[1]
+            credentials = row[2]
+            channel_id = row[3]
+
+            existing = db.execute(
+                text(
+                    "SELECT id FROM destinations "
+                    "WHERE pipeline_id = :pipeline_id "
+                    "AND platform = 'youtube' "
+                    "LIMIT 1"
+                ),
+                {"pipeline_id": pipeline_id},
+            ).fetchone()
+
+            if existing:
+                continue
+
+            destination = Destination(
+                pipeline_id=pipeline_id,
+                platform="youtube",
+                name=channel_title or "YouTube",
+                external_account_id=channel_id,
+                external_account_name=channel_title,
+                credentials=credentials,
+                connected=True,
+                enabled=True,
+            )
+            db.add(destination)
+            db.commit()
+            logger.info(
+                "Migrated YouTube OAuth for pipeline %s to destination %s",
+                pipeline_id,
+                destination.id,
+            )
