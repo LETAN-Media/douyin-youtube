@@ -40,9 +40,18 @@ function friendlyMessage(status: number, detail: string): string {
   }
 }
 
+const GET_TIMEOUT_MS = 8000;
+const MUTATION_TIMEOUT_MS = 15000;
+
+function timeoutFor(init: RequestInit): number {
+  const m = (init.method ?? "GET").toUpperCase();
+  return m === "GET" ? GET_TIMEOUT_MS : MUTATION_TIMEOUT_MS;
+}
+
 async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
+  opts: { timeoutMs?: number } = {},
 ): Promise<T> {
   const { apiUrl, adminToken } = getServerEnv();
   if (!apiUrl) throw new ApiError(500, "DOUYIN_API_URL chưa được cấu hình.");
@@ -57,18 +66,37 @@ async function apiFetch<T>(
     headers["Content-Type"] = "application/json";
   }
 
+  const timeoutMs = opts.timeoutMs ?? timeoutFor(init);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const t0 = Date.now();
+  const method = (init.method ?? "GET").toUpperCase();
+
   let res: Response;
   try {
     res = await fetch(`${apiUrl}${path}`, {
       ...init,
       headers,
       cache: "no-store",
+      signal: ctrl.signal,
     });
   } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new ApiError(
+        504,
+        `Backend timeout sau ${Math.round(timeoutMs / 1000)}s (${method} ${path}). Thử lại.`,
+      );
+    }
     throw new ApiError(
       500,
       `Không kết nối được backend: ${err instanceof Error ? err.message : String(err)}`,
     );
+  } finally {
+    clearTimeout(timer);
+    if (process.env.NODE_ENV !== "production") {
+      const dt = Date.now() - t0;
+      console.log(`[api] ${method} ${path} ${dt}ms (timeout ${timeoutMs}ms)`);
+    }
   }
 
   if (res.status === 204) return undefined as T;
@@ -305,6 +333,30 @@ export async function getDestinationStatus(
   return apiFetch<DestinationStatus>(
     `/api/destinations/${encodeURIComponent(id)}/status`,
   );
+}
+
+export interface DestinationStatusBatch {
+  destination_id: string;
+  connected: boolean;
+  platform: string;
+  name: string;
+  daily_upload_limit: number;
+  today_published: number;
+  next_upload?: string | null;
+  enabled: boolean;
+}
+
+/** Batch statuses: 1 request for all destinations (replaces N+1). */
+export async function getDestinationStatuses(
+  pipelineId: string,
+): Promise<DestinationStatusBatch[]> {
+  return apiFetch<DestinationStatusBatch[]>(
+    `/api/pipelines/${encodeURIComponent(pipelineId)}/destinations/statuses`,
+  );
+}
+
+export async function getSource(id: string): Promise<DouyinSource> {
+  return apiFetch<DouyinSource>(`/api/sources/${encodeURIComponent(id)}`);
 }
 
 // ---------- Publications ----------

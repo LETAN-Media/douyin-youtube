@@ -1048,21 +1048,27 @@ def create_pipeline_source(
     db.commit()
     db.refresh(source)
 
-    # Initial full background inventory sync (queued -> running ->
-    # completed/auth_required/failed). sync_source_inventory owns the
-    # terminal status; never overwrite auth_required/failed with completed.
+    # Non-blocking initial scan: return 201 immediately with status=queued.
+    # Background thread drives queued -> running -> completed/auth_required/failed.
+    # Dashboard polls GET /api/sources/{id} every few seconds.
     try:
-        from app.inventory import sync_source_inventory
-        sync_source_inventory(source.id, mode="full")
-        db.refresh(source)
+        import threading as _threading
+
+        _source_id = source.id
+
+        def _bg_initial_sync() -> None:
+            try:
+                from app.inventory import sync_source_inventory
+
+                sync_source_inventory(_source_id, mode="full")
+            except Exception:
+                logger.exception(
+                    "Background inventory sync failed for source %s", _source_id
+                )
+
+        _threading.Thread(target=_bg_initial_sync, daemon=True).start()
     except Exception:
-        logger.exception("Background inventory sync failed for source %s", source.id)
-        try:
-            source.inventory_sync_status = "failed"
-            db.commit()
-            db.refresh(source)
-        except Exception:
-            pass
+        logger.exception("Failed to queue background sync for source %s", source.id)
 
     return source
 
@@ -1365,6 +1371,43 @@ def list_publications(
     )
 
 
+def _destination_next_upload(destination: Destination) -> str | None:
+    """Compute next upload slot without any DB access (pure)."""
+    try:
+        slots = destination.upload_slots or []
+        if not slots:
+            return None
+        slot_times = []
+        for slot_str in slots:
+            try:
+                hour, minute = map(int, str(slot_str).split(":"))
+                slot_time = datetime.combine(
+                    datetime.now().date(),
+                    datetime.min.time().replace(hour=hour, minute=minute),
+                )
+                if slot_time.tzinfo is None:
+                    slot_time = slot_time.replace(tzinfo=timezone.utc)
+                slot_times.append(slot_time)
+            except (ValueError, AttributeError):
+                continue
+        future_slots = [s for s in slot_times if s >= datetime.now(timezone.utc)]
+        if future_slots:
+            return min(future_slots).isoformat()
+        if slot_times:
+            tomorrow = datetime.now().date() + timedelta(days=1)
+            hour, minute = map(int, str(slots[0]).split(":"))
+            slot_time = datetime.combine(
+                tomorrow,
+                datetime.min.time().replace(hour=hour, minute=minute),
+            )
+            if slot_time.tzinfo is None:
+                slot_time = slot_time.replace(tzinfo=timezone.utc)
+            return slot_time.isoformat()
+    except Exception:
+        return None
+    return None
+
+
 @app.get(
     "/api/destinations/{destination_id}/status",
     dependencies=[
@@ -1397,45 +1440,78 @@ def destination_status(
     ).scalar_one_or_none()
     today_published = today_published or 0
 
-    next_upload = None
-    if destination.upload_slots:
-        slot_times = []
-        for slot_str in destination.upload_slots:
-            try:
-                hour, minute = map(int, slot_str.split(":"))
-                slot_time = datetime.combine(
-                    datetime.now().date(),
-                    datetime.min.time().replace(hour=hour, minute=minute),
-                )
-                if slot_time.tzinfo is None:
-                    slot_time = slot_time.replace(tzinfo=timezone.utc)
-                slot_times.append(slot_time)
-            except ValueError:
-                continue
-
-        future_slots = [s for s in slot_times if s >= datetime.now(timezone.utc)]
-        if future_slots:
-            next_upload = min(future_slots).isoformat()
-        elif slot_times:
-            tomorrow = datetime.now().date() + timedelta(days=1)
-            hour, minute = map(int, destination.upload_slots[0].split(":"))
-            slot_time = datetime.combine(
-                tomorrow,
-                datetime.min.time().replace(hour=hour, minute=minute),
-            )
-            if slot_time.tzinfo is None:
-                slot_time = slot_time.replace(tzinfo=timezone.utc)
-            next_upload = slot_time.isoformat()
-
     return {
         "connected": destination.connected,
         "platform": destination.platform,
         "name": destination.name,
         "daily_upload_limit": destination.daily_upload_limit,
         "today_published": today_published,
-        "next_upload": next_upload,
+        "next_upload": _destination_next_upload(destination),
         "enabled": destination.enabled,
     }
+
+
+@app.get(
+    "/api/pipelines/{pipeline_id}/destinations/statuses",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def pipeline_destination_statuses(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> list[dict]:
+    """Batch destination statuses: 1 request instead of N per-destination calls.
+
+    Single grouped COUNT query + pure next-slot computation.
+    """
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+    destinations = list(
+        db.execute(
+            select(Destination)
+            .where(Destination.pipeline_id == pipeline_id)
+            .order_by(Destination.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+    if not destinations:
+        return []
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    dest_ids = [d.id for d in destinations]
+    rows = db.execute(
+        select(
+            Publication.destination_id,
+            func.count(Publication.id).label("cnt"),
+        )
+        .where(Publication.destination_id.in_(dest_ids))
+        .where(Publication.status == "published")
+        .where(Publication.published_at >= today_start)
+        .group_by(Publication.destination_id)
+    ).all()
+    counts = {str(r[0]): int(r[1] or 0) for r in rows}
+    return [
+        {
+            "destination_id": d.id,
+            "connected": d.connected,
+            "platform": d.platform,
+            "name": d.name,
+            "daily_upload_limit": d.daily_upload_limit,
+            "today_published": counts.get(str(d.id), 0),
+            "next_upload": _destination_next_upload(d),
+            "enabled": d.enabled,
+        }
+        for d in destinations
+    ]
 
 
 @app.get(
@@ -2004,6 +2080,7 @@ def publish_inventory_video_now(
 @app.post(
     "/api/sources/{source_id}/sync",
     response_model=SourceSyncResponse,
+    status_code=202,
     dependencies=[
         Depends(require_admin)
     ],
@@ -2014,6 +2091,11 @@ def sync_source_now(
         get_db
     ),
 ) -> SourceSyncResponse:
+    """Queue a source sync and return <500ms. Worker runs in background.
+
+    Flow: queued -> running -> completed/failed/auth_required.
+    Dashboard must poll GET /api/sources/{id} every 2-5s.
+    """
     source = db.get(DouyinSource, source_id)
     if source is None:
         raise HTTPException(
@@ -2021,36 +2103,32 @@ def sync_source_now(
             detail="Không tìm thấy source",
         )
 
-    source.inventory_sync_status = "running"
+    source.inventory_sync_status = "queued"
     source.inventory_sync_error = None
     db.commit()
 
-    try:
-        from app.inventory import sync_source_inventory
+    import threading as _threading
 
-        result = sync_source_inventory(source.id, mode="full")
-        db.refresh(source)
-        return SourceSyncResponse(
-            source_id=source.id,
-            status=source.inventory_sync_status or "completed",
-            new=int(result.get("new", 0)),
-            updated=int(result.get("updated", 0)),
-        )
-    except Exception as exc:
-        logger.exception("Manual inventory sync failed for source %s", source.id)
+    def _bg_sync() -> None:
         try:
-            source.inventory_sync_status = "failed"
-            db.commit()
+            from app.inventory import sync_source_inventory
+
+            sync_source_inventory(source_id, mode="full")
         except Exception:
-            pass
-        raise HTTPException(
-            status_code=500,
-            detail=f"Sync thất bại: {exc}",
-        ) from exc
+            logger.exception("Manual inventory sync failed for source %s", source_id)
+
+    _threading.Thread(target=_bg_sync, daemon=True).start()
+    return SourceSyncResponse(
+        source_id=source.id,
+        status="queued",
+        new=0,
+        updated=0,
+    )
 
 
 @app.post(
     "/api/pipelines/{pipeline_id}/sync",
+    status_code=202,
     dependencies=[
         Depends(require_admin)
     ],
@@ -2061,6 +2139,7 @@ def sync_pipeline_now(
         get_db
     ),
 ) -> dict:
+    """Queue pipeline-wide sync, return immediately. Background worker scans."""
     pipeline = db.get(Pipeline, pipeline_id)
     if pipeline is None:
         raise HTTPException(
@@ -2077,20 +2156,28 @@ def sync_pipeline_now(
         .scalars()
         .all()
     )
+    for s in sources:
+        s.inventory_sync_status = "queued"
+        s.inventory_sync_error = None
+    db.commit()
+    source_ids = [s.id for s in sources]
 
-    from app.inventory import sync_source_inventory
+    import threading as _threading
 
-    total_new = 0
-    total_updated = 0
-    for source in sources:
+    def _bg_pipeline_sync() -> None:
         try:
-            result = sync_source_inventory(source.id, mode="full")
-            total_new += int(result.get("new", 0))
-            total_updated += int(result.get("updated", 0))
-        except Exception:
-            logger.exception("Pipeline sync failed for source %s", source.id)
+            from app.inventory import sync_source_inventory
 
-    return {"new": total_new, "updated": total_updated}
+            for sid in source_ids:
+                try:
+                    sync_source_inventory(sid, mode="full")
+                except Exception:
+                    logger.exception("Pipeline sync failed for source %s", sid)
+        except Exception:
+            logger.exception("Pipeline background sync failed %s", pipeline_id)
+
+    _threading.Thread(target=_bg_pipeline_sync, daemon=True).start()
+    return {"status": "queued", "new": 0, "updated": 0, "sources": len(source_ids)}
 
 
 @app.get(
@@ -2181,11 +2268,16 @@ def douyin_session_status() -> dict:
     ],
 )
 def douyin_session_start() -> dict:
-    """Start a real QR login flow. Returns the live QR image (base64 PNG)."""
-    from app.douyin_session import start_login_flow
+    """Queue a QR login flow, return session_id immediately.
+
+    QR capture runs in background; dashboard polls
+    GET /api/douyin/session/{id}/status every few seconds.
+    Never blocks the page on Playwright launch.
+    """
+    from app.douyin_session import queue_login_flow
 
     try:
-        return start_login_flow()
+        return queue_login_flow()
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:

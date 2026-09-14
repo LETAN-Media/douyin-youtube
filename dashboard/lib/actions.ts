@@ -30,8 +30,10 @@ function err(e: unknown): ActionResult {
   return { ok: false, error: e instanceof Error ? e.message : "Thao tác thất bại." };
 }
 
+// Targeted revalidation only: never revalidate "/" for pipeline-tab actions.
+// Per-tab fetching makes `/pipelines/${id}` refresh cheap (1-3 requests).
+// Full dashboard ("/") is only revalidated on create/delete pipeline.
 function revalidatePipeline(id: string) {
-  revalidatePath("/");
   revalidatePath(`/pipelines/${id}`);
 }
 
@@ -187,11 +189,16 @@ export async function actionDeleteSource(
 export async function actionSyncSource(
   pipelineId: string,
   id: string,
-): Promise<ActionResult> {
+): Promise<ActionResult & { status?: string }> {
   try {
-    await syncSource(id);
+    // Backend returns 202 queued immediately (<500ms); worker runs in background.
+    const r = await syncSource(id);
     revalidatePipeline(pipelineId);
-    return { ok: true };
+    const status =
+      typeof (r as { status?: unknown }).status === "string"
+        ? (r as { status: string }).status
+        : "queued";
+    return { ok: true, status };
   } catch (e) {
     return err(e);
   }
@@ -199,9 +206,27 @@ export async function actionSyncSource(
 
 export async function actionSyncPipeline(pipelineId: string): Promise<ActionResult> {
   try {
+    // 202 queued immediately; dashboard polls source statuses in background.
     await syncPipeline(pipelineId);
     revalidatePipeline(pipelineId);
     return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+// Polling helper for background sync: no revalidation, tiny GET (8s timeout).
+export async function actionGetSourceStatus(
+  id: string,
+): Promise<ActionResult & { status?: string; errorDetail?: string }> {
+  try {
+    const { getSource } = await import("./api");
+    const s = await getSource(id);
+    return {
+      ok: true,
+      status: s.inventory_sync_status,
+      errorDetail: s.inventory_sync_error ?? undefined,
+    };
   } catch (e) {
     return err(e);
   }

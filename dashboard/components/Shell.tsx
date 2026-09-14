@@ -41,7 +41,7 @@ export function Shell({ children }: { children: ReactNode }) {
             type="button"
             aria-label="Mở menu"
             onClick={() => setOpen(true)}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 text-slate-700 lg:hidden"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-700 lg:hidden"
           >
             ☰
           </button>
@@ -97,7 +97,7 @@ export function Shell({ children }: { children: ReactNode }) {
                   type="button"
                   aria-label="Đóng menu"
                   onClick={() => setOpen(false)}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200"
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200"
                 >
                   ✕
                 </button>

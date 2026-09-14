@@ -1,6 +1,7 @@
 "use client";
 
 import { useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
 import { Badge, btnSmall } from "@/components/ui";
 import {
@@ -25,16 +26,20 @@ export function MatrixActions({
 }) {
   const { toast } = useToast();
   const [pending, start] = useTransition();
+  const router = useRouter();
   const isFacebook = destination.platform === "facebook";
 
   const act = (
     fn: () => Promise<{ ok: true } | { ok: false; error: string }>,
     okMsg: string,
-  ) =>
+  ) => {
+    if (pending) return;
     start(async () => {
       const r = await fn();
       toast(r.ok ? okMsg : r.error, r.ok ? "success" : "error");
+      if (r.ok) router.refresh();
     });
+  };
 
   const label = publication ? publicationLabel(publication.status) : { text: "Waiting", tone: "amber" as const };
 

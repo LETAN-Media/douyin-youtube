@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
 import {
   Badge,
@@ -35,7 +36,22 @@ export function InventoryPanel({
   current: { page: number; status: string; q: string; source_id: string };
 }) {
   const { toast } = useToast();
-  const [pending, start] = useTransition();
+  const [, start] = useTransition();
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const router = useRouter();
+
+  const publish = (videoId: string, destId: string, destName: string) => {
+    const key = `pub:${videoId}:${destId}`;
+    if (pendingKey) return;
+    setPendingKey(key);
+    start(async () => {
+      const r = await actionPublishNow(pipelineId, videoId, destId);
+      setPendingKey(null);
+      // Optimistic toast immediately; worker queues publication in background.
+      toast(r.ok ? `Đã xếp hàng đẩy tới ${destName}.` : r.error, r.ok ? "success" : "error");
+      if (r.ok) router.refresh();
+    });
+  };
 
   const totalPages = inventory
     ? Math.max(1, Math.ceil(inventory.total / inventory.page_size))
@@ -79,7 +95,7 @@ export function InventoryPanel({
             <option key={s.id} value={s.id}>{s.name}</option>
           ))}
         </select>
-        <button type="submit" className={btnSmall}>
+        <button type="submit" className={`${btnSmall} min-h-[44px]`}>
           Lọc
         </button>
       </form>
@@ -153,22 +169,20 @@ export function InventoryPanel({
                     Publication matrix
                   </Link>
                   <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1">
-                    {destinations.slice(0, 4).map((d) => (
-                      <button
-                        key={d.id}
-                        type="button"
-                        disabled={pending || d.platform === "facebook"}
-                        className={btnSmall}
-                        onClick={() =>
-                          start(async () => {
-                            const r = await actionPublishNow(pipelineId, v.id, d.id);
-                            toast(r.ok ? `Đã đẩy tới ${d.name}.` : r.error, r.ok ? "success" : "error");
-                          })
-                        }
-                      >
-                        → {d.name}
-                      </button>
-                    ))}
+                    {destinations.slice(0, 4).map((d) => {
+                      const key = `pub:${v.id}:${d.id}`;
+                      return (
+                        <button
+                          key={d.id}
+                          type="button"
+                          disabled={pendingKey !== null || d.platform === "facebook"}
+                          className={btnSmall}
+                          onClick={() => publish(v.id, d.id, d.name)}
+                        >
+                          {pendingKey === key ? "…" : `→ ${d.name}`}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </div>

@@ -50,14 +50,16 @@ export function DestinationActions({
         type="button"
         className={btnSmall}
         disabled={pending}
-        onClick={() =>
+        onClick={() => {
+          if (pending) return;
           start(async () => {
             const r = await actionToggleDestination(pipelineId, destination.id, !destination.enabled);
-            toast(r.ok ? "OK" : r.error, r.ok ? "success" : "error");
-          })
-        }
+            toast(r.ok ? (destination.enabled ? "Đã pause." : "Đã resume.") : r.error, r.ok ? "success" : "error");
+            if (r.ok) router.refresh();
+          });
+        }}
       >
-        {destination.enabled ? "Pause" : "Resume"}
+        {pending ? "…" : destination.enabled ? "Pause" : "Resume"}
       </button>
       <ConfirmButton
         title="Xóa destination?"
@@ -81,6 +83,7 @@ export function DestinationEditForm({
 }) {
   const { toast } = useToast();
   const [pending, start] = useTransition();
+  const router = useRouter();
 
   return (
     <Card>
@@ -89,10 +92,12 @@ export function DestinationEditForm({
         className="grid gap-3 p-4 sm:grid-cols-2 sm:px-5"
         onSubmit={(e) => {
           e.preventDefault();
+          if (pending) return;
           const form = new FormData(e.currentTarget);
           start(async () => {
             const r = await actionUpdateDestination(pipelineId, destination.id, form);
             toast(r.ok ? "Đã lưu." : r.error, r.ok ? "success" : "error");
+            if (r.ok) router.refresh();
           });
         }}
       >

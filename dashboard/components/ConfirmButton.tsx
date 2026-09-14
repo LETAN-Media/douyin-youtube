@@ -26,6 +26,7 @@ export function ConfirmButton({
         type="button"
         className={btnDangerGhost}
         onClick={() => setOpen(true)}
+        disabled={false}
       >
         {confirmLabel}
       </button>

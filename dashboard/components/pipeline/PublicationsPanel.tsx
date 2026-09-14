@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
 import {
   Badge,
@@ -32,17 +33,26 @@ export function PublicationsPanel({
   currentFilter: string;
 }) {
   const { toast } = useToast();
-  const [pending, start] = useTransition();
+  const router = useRouter();
+  const [, start] = useTransition();
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+
   const destName = new Map(destinations.map((d) => [d.id, d.name]));
 
   const act = (
+    key: string,
     fn: () => Promise<{ ok: true } | { ok: false; error: string }>,
     okMsg: string,
-  ) =>
+  ) => {
+    if (pendingKey) return;
+    setPendingKey(key);
     start(async () => {
       const r = await fn();
+      setPendingKey(null);
       toast(r.ok ? okMsg : r.error, r.ok ? "success" : "error");
+      if (r.ok) router.refresh();
     });
+  };
 
   return (
     <Card>
@@ -55,7 +65,7 @@ export function PublicationsPanel({
               <Link
                 key={f}
                 href={`/pipelines/${pipelineId}?tab=publications${f === "all" ? "" : `&pub_status=${f}`}`}
-                className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold ${
+                className={`inline-flex min-h-[44px] items-center rounded-lg px-2.5 py-1.5 text-xs font-semibold sm:min-h-[32px] ${
                   currentFilter === f
                     ? "bg-indigo-600 text-white"
                     : "border border-slate-200 text-slate-600 hover:bg-slate-50"
@@ -102,23 +112,23 @@ export function PublicationsPanel({
                       <td className="px-5 py-3">
                         <div className="flex flex-wrap justify-end gap-1.5">
                           {p.status === "failed" || p.status === "skipped" ? (
-                            <button type="button" className={btnSmall} disabled={pending}
-                              onClick={() => act(() => actionRetryPublication(pipelineId, p.id), "Đã retry.")}>
-                              Retry
+                            <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                              onClick={() => act(`retry:${p.id}`, () => actionRetryPublication(pipelineId, p.id), "Đã retry.")}>
+                              {pendingKey === `retry:${p.id}` ? "…" : "Retry"}
                             </button>
                           ) : null}
                           {p.status !== "published" && p.status !== "skipped" ? (
-                            <button type="button" className={btnSmall} disabled={pending}
-                              onClick={() => act(() => actionSkipPublication(pipelineId, p.id), "Đã skip.")}>
-                              Skip
+                            <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                              onClick={() => act(`skip:${p.id}`, () => actionSkipPublication(pipelineId, p.id), "Đã skip.")}>
+                              {pendingKey === `skip:${p.id}` ? "…" : "Skip"}
                             </button>
                           ) : null}
                           {p.status !== "published" ? (
-                            <button type="button" className={btnSmall} disabled={pending}
+                            <button type="button" className={btnSmall} disabled={pendingKey !== null}
                               onClick={() => {
                                 const v = window.prompt("Reschedule tới (YYYY-MM-DDTHH:mm):", "2026-09-15T08:00");
                                 if (!v) return;
-                                act(() => actionReschedulePublication(pipelineId, p.id, v), "Đã reschedule.");
+                                act(`resched:${p.id}`, () => actionReschedulePublication(pipelineId, p.id, v), "Đã reschedule.");
                               }}>
                               Reschedule
                             </button>
@@ -150,23 +160,23 @@ export function PublicationsPanel({
                   </p>
                   <div className="mt-2 grid grid-cols-3 gap-1.5">
                     {p.status === "failed" || p.status === "skipped" ? (
-                      <button type="button" className={btnSmall} disabled={pending}
-                        onClick={() => act(() => actionRetryPublication(pipelineId, p.id), "Đã retry.")}>
-                        Retry
+                      <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                        onClick={() => act(`retry:${p.id}`, () => actionRetryPublication(pipelineId, p.id), "Đã retry.")}>
+                        {pendingKey === `retry:${p.id}` ? "…" : "Retry"}
                       </button>
                     ) : null}
                     {p.status !== "published" && p.status !== "skipped" ? (
-                      <button type="button" className={btnSmall} disabled={pending}
-                        onClick={() => act(() => actionSkipPublication(pipelineId, p.id), "Đã skip.")}>
-                        Skip
+                      <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                        onClick={() => act(`skip:${p.id}`, () => actionSkipPublication(pipelineId, p.id), "Đã skip.")}>
+                        {pendingKey === `skip:${p.id}` ? "…" : "Skip"}
                       </button>
                     ) : null}
                     {p.status !== "published" ? (
-                      <button type="button" className={btnSmall} disabled={pending}
+                      <button type="button" className={btnSmall} disabled={pendingKey !== null}
                         onClick={() => {
                           const v = window.prompt("Reschedule tới (YYYY-MM-DDTHH:mm):", "2026-09-15T08:00");
                           if (!v) return;
-                          act(() => actionReschedulePublication(pipelineId, p.id, v), "Đã reschedule.");
+                          act(`resched:${p.id}`, () => actionReschedulePublication(pipelineId, p.id, v), "Đã reschedule.");
                         }}>
                         Resched.
                       </button>

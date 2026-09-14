@@ -3,6 +3,7 @@
 import { useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
+/* Optimistic + single-tap: disable + spinner immediately, targeted refresh only. */
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { Card, CardHeader, btnPrimary, inputCls, labelCls } from "@/components/ui";
 import {
@@ -21,6 +22,7 @@ export function AiProfileForm({
 }) {
   const { toast } = useToast();
   const [pending, start] = useTransition();
+  const router = useRouter();
 
   return (
     <Card>
@@ -29,10 +31,12 @@ export function AiProfileForm({
         className="space-y-4 p-4 sm:px-5"
         onSubmit={(e) => {
           e.preventDefault();
+          if (pending) return;
           const form = new FormData(e.currentTarget);
           start(async () => {
             const r = await actionUpdateAiProfile(pipelineId, form);
             toast(r.ok ? "Đã lưu AI profile." : r.error, r.ok ? "success" : "error");
+            if (r.ok) router.refresh();
           });
         }}
       >
@@ -73,6 +77,7 @@ export function SettingsForm({
 }) {
   const { toast } = useToast();
   const [pending, start] = useTransition();
+  const router = useRouter();
 
   return (
     <Card>
@@ -81,10 +86,12 @@ export function SettingsForm({
         className="grid gap-4 p-4 sm:grid-cols-2 sm:px-5"
         onSubmit={(e) => {
           e.preventDefault();
+          if (pending) return;
           const form = new FormData(e.currentTarget);
           start(async () => {
             const r = await actionUpdatePipelineSettings(pipelineId, form);
             toast(r.ok ? "Đã lưu settings." : r.error, r.ok ? "success" : "error");
+            if (r.ok) router.refresh();
           });
         }}
       >

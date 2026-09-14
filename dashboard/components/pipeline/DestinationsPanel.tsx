@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import {
@@ -35,8 +36,47 @@ export function DestinationsPanel({
   oauthSuccess: boolean;
 }) {
   const [showWizard, setShowWizard] = useState(false);
-  const youtubes = destinations.filter((d) => d.platform === "youtube");
-  const facebooks = destinations.filter((d) => d.platform === "facebook");
+  const [items, setItems] = useState(destinations);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- refresh list on server data change
+    setItems(destinations);
+  }, [destinations]);
+  const router = useRouter();
+  const { toast } = useToast();
+  const [, start] = useTransition();
+  const [togglePendingId, setTogglePendingId] = useState<string | null>(null);
+
+  const handleToggle = (id: string, next: boolean) => {
+    if (togglePendingId) return;
+    setTogglePendingId(id);
+    setItems((prev) => prev.map((d) => (d.id === id ? { ...d, enabled: next } : d)));
+    start(async () => {
+      const r = await actionToggleDestination(pipelineId, id, next);
+      setTogglePendingId(null);
+      toast(r.ok ? (next ? "Đã resume." : "Đã pause.") : r.error, r.ok ? "success" : "error");
+      if (!r.ok) {
+        setItems((prev) => prev.map((d) => (d.id === id ? { ...d, enabled: !next } : d)));
+      }
+      router.refresh();
+    });
+  };
+
+  const handleDelete = async (id: string) => {
+    const r = await actionDeleteDestination(pipelineId, id);
+    if (r.ok) {
+      setItems((prev) => prev.filter((d) => d.id !== id));
+      router.refresh();
+    }
+    return r;
+  };
+
+  const handleCreated = () => {
+    setShowWizard(false);
+    router.refresh();
+  };
+
+  const youtubes = items.filter((d) => d.platform === "youtube");
+  const facebooks = items.filter((d) => d.platform === "facebook");
 
   return (
     <div className="space-y-4">
@@ -48,10 +88,14 @@ export function DestinationsPanel({
 
       <Card>
         <CardHeader
-          title={`Destinations (${destinations.length})`}
+          title={`Destinations (${items.length})`}
           subtitle="Schedule nằm ở từng destination. Mỗi destination có OAuth và lịch riêng."
           action={
-            <button type="button" className={btnSmall} onClick={() => setShowWizard((v) => !v)}>
+            <button
+              type="button"
+              className={`${btnSmall} min-h-[44px]`}
+              onClick={() => setShowWizard((v) => !v)}
+            >
               + Add Destination
             </button>
           }
@@ -59,11 +103,11 @@ export function DestinationsPanel({
         {showWizard ? (
           <DestinationWizard
             pipelineId={pipelineId}
-            onDone={() => setShowWizard(false)}
+            onDone={handleCreated}
           />
         ) : null}
 
-        {destinations.length === 0 ? (
+        {items.length === 0 ? (
           <EmptyState
             title="Chưa có destination"
             hint="Thêm YouTube destination đầu tiên, sau đó Connect OAuth bằng destination_id."
@@ -75,12 +119,18 @@ export function DestinationsPanel({
               pipelineId={pipelineId}
               items={youtubes}
               statusById={statusById}
+              togglePendingId={togglePendingId}
+              onToggle={handleToggle}
+              onDelete={handleDelete}
             />
             <PlatformGroup
               title="Facebook"
               pipelineId={pipelineId}
               items={facebooks}
               statusById={statusById}
+              togglePendingId={togglePendingId}
+              onToggle={handleToggle}
+              onDelete={handleDelete}
             />
           </div>
         )}
@@ -94,11 +144,17 @@ function PlatformGroup({
   pipelineId,
   items,
   statusById,
+  togglePendingId,
+  onToggle,
+  onDelete,
 }: {
   title: string;
   pipelineId: string;
   items: Destination[];
   statusById: Record<string, DestinationStatus | null>;
+  togglePendingId: string | null;
+  onToggle: (id: string, next: boolean) => void;
+  onDelete: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 }) {
   if (items.length === 0) return null;
   return (
@@ -113,6 +169,9 @@ function PlatformGroup({
             pipelineId={pipelineId}
             destination={d}
             status={statusById[d.id] ?? null}
+            togglePending={togglePendingId === d.id}
+            onToggle={onToggle}
+            onDelete={onDelete}
           />
         ))}
       </div>
@@ -124,12 +183,19 @@ export function DestinationCard({
   pipelineId,
   destination: d,
   status,
+  togglePending = false,
+  onToggle,
+  onDelete,
 }: {
   pipelineId: string;
   destination: Destination;
   status: DestinationStatus | null;
+  togglePending?: boolean;
+  onToggle?: (id: string, next: boolean) => void;
+  onDelete?: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 }) {
   const { toast } = useToast();
+  const router = useRouter();
   const [pending, start] = useTransition();
   const isFacebook = d.platform === "facebook";
   const connected = isFacebook ? false : (status?.connected ?? d.connected);
@@ -148,6 +214,14 @@ export function DestinationCard({
       } else {
         toast(r.ok ? "Không lấy được OAuth URL." : r.error, "error");
       }
+    });
+
+  const doToggleFallback = () =>
+    start(async () => {
+      const { actionToggleDestination: toggle } = await import("@/lib/actions");
+      const r = await toggle(pipelineId, d.id, !d.enabled);
+      toast(r.ok ? (d.enabled ? "Đã pause." : "Đã resume.") : r.error, r.ok ? "success" : "error");
+      if (r.ok) router.refresh();
     });
 
   return (
@@ -204,11 +278,24 @@ export function DestinationCard({
             {pending ? "…" : connected ? "Reconnect" : "Connect"}
           </button>
         ) : null}
-        <DestinationPauseButton pipelineId={pipelineId} id={d.id} enabled={d.enabled} />
+        {onToggle ? (
+          <button
+            type="button"
+            className={btnSmall}
+            disabled={togglePending}
+            onClick={() => onToggle(d.id, !d.enabled)}
+          >
+            {togglePending ? "…" : d.enabled ? "Pause" : "Resume"}
+          </button>
+        ) : (
+          <DestinationPauseButton pipelineId={pipelineId} id={d.id} enabled={d.enabled} />
+        )}
         <ConfirmButton
           title="Xóa destination?"
           message={`Xóa "${d.name}"? Publications của destination này cũng bị xóa.`}
-          onConfirm={() => actionDeleteDestination(pipelineId, d.id)}
+          onConfirm={() =>
+            onDelete ? onDelete(d.id) : actionDeleteDestination(pipelineId, d.id)
+          }
         />
       </div>
       {!d.enabled ? (
@@ -228,7 +315,13 @@ function DestinationPauseButton({
   enabled: boolean;
 }) {
   const { toast } = useToast();
+  const router = useRouter();
   const [pending, start] = useTransition();
+  const [optimistic, setOptimistic] = useState(enabled);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- sync prop after transition settles
+    if (!pending) setOptimistic(enabled);
+  }, [enabled, pending]);
   return (
     <button
       type="button"
@@ -236,12 +329,16 @@ function DestinationPauseButton({
       disabled={pending}
       onClick={() =>
         start(async () => {
-          const r = await actionToggleDestination(pipelineId, id, !enabled);
-          toast(r.ok ? (enabled ? "Đã pause." : "Đã resume.") : r.error, r.ok ? "success" : "error");
+          const next = !optimistic;
+          setOptimistic(next);
+          const r = await actionToggleDestination(pipelineId, id, next);
+          toast(r.ok ? (next ? "Đã resume." : "Đã pause.") : r.error, r.ok ? "success" : "error");
+          if (!r.ok) setOptimistic(!next);
+          else router.refresh();
         })
       }
     >
-      {enabled ? "Pause" : "Resume"}
+      {pending ? "…" : optimistic ? "Pause" : "Resume"}
     </button>
   );
 }
@@ -261,6 +358,7 @@ function DestinationWizard({
       className="space-y-3 border-b border-slate-100 p-4 sm:px-5"
       onSubmit={(e) => {
         e.preventDefault();
+        if (pending) return;
         const form = new FormData(e.currentTarget);
         start(async () => {
           const r = await actionCreateDestination(pipelineId, form);
@@ -321,10 +419,10 @@ function DestinationWizard({
         Nếu YouTube: sau khi tạo sẽ tự chuyển sang Connect YouTube OAuth bằng destination_id.
       </p>
       <div className="flex gap-2">
-        <button type="button" className="flex-1 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-semibold text-slate-700" onClick={onDone}>
+        <button type="button" className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-semibold text-slate-700" onClick={onDone}>
           Hủy
         </button>
-        <button type="submit" disabled={pending} className={`${btnPrimary} flex-1`}>
+        <button type="submit" disabled={pending} className={`${btnPrimary} min-h-[44px] flex-1`}>
           {pending ? "Đang tạo…" : "Create"}
         </button>
       </div>

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import {
@@ -19,6 +20,7 @@ import {
   actionCreateSource,
   actionDeleteSource,
   actionGetDouyinSession,
+  actionGetSourceStatus,
   actionSyncPipeline,
   actionSyncSource,
   actionToggleSource,
@@ -35,18 +37,123 @@ export function SourcesPanel({
   sources: DouyinSource[];
 }) {
   const { toast } = useToast();
-  const [pending, start] = useTransition();
+  const router = useRouter();
+  const [, start] = useTransition();
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  // Optimistic local list: single-tap toggle/delete feel instant.
+  const [items, setItems] = useState(sources);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- refresh list on server data change
+    setItems(sources);
+  }, [sources]);
+  const pollTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  useEffect(() => () => {
+    pollTimers.current.forEach(clearTimeout);
+  }, []);
 
-  const run = (fn: () => Promise<{ ok: true } | { ok: false; error: string }>, okMsg: string) =>
+  const isBusy = (k: string) => pendingKey === k;
+
+  const pollSync = (sourceId: string, attempt = 0) => {
+    if (attempt >= 20) {
+      setPendingKey(null);
+      router.refresh();
+      return;
+    }
+    const t = setTimeout(() => {
+      start(async () => {
+        const r = await actionGetSourceStatus(sourceId);
+        if (!r.ok) {
+          setPendingKey(null);
+          router.refresh();
+          return;
+        }
+        const st = r.status ?? "";
+        setItems((prev) =>
+          prev.map((s) =>
+            s.id === sourceId
+              ? { ...s, inventory_sync_status: st, inventory_sync_error: r.errorDetail ?? s.inventory_sync_error }
+              : s,
+          ),
+        );
+        if (st === "queued" || st === "running" || st === "syncing") {
+          pollSync(sourceId, attempt + 1);
+        } else {
+          setPendingKey(null);
+          if (st === "completed") toast("Sync xong.", "success");
+          else if (st === "auth_required") toast("Cần Douyin login (QR).", "error");
+          else if (st === "failed") toast(r.errorDetail || "Sync thất bại.", "error");
+          router.refresh();
+        }
+      });
+    }, 3000);
+    pollTimers.current.push(t);
+  };
+
+  const doSync = (s: DouyinSource) => {
+    const key = `sync:${s.id}`;
+    if (pendingKey) return;
+    setPendingKey(key);
+    // Optimistic: show queued immediately, disable button, spinner.
+    setItems((prev) =>
+      prev.map((x) => (x.id === s.id ? { ...x, inventory_sync_status: "queued", inventory_sync_error: null } : x)),
+    );
     start(async () => {
-      const r = await fn();
-      toast(r.ok ? okMsg : r.error, r.ok ? "success" : "error");
+      const r = await actionSyncSource(pipelineId, s.id);
+      if (!r.ok) {
+        toast(r.error, "error");
+        setPendingKey(null);
+        router.refresh();
+        return;
+      }
+      toast("Đã xếp hàng sync — đang quét nền.", "success");
+      pollSync(s.id);
     });
+  };
 
-  const validateSession = () =>
+  const doSyncAll = () => {
+    if (pendingKey) return;
+    setPendingKey("syncAll");
+    start(async () => {
+      const r = await actionSyncPipeline(pipelineId);
+      setPendingKey(null);
+      toast(r.ok ? "Đã xếp hàng sync tất cả — quét nền." : r.error, r.ok ? "success" : "error");
+      router.refresh();
+    });
+  };
+
+  const doToggle = (s: DouyinSource) => {
+    const key = `toggle:${s.id}`;
+    if (pendingKey) return;
+    setPendingKey(key);
+    const next = !s.enabled;
+    setItems((prev) => prev.map((x) => (x.id === s.id ? { ...x, enabled: next } : x)));
+    start(async () => {
+      const r = await actionToggleSource(pipelineId, s.id, next);
+      setPendingKey(null);
+      toast(r.ok ? (next ? "Đã enable." : "Đã disable.") : r.error, r.ok ? "success" : "error");
+      if (!r.ok) {
+        setItems((prev) => prev.map((x) => (x.id === s.id ? { ...x, enabled: !next } : x)));
+      }
+      router.refresh();
+    });
+  };
+
+  const doDelete = async (s: DouyinSource) => {
+    const r = await actionDeleteSource(pipelineId, s.id);
+    if (r.ok) {
+      setItems((prev) => prev.filter((x) => x.id !== s.id));
+      router.refresh();
+    }
+    return r;
+  };
+
+  const validateSession = () => {
+    if (pendingKey) return;
+    setPendingKey("validate");
     start(async () => {
       const r = await actionGetDouyinSession();
+      setPendingKey(null);
       if (r.ok) {
         if (r.cookieRequired === true) {
           toast("Cookie required: anonymous access bị chặn, cần DOUYIN_COOKIES_B64.", "error");
@@ -59,31 +166,32 @@ export function SourcesPanel({
         toast(r.error, "error");
       }
     });
+  };
 
   return (
     <div className="space-y-4">
       <DouyinSessionPanel pipelineId={pipelineId} />
       <Card>
         <CardHeader
-          title={`Douyin Sources (${sources.length})`}
+          title={`Douyin Sources (${items.length})`}
           subtitle="Paste profile URL → Sync Now → View Inventory"
           action={
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 className={btnSmall}
-                disabled={pending}
-                onClick={() => run(() => actionSyncPipeline(pipelineId), "Đã sync tất cả sources.")}
+                disabled={pendingKey !== null}
+                onClick={doSyncAll}
               >
-                {pending ? "…" : "Sync all"}
+                {isBusy("syncAll") ? "Đang xếp hàng…" : "Sync all"}
               </button>
               <button
                 type="button"
                 className={btnSmall}
-                disabled={pending}
+                disabled={pendingKey !== null}
                 onClick={validateSession}
               >
-                {pending ? "…" : "Validate Session"}
+                {isBusy("validate") ? "…" : "Validate Session"}
               </button>
               <button
                 type="button"
@@ -100,13 +208,18 @@ export function SourcesPanel({
             className="grid gap-3 border-b border-slate-100 p-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end sm:px-5"
             onSubmit={(e) => {
               e.preventDefault();
-              const form = new FormData(e.currentTarget);
+              if (pendingKey) return;
+              const formEl = e.currentTarget;
+              const form = new FormData(formEl);
+              setPendingKey("create");
               start(async () => {
                 const r = await actionCreateSource(pipelineId, form);
-                toast(r.ok ? "Đã thêm source." : r.error, r.ok ? "success" : "error");
+                setPendingKey(null);
+                toast(r.ok ? "Đã thêm source — đang quét nền." : r.error, r.ok ? "success" : "error");
                 if (r.ok) {
-                  (e.target as HTMLFormElement).reset();
+                  formEl.reset();
                   setShowAdd(false);
+                  router.refresh();
                 }
               });
             }}
@@ -125,13 +238,13 @@ export function SourcesPanel({
                 className={inputCls}
               />
             </div>
-            <button type="submit" disabled={pending} className={btnPrimary}>
-              {pending ? "…" : "Add"}
+            <button type="submit" disabled={pendingKey !== null} className={`${btnPrimary} min-h-[44px]`}>
+              {isBusy("create") ? "Đang thêm…" : "Add"}
             </button>
           </form>
         ) : null}
 
-        {sources.length === 0 ? (
+        {items.length === 0 ? (
           <EmptyState
             title="Chưa có Douyin source"
             hint="Thêm profile URL Douyin để bắt đầu quét inventory."
@@ -151,7 +264,7 @@ export function SourcesPanel({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {sources.map((s) => (
+                  {items.map((s) => (
                     <tr key={s.id} className="align-top">
                       <td className="px-5 py-3">
                         <p className="font-semibold text-slate-900">{s.name}</p>
@@ -188,9 +301,9 @@ export function SourcesPanel({
                       </td>
                       <td className="px-5 py-3">
                         <div className="flex flex-wrap justify-end gap-1.5">
-                          <button type="button" className={btnSmall} disabled={pending}
-                            onClick={() => run(() => actionSyncSource(pipelineId, s.id), "Sync xong.")}>
-                            Sync Now
+                          <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                            onClick={() => doSync(s)}>
+                            {isBusy(`sync:${s.id}`) ? "Queued…" : "Sync Now"}
                           </button>
                           <Link
                             href={`/pipelines/${pipelineId}?tab=inventory&source_id=${s.id}`}
@@ -198,14 +311,14 @@ export function SourcesPanel({
                           >
                             View Inventory
                           </Link>
-                          <button type="button" className={btnSmall} disabled={pending}
-                            onClick={() => run(() => actionToggleSource(pipelineId, s.id, !s.enabled), s.enabled ? "Đã disable." : "Đã enable.")}>
-                            {s.enabled ? "Disable" : "Enable"}
+                          <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                            onClick={() => doToggle(s)}>
+                            {isBusy(`toggle:${s.id}`) ? "…" : s.enabled ? "Disable" : "Enable"}
                           </button>
                           <ConfirmButton
                             title="Xóa source?"
                             message={`Xóa "${s.name}"? Inventory của source này cũng bị xóa.`}
-                            onConfirm={() => actionDeleteSource(pipelineId, s.id)}
+                            onConfirm={() => doDelete(s)}
                           />
                         </div>
                       </td>
@@ -216,7 +329,7 @@ export function SourcesPanel({
             </div>
             {/* Mobile cards */}
             <div className="grid gap-3 p-4 md:hidden">
-              {sources.map((s) => (
+              {items.map((s) => (
                 <div key={s.id} className="rounded-xl border border-slate-200 p-3">
                   <div className="flex items-start justify-between gap-2">
                     <p className="min-w-0 truncate font-semibold text-slate-900">{s.name}</p>
@@ -241,18 +354,18 @@ export function SourcesPanel({
                     </p>
                   ) : null}
                   <div className="mt-3 grid grid-cols-2 gap-1.5">
-                    <button type="button" className={btnSmall} disabled={pending}
-                      onClick={() => run(() => actionSyncSource(pipelineId, s.id), "Sync xong.")}>
-                      Sync Now
+                    <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                      onClick={() => doSync(s)}>
+                      {isBusy(`sync:${s.id}`) ? "Queued…" : "Sync Now"}
                     </button>
                     <Link href={`/pipelines/${pipelineId}?tab=inventory&source_id=${s.id}`} className={btnSmall}>
                       Inventory
                     </Link>
-                    <button type="button" className={btnSmall} disabled={pending}
-                      onClick={() => run(() => actionToggleSource(pipelineId, s.id, !s.enabled), "OK")}>
-                      {s.enabled ? "Disable" : "Enable"}
+                    <button type="button" className={btnSmall} disabled={pendingKey !== null}
+                      onClick={() => doToggle(s)}>
+                      {isBusy(`toggle:${s.id}`) ? "…" : s.enabled ? "Disable" : "Enable"}
                     </button>
-                    <ConfirmButton title="Xóa source?" message={`Xóa "${s.name}"?`} onConfirm={() => actionDeleteSource(pipelineId, s.id)} />
+                    <ConfirmButton title="Xóa source?" message={`Xóa "${s.name}"?`} onConfirm={() => doDelete(s)} />
                   </div>
                 </div>
               ))}

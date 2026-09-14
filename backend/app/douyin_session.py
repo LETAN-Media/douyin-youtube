@@ -258,6 +258,130 @@ def _watch_login(session_id: str, deadline: datetime) -> None:
     logger.info("Douyin session %s expired waiting for QR scan", session_id)
 
 
+def queue_login_flow() -> dict[str, Any]:
+    """Queue a QR login flow and return immediately (<500ms).
+
+    Browser launch + QR capture run in a background daemon thread.
+    Dashboard must poll get_flow_status() every 2-5s for QR + status.
+    No HTTP request is held while Playwright scans.
+    """
+    from app.models import DouyinSession
+
+    timeout_seconds = int(getattr(settings, "douyin_login_timeout_seconds", 300) or 300)
+
+    with _registry_lock:
+        for tracked_id, flow in list(_active_flows.items()):
+            if flow.get("deadline") is not None and utcnow() < flow["deadline"]:
+                raise ValueError("A Douyin login flow is already in progress")
+            _active_flows.pop(tracked_id, None)
+
+    with SessionLocal.begin() as db:
+        row = DouyinSession(status="pending", label="Douyin")
+        db.add(row)
+        db.flush()
+        session_id = row.id
+        deadline = utcnow() + timedelta(seconds=timeout_seconds)
+        row.expires_at = deadline
+
+    worker = threading.Thread(
+        target=_run_qr_launch, args=(session_id, timeout_seconds), daemon=True
+    )
+    worker.start()
+    return {
+        "session_id": session_id,
+        "status": "pending",
+        "qr_image_b64": None,
+        "expires_at": deadline.isoformat(),
+    }
+
+
+def _run_qr_launch(session_id: str, timeout_seconds: int) -> None:
+    """Background worker: launch browser, capture QR, register flow + watcher."""
+    from playwright.sync_api import sync_playwright
+
+    from app.models import DouyinSession
+
+    browser = None
+    context = None
+    try:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=DOUYIN_USER_AGENT,
+            locale="zh-CN",
+            viewport={"width": 1366, "height": 900},
+        )
+        page = context.new_page()
+        try:
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception as exc:
+            raise RuntimeError(f"Douyin login page failed to load: {exc}") from exc
+        page.wait_for_timeout(5000)
+
+        try:
+            page.wait_for_selector(f"text={QR_TAB_TEXT}", timeout=30000)
+        except Exception as exc:
+            raise RuntimeError(
+                "Douyin QR login did not appear (page may be challenged)"
+            ) from exc
+
+        png_path = _qr_png_path(session_id)
+        if not _capture_qr_screenshot(page, png_path):
+            raise RuntimeError("Failed to capture Douyin QR login image")
+
+        qr_b64 = _png_to_b64(png_path)
+        if not qr_b64:
+            raise RuntimeError("Captured QR image is empty")
+
+        deadline = utcnow() + timedelta(seconds=timeout_seconds)
+        with SessionLocal.begin() as db:
+            row = db.get(DouyinSession, session_id)
+            if row is not None:
+                row.expires_at = deadline
+
+        with _registry_lock:
+            _active_flows[session_id] = {
+                "browser": browser,
+                "context": context,
+                "page": page,
+                "playwright": playwright,
+                "deadline": deadline,
+            }
+
+        watcher = threading.Thread(
+            target=_watch_login, args=(session_id, deadline), daemon=True
+        )
+        watcher.start()
+    except Exception as exc:
+        logger.exception("Background QR launch failed for %s", session_id)
+        with SessionLocal.begin() as db:
+            row = db.get(DouyinSession, session_id)
+            if row is not None and row.status == "pending":
+                row.status = "failed"
+                row.last_error = str(exc)[:500] or "Failed to open Douyin QR login"
+        try:
+            if context is not None:
+                context.close()
+        except Exception:
+            pass
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            _qr_png_path(session_id).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def start_login_flow() -> dict[str, Any]:
     """Launch a real browser, open the Douyin QR login, return QR image."""
     from playwright.sync_api import sync_playwright
