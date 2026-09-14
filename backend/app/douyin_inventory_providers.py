@@ -56,11 +56,11 @@ def cookies_configured() -> bool:
 def decode_netscape_cookies_raw() -> str:
     raw_b64 = (settings.douyin_cookies_b64 or "").strip()
     if not raw_b64:
-        raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
+        raise DouyinInventoryError("DOUYIN_COOKIES_B64 is not configured")
     try:
         return base64.b64decode(raw_b64).decode("utf-8", errors="replace")
     except Exception as exc:
-        raise DouyinAuthRequiredError(
+        raise DouyinInventoryError(
             "Douyin cookies are invalid (base64 decode failed)"
         ) from exc
 
@@ -142,10 +142,21 @@ def load_playwright_cookies() -> list[dict[str, Any]]:
     text = decode_netscape_cookies_raw()
     parsed = parse_netscape_cookies(text)
     if not parsed:
-        raise DouyinAuthRequiredError(
+        raise DouyinInventoryError(
             "Douyin cookies are empty or invalid (no cookies parsed)"
         )
     return netscape_to_playwright_cookies(parsed)
+
+
+def load_cookies_optional() -> list[dict[str, Any]]:
+    """Return Playwright cookies, or [] when DOUYIN_COOKIES_B64 is empty.
+
+    Cookies are OPTIONAL: anonymous access is always tried first. Never
+    raises DouyinAuthRequiredError just because the env var is empty.
+    """
+    if not cookies_configured():
+        return []
+    return load_playwright_cookies()
 
 
 def cookies_look_expired(parsed: list[dict[str, Any]]) -> bool:
@@ -159,6 +170,58 @@ def cookies_look_expired(parsed: list[dict[str, Any]]) -> bool:
     if not expirable:
         return False
     return all(int(c.get("expires") or 0) < now for c in expirable)
+
+
+# ---------------------------------------------------------------------------
+# Auth-wall detection + last access probe (for session API, no cookie values)
+# ---------------------------------------------------------------------------
+
+_AUTH_WALL_CONTENT_MARKERS = (
+    "login",
+    "登录",
+    "验证",
+    "captcha",
+    "slider",
+    "verify",
+    "challenge",
+)
+
+_AUTH_WALL_STATUS_CODES = {401, 403}
+
+
+def page_content_looks_like_auth_wall(content: str) -> bool:
+    lowered = (content or "").lower()
+    hits = sum(1 for marker in _AUTH_WALL_CONTENT_MARKERS if marker in lowered)
+    # Require combined signals to avoid false positives on normal pages
+    # that merely mention "login" once.
+    return hits >= 2 or ("验证" in (content or ""))
+
+
+def response_status_looks_like_auth_wall(status: int | None) -> bool:
+    try:
+        return int(status) in _AUTH_WALL_STATUS_CODES
+    except (TypeError, ValueError):
+        return False
+
+
+_last_access_probe: dict[str, Any] | None = None
+
+
+def _record_access_probe(
+    anonymous_ok: bool | None,
+    cookie_required: bool | None,
+) -> None:
+    global _last_access_probe
+    _last_access_probe = {
+        "anonymous_ok": anonymous_ok,
+        "cookie_required": cookie_required,
+        "at": utcnow().isoformat(),
+    }
+
+
+def get_last_access_probe() -> dict[str, Any] | None:
+    probe = _last_access_probe
+    return dict(probe) if probe else None
 
 
 # ---------------------------------------------------------------------------
@@ -308,11 +371,6 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
         self.headless = headless
         self.timeout_ms = timeout_ms
 
-    def _require_cookies(self) -> list[dict[str, Any]]:
-        if not cookies_configured():
-            raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
-        return load_playwright_cookies()
-
     def fetch_all(
         self,
         profile_url: str,
@@ -332,16 +390,11 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
         return videos[:limit]
 
     # -- core scan (blocking; callers must run it in a thread) ------------
+    # Cookies are OPTIONAL. Flow: anonymous attempt first; only when the
+    # anonymous attempt hits a login wall / captcha / challenge / auth
+    # HTTP status / auth-caused empty response do we retry with cookies
+    # (if configured) or raise DouyinAuthRequiredError (if not).
     def _scan(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
-        cookies = self._require_cookies()
-
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:
-            raise DouyinInventoryError(
-                "Playwright is not installed on this backend (pip install playwright)"
-            ) from exc
-
         sec_uid = self._resolve_sec_uid(sec_uid_or_url)
         target = f"https://www.douyin.com/user/{sec_uid}" if sec_uid else sec_uid_or_url
 
@@ -349,10 +402,76 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
         if not full:
             max_pages = min(max_pages, 5)
 
+        videos, info = self._attempt(target, cookies=None, full=full, max_pages=max_pages)
+        if videos:
+            _record_access_probe(anonymous_ok=True, cookie_required=False)
+            logger.info("Anonymous Douyin scan collected %s videos", len(videos))
+            return videos
+
+        if not info.get("auth_wall_hit"):
+            # No auth evidence: genuinely empty profile or non-auth failure
+            # already raised inside _attempt. Empty honest result.
+            _record_access_probe(anonymous_ok=False, cookie_required=False)
+            return videos
+
+        # Anonymous hit an auth wall (login wall / captcha / challenge /
+        # auth HTTP status / auth-caused empty response). Retry with
+        # cookies when available.
+        cookie_jar = load_cookies_optional()
+        if not cookie_jar:
+            _record_access_probe(anonymous_ok=False, cookie_required=True)
+            raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
+
+        logger.info("Anonymous scan hit auth wall; retrying with cookies")
+        videos, info = self._attempt(
+            target, cookies=cookie_jar, full=full, max_pages=max_pages
+        )
+        if videos:
+            _record_access_probe(anonymous_ok=False, cookie_required=True)
+            return videos
+        if info.get("challenge_hit"):
+            raise DouyinInventoryError(
+                "Douyin challenge/captcha persists after cookie retry "
+                "(session expired or blocked)"
+            )
+        if info.get("auth_wall_hit"):
+            raise DouyinInventoryError(
+                "Douyin profile still requires login after cookie retry "
+                "(session expired or challenged)"
+            )
+        _record_access_probe(anonymous_ok=False, cookie_required=True)
+        return videos
+
+    def _attempt(
+        self,
+        target: str,
+        cookies: list[dict[str, Any]] | None,
+        full: bool,
+        max_pages: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """One browser attempt. Returns (ordered videos, info).
+
+        info: {"auth_wall_hit": bool, "payloads_seen": int,
+               "challenge_hit": bool}
+        Raises DouyinInventoryError on hard blocks / browser failures
+        (including missing Playwright installation).
+        Never raises DouyinAuthRequiredError (the caller decides that).
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise DouyinInventoryError(
+                "Playwright is not installed on this backend (pip install playwright)"
+            ) from exc
+
         collected: dict[str, dict[str, Any]] = {}
         seen_cursors: set[str] = set()
         last_new_count = 0
         no_progress_rounds = 0
+        payloads_seen = 0
+        auth_wall_hit = False
+        challenge_hit = False
+        document_auth_status = False
 
         browser = None
         context = None
@@ -381,6 +500,7 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
 
                 page = context.new_page()
                 responses: list[Any] = []
+                statuses: list[Any] = []
 
                 def _on_response(response: Any) -> None:
                     try:
@@ -389,21 +509,52 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
                         return
                     if AWEME_POST_MARKER in url:
                         responses.append(response)
+                        try:
+                            statuses.append(response.status)
+                        except Exception:
+                            pass
 
                 page.on("response", _on_response)
-                page.goto(target, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                try:
+                    main_response = page.goto(
+                        target, wait_until="domcontentloaded", timeout=self.timeout_ms
+                    )
+                    if main_response is not None:
+                        try:
+                            if response_status_looks_like_auth_wall(main_response.status):
+                                document_auth_status = True
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    raise DouyinInventoryError(
+                        f"Douyin profile page failed to load: {exc}"
+                    ) from exc
                 page.wait_for_timeout(4000)
 
-                # Detect hard blocks/challenges without inventing data.
+                # Captcha/verify challenge: treat as an auth wall so the
+                # caller retries with cookies when available. Only a
+                # challenge that persists after cookie retry is a hard FAIL.
+                # Never invent inventory data here.
                 try:
                     content = page.content()
                 except Exception:
                     content = ""
-                lowered = content.lower()
-                if "verify" in lowered and ("slider" in lowered or "captcha" in lowered or "验证" in content):
-                    raise DouyinInventoryError(
-                        "Douyin challenge/captcha detected during profile scan"
-                    )
+                lowered = (content or "").lower()
+                if "verify" in lowered and (
+                    "slider" in lowered or "captcha" in lowered or "验证" in content
+                ):
+                    challenge_hit = True
+                    auth_wall_hit = True
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                    return [], {
+                        "auth_wall_hit": True,
+                        "payloads_seen": payloads_seen,
+                        "challenge_hit": True,
+                    }
+                page_wall = page_content_looks_like_auth_wall(content)
 
                 for _ in range(max_pages):
                     # Drain intercepted aweme/post responses.
@@ -412,11 +563,16 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
                     cursor_repeated_this_round = False
                     while responses:
                         response = responses.pop(0)
+                        status = statuses.pop(0) if statuses else None
+                        if response_status_looks_like_auth_wall(status):
+                            auth_wall_hit = True
+                            continue
                         try:
                             payload = response.json()
                         except Exception:
                             continue
                         payloads_this_round += 1
+                        payloads_seen += 1
                         videos, has_more, max_cursor = parse_aweme_post_response(payload)
                         for video in videos:
                             collected.setdefault(video["video_id"], video)
@@ -468,13 +624,25 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
                 # Final drain.
                 while responses:
                     response = responses.pop(0)
+                    status = statuses.pop(0) if statuses else None
+                    if response_status_looks_like_auth_wall(status):
+                        auth_wall_hit = True
+                        continue
                     try:
                         payload = response.json()
                     except Exception:
                         continue
+                    payloads_seen += 1
                     videos, _, _ = parse_aweme_post_response(payload)
                     for video in videos:
                         collected.setdefault(video["video_id"], video)
+
+                if document_auth_status:
+                    auth_wall_hit = True
+                # Empty response caused by auth: no usable payloads at all
+                # while the page itself shows login-wall signals.
+                if not collected and payloads_seen == 0 and (page_wall or document_auth_status):
+                    auth_wall_hit = True
 
                 try:
                     page.close()
@@ -499,11 +667,18 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
         except Exception:
             pass
         logger.info(
-            "Playwright scan collected %s unique videos (full=%s)",
+            "Douyin scan attempt (anonymous=%s) collected %s unique videos, "
+            "payloads=%s auth_wall=%s",
+            not bool(cookies),
             len(ordered),
-            full,
+            payloads_seen,
+            auth_wall_hit,
         )
-        return ordered
+        return ordered, {
+            "auth_wall_hit": auth_wall_hit,
+            "payloads_seen": payloads_seen,
+            "challenge_hit": challenge_hit,
+        }
 
     @staticmethod
     def _resolve_sec_uid(value: str) -> str:

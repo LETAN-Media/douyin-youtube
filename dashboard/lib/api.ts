@@ -383,6 +383,9 @@ export async function getYoutubeOauthUrl(destinationId: string): Promise<{
 
 export async function getDouyinSession(): Promise<{
   configured: boolean;
+  cookie_configured?: boolean;
+  anonymous_access?: boolean | null;
+  cookie_required?: boolean | null;
   last_validation?: string | null;
   valid: boolean;
   error?: string | null;

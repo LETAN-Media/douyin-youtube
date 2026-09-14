@@ -2100,20 +2100,32 @@ def sync_pipeline_now(
     ],
 )
 def douyin_session_status() -> dict:
-    """Cookie status only. Never returns cookie values."""
+    """Cookie/session status only. Never returns cookie values.
+
+    Does NOT launch a browser: anonymous_access/cookie_required reflect
+    the last real profile scan outcome (None when no scan has run yet).
+    """
     from app.douyin_inventory_providers import (
         cookies_configured,
         cookies_look_expired,
+        get_last_access_probe,
         parse_netscape_cookies,
     )
 
     configured = cookies_configured()
+    probe = get_last_access_probe()
+    anonymous_access = probe["anonymous_ok"] if probe else None
+    cookie_required = probe["cookie_required"] if probe else None
+
     if not configured:
         return {
             "configured": False,
+            "cookie_configured": False,
+            "anonymous_access": anonymous_access,
+            "cookie_required": cookie_required,
             "last_validation": _utcnow().isoformat(),
             "valid": False,
-            "error": "Douyin login cookies are required for profile inventory sync",
+            "error": "DOUYIN_COOKIES_B64 not configured (optional; needed only if anonymous access is blocked)",
         }
 
     try:
@@ -2124,6 +2136,9 @@ def douyin_session_status() -> dict:
         if not parsed:
             return {
                 "configured": True,
+                "cookie_configured": True,
+                "anonymous_access": anonymous_access,
+                "cookie_required": cookie_required,
                 "last_validation": _utcnow().isoformat(),
                 "valid": False,
                 "error": "Douyin session expired",
@@ -2131,18 +2146,27 @@ def douyin_session_status() -> dict:
         if cookies_look_expired(parsed):
             return {
                 "configured": True,
+                "cookie_configured": True,
+                "anonymous_access": anonymous_access,
+                "cookie_required": cookie_required,
                 "last_validation": _utcnow().isoformat(),
                 "valid": False,
                 "error": "Douyin session expired",
             }
         return {
             "configured": True,
+            "cookie_configured": True,
+            "anonymous_access": anonymous_access,
+            "cookie_required": cookie_required,
             "last_validation": _utcnow().isoformat(),
             "valid": True,
         }
     except Exception as exc:
         return {
             "configured": True,
+            "cookie_configured": True,
+            "anonymous_access": anonymous_access,
+            "cookie_required": cookie_required,
             "last_validation": _utcnow().isoformat(),
             "valid": False,
             "error": str(exc)[:500],

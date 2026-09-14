@@ -98,19 +98,173 @@ class TestAwemePostParsing(unittest.TestCase):
         self.assertEqual(cursor, "")
 
 
-class TestPlaywrightAuthRequired(unittest.TestCase):
-    def test_missing_cookies_raises_clear_error(self):
+class TestPlaywrightAnonymousFirst(unittest.TestCase):
+    def _provider(self):
+        return PlaywrightDouyinInventoryProvider()
+
+    def test_empty_cookies_returns_empty_list_without_raise(self):
         import app.douyin_inventory_providers as providers
 
         original = providers.settings.douyin_cookies_b64
         providers.settings.douyin_cookies_b64 = ""
         try:
-            with self.assertRaises(DouyinAuthRequiredError) as ctx:
-                PlaywrightDouyinInventoryProvider().fetch_all(
+            # Cookies are OPTIONAL: no raise just because env is empty.
+            self.assertEqual(providers.load_cookies_optional(), [])
+            self.assertFalse(providers.cookies_configured())
+        finally:
+            providers.settings.douyin_cookies_b64 = original
+
+    def test_anonymous_videos_pass_without_cookie(self):
+        import app.douyin_inventory_providers as providers
+        from unittest.mock import patch
+
+        original = providers.settings.douyin_cookies_b64
+        providers.settings.douyin_cookies_b64 = ""
+        try:
+            provider = self._provider()
+            videos = [{"video_id": "1", "title": "t", "description": "",
+                       "url": "https://www.douyin.com/video/1",
+                       "douyin_created_at": None}]
+            with patch.object(
+                provider, "_attempt",
+                return_value=(videos, {"auth_wall_hit": False, "payloads_seen": 2}),
+            ) as mock_attempt:
+                result = provider.fetch_all(
                     "https://www.douyin.com/user/SEC123", "SEC123", "src"
                 )
-            self.assertIn("cookies are required", str(ctx.exception).lower())
+            self.assertEqual(result, videos)
+            # Only the anonymous attempt ran (cookies=None).
+            self.assertEqual(mock_attempt.call_count, 1)
+            self.assertIsNone(mock_attempt.call_args[1].get("cookies"))
+            probe = providers.get_last_access_probe()
+            self.assertEqual(
+                probe, {"anonymous_ok": True, "cookie_required": False,
+                        "at": probe["at"]}
+            )
+        finally:
+            providers.settings.douyin_cookies_b64 = original
+
+    def test_anonymous_auth_wall_without_cookie_raises_auth_required(self):
+        import app.douyin_inventory_providers as providers
+        from unittest.mock import patch
+
+        original = providers.settings.douyin_cookies_b64
+        providers.settings.douyin_cookies_b64 = ""
+        try:
+            provider = self._provider()
+            with patch.object(
+                provider, "_attempt",
+                return_value=([], {"auth_wall_hit": True, "payloads_seen": 0}),
+            ):
+                with self.assertRaises(DouyinAuthRequiredError) as ctx:
+                    provider.fetch_all(
+                        "https://www.douyin.com/user/SEC123", "SEC123", "src"
+                    )
             self.assertEqual(str(ctx.exception), AUTH_REQUIRED_MESSAGE)
+            probe = providers.get_last_access_probe()
+            self.assertFalse(probe["anonymous_ok"])
+            self.assertTrue(probe["cookie_required"])
+        finally:
+            providers.settings.douyin_cookies_b64 = original
+
+    def test_anonymous_auth_wall_retries_with_cookies(self):
+        import base64
+
+        import app.douyin_inventory_providers as providers
+        from unittest.mock import patch
+
+        netscape = ".douyin.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tabc123\n"
+        original = providers.settings.douyin_cookies_b64
+        providers.settings.douyin_cookies_b64 = base64.b64encode(
+            netscape.encode()
+        ).decode()
+        try:
+            provider = self._provider()
+            cookie_videos = [{"video_id": "9", "title": "t", "description": "",
+                              "url": "https://www.douyin.com/video/9",
+                              "douyin_created_at": None}]
+
+            def fake_attempt(target, cookies=None, full=True, max_pages=200):
+                if cookies is None:
+                    return [], {"auth_wall_hit": True, "payloads_seen": 0}
+                self.assertTrue(len(cookies) > 0)
+                return cookie_videos, {"auth_wall_hit": False, "payloads_seen": 3}
+
+            with patch.object(provider, "_attempt", side_effect=fake_attempt):
+                result = provider.fetch_all(
+                    "https://www.douyin.com/user/SEC123", "SEC123", "src"
+                )
+            self.assertEqual(result, cookie_videos)
+            probe = providers.get_last_access_probe()
+            self.assertFalse(probe["anonymous_ok"])
+            self.assertTrue(probe["cookie_required"])
+        finally:
+            providers.settings.douyin_cookies_b64 = original
+
+    def test_anonymous_empty_without_wall_returns_empty(self):
+        import app.douyin_inventory_providers as providers
+        from unittest.mock import patch
+
+        original = providers.settings.douyin_cookies_b64
+        providers.settings.douyin_cookies_b64 = ""
+        try:
+            provider = self._provider()
+            with patch.object(
+                provider, "_attempt",
+                return_value=([], {"auth_wall_hit": False, "payloads_seen": 2}),
+            ):
+                # Genuine empty (payloads seen, terminal page): no raise.
+                self.assertEqual(
+                    provider.fetch_all(
+                        "https://www.douyin.com/user/SEC123", "SEC123", "src"
+                    ),
+                    [],
+                )
+        finally:
+            providers.settings.douyin_cookies_b64 = original
+
+    def test_auth_wall_content_detection(self):
+        import app.douyin_inventory_providers as providers
+
+        self.assertTrue(
+            providers.page_content_looks_like_auth_wall(
+                "请登录后查看 login verify challenge"
+            )
+        )
+        self.assertTrue(providers.page_content_looks_like_auth_wall("请验证身份 验证"))
+        self.assertFalse(
+            providers.page_content_looks_like_auth_wall(
+                "<html><body>video list aweme content</body></html>"
+            )
+        )
+        self.assertTrue(providers.response_status_looks_like_auth_wall(403))
+        self.assertFalse(providers.response_status_looks_like_auth_wall(200))
+
+    def test_challenge_after_cookie_retry_is_hard_fail(self):
+        import app.douyin_inventory_providers as providers
+        from unittest.mock import patch
+
+        import base64
+
+        netscape = ".douyin.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tabc123\n"
+        original = providers.settings.douyin_cookies_b64
+        providers.settings.douyin_cookies_b64 = base64.b64encode(
+            netscape.encode()
+        ).decode()
+        try:
+            provider = PlaywrightDouyinInventoryProvider()
+            with patch.object(
+                provider, "_attempt",
+                return_value=([], {"auth_wall_hit": True, "payloads_seen": 0,
+                                   "challenge_hit": True}),
+            ):
+                with self.assertRaises(providers.DouyinInventoryError) as ctx:
+                    provider.fetch_all(
+                        "https://www.douyin.com/user/SEC123", "SEC123", "src"
+                    )
+            # Hard FAIL (not auth_required): cookies existed but challenge persists.
+            self.assertNotIsInstance(ctx.exception, DouyinAuthRequiredError)
+            self.assertIn("challenge", str(ctx.exception).lower())
         finally:
             providers.settings.douyin_cookies_b64 = original
 

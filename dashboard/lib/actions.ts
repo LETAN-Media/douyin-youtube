@@ -312,6 +312,9 @@ export async function actionGetOauthUrl(
 export async function actionGetDouyinSession(): Promise<
   ActionResult & {
     configured?: boolean;
+    cookieConfigured?: boolean;
+    anonymousAccess?: boolean | null;
+    cookieRequired?: boolean | null;
     valid?: boolean;
     errorDetail?: string;
     lastValidation?: string | null;
@@ -320,19 +323,30 @@ export async function actionGetDouyinSession(): Promise<
   try {
     const { getDouyinSession } = await import("./api");
     const data = await getDouyinSession();
-    if (!data.configured) {
-      return {
-        ok: false,
-        error: "Douyin Login Required: DOUYIN_COOKIES_B64 chưa được cấu hình.",
-        configured: false,
-        valid: false,
-      };
-    }
+    const cookieRequired = (data as { cookie_required?: boolean | null }).cookie_required ?? null;
+    const anonymousAccess = (data as { anonymous_access?: boolean | null }).anonymous_access ?? null;
+    const cookieConfigured = (data as { cookie_configured?: boolean }).cookie_configured ?? data.configured;
     if (!data.valid) {
+      // Cookies are optional: only a hard auth wall makes them required.
+      if (!data.configured && cookieRequired !== true) {
+        return {
+          ok: true,
+          configured: false,
+          cookieConfigured: false,
+          anonymousAccess,
+          cookieRequired,
+          valid: false,
+          errorDetail: data.error ?? undefined,
+          lastValidation: data.last_validation ?? null,
+        };
+      }
       return {
         ok: false,
         error: data.error || "Douyin session expired",
-        configured: true,
+        configured: data.configured,
+        cookieConfigured,
+        anonymousAccess,
+        cookieRequired,
         valid: false,
         errorDetail: data.error ?? undefined,
         lastValidation: data.last_validation ?? null,
@@ -340,7 +354,10 @@ export async function actionGetDouyinSession(): Promise<
     }
     return {
       ok: true,
-      configured: true,
+      configured: data.configured,
+      cookieConfigured,
+      anonymousAccess,
+      cookieRequired,
       valid: true,
       lastValidation: data.last_validation ?? null,
     };

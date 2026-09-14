@@ -47,7 +47,13 @@ export function SourcesPanel({
     start(async () => {
       const r = await actionGetDouyinSession();
       if (r.ok) {
-        toast("Douyin session hợp lệ.", "success");
+        if (r.cookieRequired === true) {
+          toast("Cookie required: anonymous access bị chặn, cần DOUYIN_COOKIES_B64.", "error");
+        } else if (r.anonymousAccess === true) {
+          toast("Anonymous access hoạt động — không cần cookie.", "success");
+        } else {
+          toast("Douyin session hợp lệ.", "success");
+        }
       } else {
         toast(r.error, "error");
       }

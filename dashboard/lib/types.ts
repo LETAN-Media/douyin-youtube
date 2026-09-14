@@ -203,6 +203,9 @@ export type ActionResult = { ok: true } | { ok: false; error: string };
 
 export interface DouyinSessionStatus {
   configured: boolean;
+  cookie_configured?: boolean;
+  anonymous_access?: boolean | null;
+  cookie_required?: boolean | null;
   last_validation?: string | null;
   valid: boolean;
   error?: string | null;
