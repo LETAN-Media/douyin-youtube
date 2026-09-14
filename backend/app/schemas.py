@@ -39,13 +39,14 @@ class PipelineBase(BaseModel):
 
     daily_upload_limit: int = 6
     upload_slots: list[str] | None = Field(
-        default=["09:00", "13:00", "17:00", "21:00"],
+        default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
     )
     backlog_slots_per_day: int = 4
     new_slots_per_day: int = 2
     backlog_order: Literal["asc", "desc"] = "asc"
     source_selection_strategy: Literal["round_robin"] = "round_robin"
     backlog_threshold_days: int = 7
+    timezone: str = "UTC"
 
 
 class PipelineCreate(PipelineBase):
@@ -112,6 +113,10 @@ class PipelineUpdate(BaseModel):
     backlog_threshold_days: int | None = Field(
         default=None,
         ge=1,
+    )
+    timezone: str | None = Field(
+        default=None,
+        max_length=50,
     )
 
 

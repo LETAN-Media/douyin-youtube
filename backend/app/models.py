@@ -135,7 +135,7 @@ class Pipeline(Base):
     upload_slots: Mapped[list[str] | None] = mapped_column(
         JSON,
         nullable=True,
-        default=lambda: ["09:00", "13:00", "17:00", "21:00"],
+        default=lambda: ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
     )
 
     backlog_slots_per_day: Mapped[int] = mapped_column(
@@ -172,6 +172,12 @@ class Pipeline(Base):
         Integer,
         nullable=False,
         default=7,
+    )
+
+    timezone: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="UTC",
     )
 
 
@@ -443,6 +449,11 @@ class VideoJob(Base):
         nullable=True,
     )
 
+    schedule_slot_key: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -454,6 +465,14 @@ class VideoJob(Base):
         default=utcnow,
         onupdate=utcnow,
         nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "pipeline_id",
+            "schedule_slot_key",
+            name="uq_video_job_pipeline_slot",
+        ),
     )
 
 

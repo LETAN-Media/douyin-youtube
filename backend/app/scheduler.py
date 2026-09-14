@@ -1,9 +1,10 @@
 import asyncio
 import logging
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -18,15 +19,53 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def get_pipeline_local_now(pipeline: Pipeline) -> datetime:
+    tz_name = pipeline.timezone or "UTC"
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+
+    return datetime.now(tz)
+
+
+def get_local_day_bounds(pipeline: Pipeline, now: datetime | None = None) -> tuple[datetime, datetime]:
+    local_now = now or get_pipeline_local_now(pipeline)
+    tz_name = pipeline.timezone or "UTC"
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+
+    local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_end = local_start + timedelta(days=1)
+
+    utc_start = local_start.astimezone(timezone.utc)
+    utc_end = local_end.astimezone(timezone.utc)
+
+    return utc_start, utc_end
+
+
 def get_next_upload_slot(
     pipeline: Pipeline,
     now: datetime,
 ) -> datetime | None:
-    slots = pipeline.upload_slots or ["09:00", "13:00", "17:00", "21:00"]
+    slots = pipeline.upload_slots or ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"]
     if not slots:
         return None
 
-    today = now.date()
+    tz_name = pipeline.timezone or "UTC"
+    try:
+        from zoneinfo import ZoneInfo
+        local_tz = ZoneInfo(tz_name)
+    except Exception:
+        local_tz = timezone.utc
+
+    local_now = now.astimezone(local_tz)
+    today_local = local_now.date()
+
     candidates: list[datetime] = []
 
     for time_str in slots:
@@ -35,27 +74,40 @@ def get_next_upload_slot(
         except ValueError:
             continue
 
-        slot_time = datetime.combine(today, time(hour, minute))
-        if slot_time.tzinfo is None:
-            slot_time = slot_time.replace(tzinfo=timezone.utc)
-        candidates.append(slot_time)
+        slot_local = datetime.combine(today_local, datetime.min.time().replace(hour=hour, minute=minute))
+        slot_local = slot_local.replace(tzinfo=local_tz)
+        slot_utc = slot_local.astimezone(timezone.utc)
+        candidates.append(slot_utc)
 
     candidates.sort()
 
-    future = [slot for slot in candidates if slot >= now]
+    for slot in candidates:
+        if slot <= now < slot + timedelta(minutes=10):
+            return slot
+
+    future = [slot for slot in candidates if slot > now]
     if future:
         return future[0]
 
-    tomorrow = today + timedelta(days=1)
+    tomorrow_local = today_local + timedelta(days=1)
     try:
         hour, minute = map(int, slots[0].split(":"))
     except ValueError:
         return None
 
-    slot_time = datetime.combine(tomorrow, time(hour, minute))
-    if slot_time.tzinfo is None:
-        slot_time = slot_time.replace(tzinfo=timezone.utc)
-    return slot_time
+    slot_local = datetime.combine(tomorrow_local, datetime.min.time().replace(hour=hour, minute=minute))
+    slot_local = slot_local.replace(tzinfo=local_tz)
+    return slot_local.astimezone(timezone.utc)
+
+
+def get_slot_type(slot_index: int, pipeline: Pipeline) -> str:
+    backlog_count = pipeline.backlog_slots_per_day or 4
+    new_count = pipeline.new_slots_per_day or 2
+    total = max(backlog_count + new_count, 1)
+    normalized = slot_index % total
+    if normalized < backlog_count:
+        return "backlog"
+    return "new"
 
 
 def _try_pick_video(
@@ -117,45 +169,63 @@ def pick_video(
     return _try_pick_video(db, pipeline, other_type)
 
 
+def count_todays_released_jobs(db: Session, pipeline: Pipeline, local_day_start_utc: datetime) -> int:
+    today_start = local_day_start_utc
+    today_end = today_start + timedelta(days=1)
+
+    count = db.execute(
+        select(func.count(VideoJob.id))
+        .where(VideoJob.pipeline_id == pipeline.id)
+        .where(VideoJob.created_at >= today_start)
+        .where(VideoJob.created_at < today_end)
+        .where(
+            VideoJob.status.in_(
+                ["published", "pending", "downloading", "uploading"]
+            )
+        )
+    ).scalar_one_or_none()
+
+    return count or 0
+
+
 def schedule_for_pipeline(
     db: Session,
     pipeline: Pipeline,
+    now: datetime | None = None,
 ) -> None:
-    now = utcnow()
+    if now is None:
+        now = utcnow()
 
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_published = db.execute(
-        select(func.count(VideoJob.id))
-        .where(VideoJob.pipeline_id == pipeline.id)
-        .where(VideoJob.status == "published")
-        .where(VideoJob.created_at >= today_start)
-    ).scalar_one_or_none()
-    today_published = today_published or 0
-
-    if today_published >= pipeline.daily_upload_limit:
-        logger.info(
-            "Pipeline %s reached daily limit %s/%s",
-            pipeline.id,
-            today_published,
-            pipeline.daily_upload_limit,
-        )
+    slots = pipeline.upload_slots or ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"]
+    if not slots:
         return
 
     next_slot = get_next_upload_slot(pipeline, now)
-    if next_slot is None or (next_slot - now) > timedelta(minutes=5):
+    if next_slot is None:
+        return
+
+    if not (next_slot <= now < next_slot + timedelta(minutes=10)):
         logger.info(
-            "Pipeline %s next slot %s, not yet time",
+            "Pipeline %s next slot %s, outside grace window",
             pipeline.id,
             next_slot,
         )
         return
 
-    slot_cycle = max(pipeline.backlog_slots_per_day + pipeline.new_slots_per_day, 1)
-    slot_index = today_published % slot_cycle
-    if slot_index < pipeline.backlog_slots_per_day:
-        slot_type = "backlog"
-    else:
-        slot_type = "new"
+    local_day_start_utc, _ = get_local_day_bounds(pipeline, now)
+    today_released = count_todays_released_jobs(db, pipeline, local_day_start_utc)
+
+    if today_released >= pipeline.daily_upload_limit:
+        logger.info(
+            "Pipeline %s reached daily limit %s/%s",
+            pipeline.id,
+            today_released,
+            pipeline.daily_upload_limit,
+        )
+        return
+
+    slot_index = next_slot.hour * 60 + next_slot.minute
+    slot_type = get_slot_type(slot_index, pipeline)
 
     video = pick_video(db, pipeline, slot_type)
     if video is None:
@@ -166,6 +236,8 @@ def schedule_for_pipeline(
         )
         return
 
+    slot_key = next_slot.isoformat()
+
     job = VideoJob(
         source_url=video.url,
         source_title=video.title,
@@ -175,13 +247,25 @@ def schedule_for_pipeline(
         status="pending",
         pipeline_id=pipeline.id,
         source_video_id=video.video_id,
+        schedule_slot_key=slot_key,
     )
+
     db.add(job)
 
     video.status = "scheduled"
     video.scheduled_at = now
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        logger.info(
+            "Pipeline %s slot %s already claimed, skipping",
+            pipeline.id,
+            slot_key,
+        )
+        return
+
     logger.info(
         "Scheduled video %s for pipeline %s at slot %s",
         video.video_id,

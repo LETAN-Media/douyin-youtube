@@ -127,6 +127,15 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "video_jobs", "schedule_slot_key"):
+            logger.info("Adding schedule_slot_key to video_jobs")
+            connection.execute(
+                text(
+                    "ALTER TABLE video_jobs "
+                    "ADD COLUMN IF NOT EXISTS schedule_slot_key VARCHAR(100)"
+                )
+            )
+
         if not column_exists(connection, "douyin_sources", "original_profile_url"):
             logger.info("Adding original_profile_url to douyin_sources")
             connection.execute(
@@ -154,6 +163,7 @@ def run_migrations() -> None:
             ("source_selection_strategy", "VARCHAR(50) DEFAULT 'round_robin'"),
             ("source_selection_cursor", "INTEGER DEFAULT 0"),
             ("backlog_threshold_days", "INTEGER DEFAULT 7"),
+            ("timezone", "VARCHAR(50) DEFAULT 'UTC'"),
         ]
 
         for column_name, column_type in pipeline_columns:

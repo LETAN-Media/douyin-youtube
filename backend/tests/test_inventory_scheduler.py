@@ -133,17 +133,19 @@ class TestScheduler(unittest.TestCase):
         self.engine.dispose()
 
     def _make_pipeline(self, **kwargs):
-        pipeline = Pipeline(
-            id=str(uuid4()),
-            name="Test",
-            slug="test",
-            enabled=True,
-            daily_upload_limit=6,
-            backlog_slots_per_day=4,
-            new_slots_per_day=2,
-            upload_slots=["09:00", "13:00", "17:00", "21:00"],
-            **kwargs,
-        )
+        defaults = {
+            "id": str(uuid4()),
+            "name": "Test",
+            "slug": "test",
+            "enabled": True,
+            "daily_upload_limit": 6,
+            "backlog_slots_per_day": 4,
+            "new_slots_per_day": 2,
+            "upload_slots": ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+            "timezone": "UTC",
+        }
+        defaults.update(kwargs)
+        pipeline = Pipeline(**defaults)
         self.db.add(pipeline)
         self.db.flush()
         return pipeline
@@ -178,29 +180,232 @@ class TestScheduler(unittest.TestCase):
         self.db.flush()
         return video
 
-    def test_daily_limit_6(self):
-        pipeline = self._make_pipeline()
+    def test_timezone_ho_chi_minh(self):
+        pipeline = self._make_pipeline(timezone="Asia/Ho_Chi_Minh")
         source = self._make_source(pipeline)
-
-        now = datetime.datetime.now(datetime.timezone.utc)
-        for i in range(6):
-            job = __import__("app.models", fromlist=["VideoJob"]).VideoJob(
-                id=str(uuid4()),
-                source_url="https://www.douyin.com/video/x",
-                status="published",
-                pipeline_id=pipeline.id,
-                source_video_id=str(uuid4()),
-                created_at=now - datetime.timedelta(hours=i),
-            )
-            self.db.add(job)
-        self.db.commit()
-
         video = self._make_video(source, pipeline)
-        schedule_for_pipeline(self.db, pipeline)
+
+        utc_09_ict = datetime.datetime(2026, 9, 14, 2, 0, tzinfo=datetime.timezone.utc)
+        schedule_for_pipeline(self.db, pipeline, now=utc_09_ict)
         self.db.commit()
 
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
         self.assertEqual(scheduled, 0)
+
+        utc_11_ict = datetime.datetime(2026, 9, 14, 4, 0, tzinfo=datetime.timezone.utc)
+        schedule_for_pipeline(self.db, pipeline, now=utc_11_ict)
+        self.db.commit()
+
+        scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
+        self.assertEqual(scheduled, 1)
+
+    def test_six_daily_slots(self):
+        pipeline = self._make_pipeline()
+        source = self._make_source(pipeline)
+
+        slot_utc_times = [
+            datetime.datetime(2026, 9, 14, h, 5, tzinfo=datetime.timezone.utc)
+            for h in [8, 11, 14, 17, 20, 23]
+        ]
+
+        for i, slot_time in enumerate(slot_utc_times):
+            video = self._make_video(source, pipeline, video_id=f"v{i}")
+            schedule_for_pipeline(self.db, pipeline, now=slot_time)
+            self.db.commit()
+
+        scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
+        self.assertEqual(scheduled, 6)
+
+    def test_one_job_per_slot_poll_10_times(self):
+        pipeline = self._make_pipeline()
+        source = self._make_source(pipeline)
+        video = self._make_video(source, pipeline)
+
+        slot_time = datetime.datetime(2026, 9, 14, 8, 0, tzinfo=datetime.timezone.utc)
+        for _ in range(10):
+            schedule_for_pipeline(self.db, pipeline, now=slot_time)
+            self.db.commit()
+
+        scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
+        self.assertEqual(scheduled, 1)
+
+    def test_restart_no_duplicate(self):
+        db_path = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
+        db_path.close()
+
+        restart_engine = create_engine(f"sqlite:///{db_path.name}")
+        Base.metadata.create_all(restart_engine)
+        RestartSession = sessionmaker(bind=restart_engine)
+
+        with RestartSession() as db:
+            pipeline = Pipeline(
+                id=str(uuid4()),
+                name="Test",
+                slug="test-restart",
+                enabled=True,
+                daily_upload_limit=6,
+                upload_slots=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+                timezone="UTC",
+            )
+            db.add(pipeline)
+            db.flush()
+
+            source = DouyinSource(
+                id=str(uuid4()),
+                pipeline_id=pipeline.id,
+                name="Source",
+                profile_url="https://www.douyin.com/user/test",
+                enabled=True,
+            )
+            db.add(source)
+            db.flush()
+
+            video = DouyinVideo(
+                id=str(uuid4()),
+                source_id=source.id,
+                pipeline_id=pipeline.id,
+                video_id=str(uuid4()),
+                title="Test",
+                url="https://www.douyin.com/video/test",
+                status="new",
+            )
+            db.add(video)
+            db.commit()
+
+            pipeline_id = pipeline.id
+            source_id = source.id
+            video_id = video.id
+
+            slot_time = datetime.datetime(2026, 9, 14, 8, 0, tzinfo=datetime.timezone.utc)
+            schedule_for_pipeline(db, pipeline, now=slot_time)
+            db.commit()
+
+        restart_engine.dispose()
+
+        restart_engine = create_engine(f"sqlite:///{db_path.name}")
+        Base.metadata.create_all(restart_engine)
+        RestartSession = sessionmaker(bind=restart_engine)
+
+        with RestartSession() as db:
+            new_pipeline = db.get(Pipeline, pipeline_id)
+            new_source = db.get(DouyinSource, source_id)
+            new_video = db.get(DouyinVideo, video_id)
+
+            schedule_for_pipeline(db, new_pipeline, now=slot_time)
+            db.commit()
+
+        with RestartSession() as db:
+            scheduled = db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
+            self.assertEqual(scheduled, 1)
+
+        restart_engine.dispose()
+        os.unlink(db_path.name)
+
+    def test_concurrent_no_duplicate(self):
+        from sqlalchemy.pool import StaticPool
+
+        concurrent_engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(concurrent_engine)
+        ConcurrentSession = sessionmaker(bind=concurrent_engine)
+
+        with ConcurrentSession() as db:
+            pipeline = Pipeline(
+                id=str(uuid4()),
+                name="Test",
+                slug="test-concurrent",
+                enabled=True,
+                daily_upload_limit=6,
+                upload_slots=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+                timezone="UTC",
+            )
+            db.add(pipeline)
+            db.flush()
+
+            source = DouyinSource(
+                id=str(uuid4()),
+                pipeline_id=pipeline.id,
+                name="Source",
+                profile_url="https://www.douyin.com/user/test",
+                enabled=True,
+            )
+            db.add(source)
+            db.flush()
+
+            video = DouyinVideo(
+                id=str(uuid4()),
+                source_id=source.id,
+                pipeline_id=pipeline.id,
+                video_id=str(uuid4()),
+                title="Test",
+                url="https://www.douyin.com/video/test",
+                status="new",
+            )
+            db.add(video)
+            db.commit()
+
+            slot_time = datetime.datetime(2026, 9, 14, 8, 0, tzinfo=datetime.timezone.utc)
+
+            schedule_for_pipeline(db, pipeline, now=slot_time)
+            db.commit()
+
+            schedule_for_pipeline(db, pipeline, now=slot_time)
+            db.commit()
+
+        with ConcurrentSession() as db:
+            scheduled = db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
+            self.assertEqual(scheduled, 1)
+
+        concurrent_engine.dispose()
+
+    def test_local_day_daily_limit(self):
+        pipeline = self._make_pipeline(timezone="Asia/Ho_Chi_Minh", daily_upload_limit=3)
+        source = self._make_source(pipeline)
+
+        slot_utc_times = [
+            datetime.datetime(2026, 9, 14, 10, 5, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 9, 14, 13, 5, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 9, 14, 16, 5, tzinfo=datetime.timezone.utc),
+        ]
+
+        for i, slot_time in enumerate(slot_utc_times):
+            video = self._make_video(source, pipeline, video_id=f"v{i}")
+            schedule_for_pipeline(self.db, pipeline, now=slot_time)
+            self.db.commit()
+
+        video4 = self._make_video(source, pipeline, video_id="v4")
+        schedule_for_pipeline(self.db, pipeline, now=datetime.datetime(2026, 9, 14, 19, 0, tzinfo=datetime.timezone.utc))
+        self.db.commit()
+
+        scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
+        self.assertEqual(scheduled, 3)
+
+    def test_backlog_new_ratio(self):
+        pipeline = self._make_pipeline()
+        source = self._make_source(pipeline)
+
+        for i in range(4):
+            self._make_video(source, pipeline, is_backlog=True, video_id=f"b{i}")
+        for i in range(2):
+            self._make_video(source, pipeline, is_backlog=False, video_id=f"n{i}")
+
+        slot_times = [
+            datetime.datetime(2026, 9, 14, h, 0, tzinfo=datetime.timezone.utc)
+            for h in [8, 11, 14, 17, 20, 23]
+        ]
+
+        for slot_time in slot_times:
+            schedule_for_pipeline(self.db, pipeline, now=slot_time)
+            self.db.commit()
+
+        scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").all()
+        backlog_scheduled = [v for v in scheduled if v.is_backlog]
+        new_scheduled = [v for v in scheduled if not v.is_backlog]
+        self.assertEqual(len(backlog_scheduled), 4)
+        self.assertEqual(len(new_scheduled), 2)
 
     def test_round_robin_between_sources(self):
         pipeline = self._make_pipeline()
