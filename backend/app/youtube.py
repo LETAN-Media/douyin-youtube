@@ -138,7 +138,7 @@ def create_oauth_url(
         flow.authorization_url(
             access_type="offline",
             include_granted_scopes="true",
-            prompt="consent",
+            prompt="consent select_account",
         )
     )
 
@@ -179,20 +179,32 @@ def complete_oauth(
     resolved_pipeline_id = pipeline_id or state_row.pipeline_id
 
     old_refresh_token = None
+    pipeline = None
 
-    existing = read_setting(
-        db,
-        GLOBAL_TOKEN_SETTING_KEY,
-    )
+    if resolved_pipeline_id:
+        pipeline = db.get(Pipeline, resolved_pipeline_id)
+        if pipeline is not None and pipeline.youtube_credentials:
+            try:
+                old_refresh_token = (
+                    json.loads(pipeline.youtube_credentials)
+                    .get("refresh_token")
+                )
+            except Exception:
+                old_refresh_token = None
+    else:
+        existing = read_setting(
+            db,
+            GLOBAL_TOKEN_SETTING_KEY,
+        )
 
-    if existing:
-        try:
-            old_refresh_token = (
-                json.loads(existing)
-                .get("refresh_token")
-            )
-        except Exception:
-            old_refresh_token = None
+        if existing:
+            try:
+                old_refresh_token = (
+                    json.loads(existing)
+                    .get("refresh_token")
+                )
+            except Exception:
+                old_refresh_token = None
 
     flow = Flow.from_client_config(
         client_config(),
@@ -231,14 +243,45 @@ def complete_oauth(
 
     token_json = json.dumps(data)
 
+    youtube = build(
+        "youtube",
+        "v3",
+        credentials=credentials,
+        cache_discovery=False,
+    )
+
+    try:
+        result = youtube.channels().list(
+            part="id,snippet",
+            mine=True,
+        ).execute()
+    except HttpError as exc:
+        raise RuntimeError(
+            f"YouTube API error khi kiểm tra kênh: {exc}"
+        ) from exc
+
+    channels = result.get("items", [])
+
+    if not channels:
+        raise RuntimeError(
+            "Không tìm thấy kênh YouTube nào trên tài khoản này"
+        )
+
+    channel = channels[0]
+    channel_id = channel["id"]
+    channel_title = channel["snippet"]["title"]
+
     if resolved_pipeline_id:
-        pipeline = db.get(Pipeline, resolved_pipeline_id)
         if pipeline is None:
-            raise RuntimeError(
-                "Pipeline không tồn tại khi lưu OAuth"
-            )
+            pipeline = db.get(Pipeline, resolved_pipeline_id)
+            if pipeline is None:
+                raise RuntimeError(
+                    "Pipeline không tồn tại khi lưu OAuth"
+                )
 
         pipeline.youtube_credentials = token_json
+        pipeline.youtube_channel_id = channel_id
+        pipeline.youtube_channel_title = channel_title
         pipeline.youtube_connected = True
         db.commit()
         logger.info(
@@ -356,6 +399,35 @@ def youtube_connected(
     return bool(
         data.get("refresh_token")
     )
+
+
+def get_youtube_status(
+    db: Session,
+    pipeline_id: str | None = None,
+) -> dict:
+    connected = False
+    channel_id = None
+    channel_title = None
+
+    if pipeline_id:
+        pipeline = db.get(Pipeline, pipeline_id)
+        if pipeline is not None:
+            connected = bool(pipeline.youtube_credentials)
+            channel_id = pipeline.youtube_channel_id
+            channel_title = pipeline.youtube_channel_title
+    else:
+        raw = read_setting(
+            db,
+            GLOBAL_TOKEN_SETTING_KEY,
+        )
+        connected = bool(raw)
+
+    return {
+        "connected": connected,
+        "pipeline_id": pipeline_id,
+        "channel_id": channel_id,
+        "channel_title": channel_title,
+    }
 
 
 def upload_video(

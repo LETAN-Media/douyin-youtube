@@ -48,7 +48,7 @@ from app.worker import (
 from app.youtube import (
     complete_oauth,
     create_oauth_url,
-    youtube_connected,
+    get_youtube_status,
 )
 from app.monitor import monitor_loop
 
@@ -928,15 +928,14 @@ def youtube_status(
         get_db
     ),
 ) -> dict:
-    return {
-        "connected": (
-            youtube_connected(db, pipeline_id=pipeline_id)
-        ),
-        "callback_url": (
-            settings.youtube_callback_url
-        ),
-        "pipeline_id": pipeline_id,
-    }
+    status = get_youtube_status(
+        db,
+        pipeline_id=pipeline_id,
+    )
+    status["callback_url"] = (
+        settings.youtube_callback_url
+    )
+    return status
 
 
 @app.post(
