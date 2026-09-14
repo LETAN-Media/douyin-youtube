@@ -3,21 +3,13 @@
 // SVG edge between two nodes. Idle = gray. Active = animated gradient +
 // glow + moving pulse dot. Failed = red. Completed-fade = emerald, no pulse.
 
+export { hPath, vPath } from "@/lib/flowLayout";
+
 export type FlowEdgeLook =
   | { kind: "idle" }
   | { kind: "active"; gradientId: string }
   | { kind: "failed" }
   | { kind: "faded" };
-
-export function hPath(x1: number, y1: number, x2: number, y2: number): string {
-  const c = Math.max(30, Math.abs(x2 - x1) / 2);
-  return `M ${x1} ${y1} C ${x1 + c} ${y1}, ${x2 - c} ${y2}, ${x2} ${y2}`;
-}
-
-export function vPath(x1: number, y1: number, x2: number, y2: number): string {
-  const c = Math.max(24, Math.abs(y2 - y1) / 2);
-  return `M ${x1} ${y1} C ${x1} ${y1 + c}, ${x2} ${y2 - c}, ${x2} ${y2}`;
-}
 
 export function FlowEdge({
   d,
@@ -52,7 +44,7 @@ export function FlowEdge({
 
   return (
     <g
-      opacity={dimmed ? 0.22 : 1}
+      opacity={dimmed ? 0.3 : 1}
       style={{ transition: "opacity 0.25s ease" }}
       onClick={onClick}
     >
@@ -62,7 +54,7 @@ export function FlowEdge({
           d={d}
           fill="none"
           stroke="transparent"
-          strokeWidth={18}
+          strokeWidth={22}
           style={{ cursor: "pointer", pointerEvents: "stroke" }}
         >
           {label ? <title>{label}</title> : null}

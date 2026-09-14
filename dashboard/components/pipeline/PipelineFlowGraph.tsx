@@ -5,39 +5,48 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { actionGetFlowState } from "@/lib/actions";
 import type { FlowRoute, FlowState } from "@/lib/types";
 import { formatTime } from "@/lib/format";
-import { FlowEdge, hPath, vPath, type FlowEdgeLook } from "./FlowConnector";
+import { FlowEdge, type FlowEdgeLook } from "./FlowConnector";
 import { FlowNode, type FlowNodeTone } from "./FlowNode";
 import { ActiveRoutes } from "./ActiveRoutes";
+import {
+  FLOW_DST_H,
+  FLOW_DST_W,
+  FLOW_GAP_Y,
+  FLOW_MID_W,
+  FLOW_MIN_W,
+  FLOW_PAD,
+  FLOW_PROC_H,
+  FLOW_SRC_H,
+  FLOW_SRC_W,
+  computeFlowLayout,
+  litEdgesForRoute,
+  procsForEdge,
+  stagesForProc,
+  type FlowLayoutEdge,
+} from "@/lib/flowLayout";
 import {
   IconBolt,
   IconClock,
   IconDestinations,
   IconInventory,
+  IconPlus,
   IconSparkles,
 } from "@/components/icons";
 
 // ---------- Fixed-geometry canvas (arithmetically laid out, no measuring) ----------
-
-const SRC_W = 236;
-const MID_W = 200;
-const DST_W = 256;
-const GAP_X = 88;
-const PAD = 16;
-const GAP_Y = 14;
-const SRC_H = 92;
-const PROC_H = 80;
-const DST_H = 100;
+// Compact rows so tall graphs (10 sources) stay readable without blank space.
+// Geometry + stage mapping live in lib/flowLayout (unit-tested, no JSX).
 
 const PALETTE = ["fA", "fB", "fC"];
+const POLL_VISIBLE_MS = 3000;
+const POLL_HIDDEN_MS = 15000;
+const FADE_MS = 6000;
 
-type Sel = { type: "source" | "dest" | "route"; id: string } | null;
+type Sel =
+  | { type: "source" | "dest" | "route" | "proc"; id: string }
+  | null;
 
-interface PlacedEdge {
-  id: string;
-  d: string;
-  kind: "s" | "c" | "d";
-  ref: string;
-}
+type PlacedEdge = FlowLayoutEdge;
 
 function procTone(state: string): FlowNodeTone {
   if (state === "processing" || state === "syncing") return "indigo";
@@ -91,10 +100,14 @@ export function PipelineFlowGraph({
   const [fading, setFading] = useState<{ route: FlowRoute; removedAt: number }[]>([]);
   const prevRoutes = useRef(new Map(initial.active_routes.map((r) => [r.key, r])));
   const fadeTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const didInitScroll = useRef(false);
 
   // Realtime poll: graph state only, never revalidates the page.
+  // Hidden tab polls slower; visible again polls immediately.
   useEffect(() => {
     let stop = false;
+    let id: ReturnType<typeof setInterval>;
     const poll = async () => {
       const r = await actionGetFlowState(pipelineId);
       if (stop) return;
@@ -107,10 +120,23 @@ export function PipelineFlowGraph({
       }
       setNowMs(Date.now());
     };
-    const id = setInterval(poll, 3000);
+    const start = (ms: number) => {
+      clearInterval(id);
+      id = setInterval(poll, ms);
+    };
+    const onVis = () => {
+      if (document.hidden) start(POLL_HIDDEN_MS);
+      else {
+        start(POLL_VISIBLE_MS);
+        void poll();
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    start(document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS);
     return () => {
       stop = true;
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, [pipelineId]);
 
@@ -121,7 +147,7 @@ export function PipelineFlowGraph({
     [],
   );
 
-  // Completed routes keep a fading emerald glow for ~8s after disappearing.
+  // Completed routes keep a fading emerald flash for ~6s after disappearing.
   useEffect(() => {
     const cur = new Map(flow.active_routes.map((r) => [r.key, r]));
     const gone: FlowRoute[] = [];
@@ -134,8 +160,8 @@ export function PipelineFlowGraph({
       // eslint-disable-next-line react-hooks/set-state-in-effect -- queue fade-out entries
       setFading((f) => [...gone.map((route) => ({ route, removedAt: at })), ...f].slice(0, 6));
       const t = setTimeout(() => {
-        setFading((f) => f.filter((x) => Date.now() - x.removedAt < 8000));
-      }, 8200);
+        setFading((f) => f.filter((x) => Date.now() - x.removedAt < FADE_MS));
+      }, FADE_MS + 200);
       fadeTimers.current.push(t);
     }
   }, [flow]);
@@ -149,64 +175,39 @@ export function PipelineFlowGraph({
     return m;
   }, [routes]);
 
-  // ---------- Layout ----------
-  const layout = useMemo(() => {
-    const nS = Math.max(flow.sources.length, 1);
-    const nD = Math.max(flow.destinations.length, 1);
-    const hS = nS * SRC_H + (nS - 1) * GAP_Y;
-    const hP = 4 * PROC_H + 3 * GAP_Y;
-    const hD = nD * DST_H + (nD - 1) * GAP_Y;
-    const innerH = Math.max(hS, hP, hD);
-    const H = innerH + PAD * 2;
-    const W = PAD * 2 + SRC_W + GAP_X + MID_W + GAP_X + DST_W;
-    const sx = PAD;
-    const mx = PAD + SRC_W + GAP_X;
-    const dx = PAD + SRC_W + GAP_X + MID_W + GAP_X;
-    const topS = PAD + (innerH - hS) / 2;
-    const topP = PAD + (innerH - hP) / 2;
-    const topD = PAD + (innerH - hD) / 2;
-    const procKeys = ["inventory", "ai", "scheduler", "publisher"];
-    const procY: Record<string, number> = {};
-    procKeys.forEach((k, i) => {
-      procY[k] = topP + i * (PROC_H + GAP_Y);
-    });
-    const edges: PlacedEdge[] = [];
-    flow.sources.forEach((s, i) => {
-      const y = topS + i * (SRC_H + GAP_Y) + SRC_H / 2;
-      edges.push({
-        id: `s:${s.id}`,
-        kind: "s",
-        ref: s.id,
-        d: hPath(sx + SRC_W, y, mx, procY.inventory + PROC_H / 2),
-      });
-    });
-    const cx = mx + MID_W / 2;
-    const chain: [string, string][] = [
-      ["inventory", "ai"],
-      ["ai", "scheduler"],
-      ["scheduler", "publisher"],
-    ];
-    chain.forEach(([a, b], i) => {
-      edges.push({
-        id: `c:${i}`,
-        kind: "c",
-        ref: `${a}-${b}`,
-        d: vPath(cx, procY[a] + PROC_H, cx, procY[b]),
-      });
-    });
-    flow.destinations.forEach((dst, i) => {
-      const y = topD + i * (DST_H + GAP_Y) + DST_H / 2;
-      edges.push({
-        id: `d:${dst.id}`,
-        kind: "d",
-        ref: dst.id,
-        d: hPath(mx + MID_W, procY.publisher + PROC_H / 2, dx, y),
-      });
-    });
-    return { W, H, sx, mx, dx, topS, topD, procY, edges };
-  }, [flow]);
+  // ---------- Layout (pure, tested in lib/flowLayout) ----------
+  const layout = useMemo(
+    () =>
+      computeFlowLayout(
+        flow.sources.map((s) => s.id),
+        flow.destinations.map((d) => d.id),
+      ),
+    [flow],
+  );
 
-  // ---------- Edge states ----------
+  // Initial auto-scroll: center first active route, else center full graph.
+  useEffect(() => {
+    if (didInitScroll.current) return;
+    const el = scrollRef.current;
+    if (!el || el.scrollWidth <= el.clientWidth + 8) {
+      didInitScroll.current = true;
+      return;
+    }
+    didInitScroll.current = true;
+    const first =
+      flow.active_routes.find((r) => !r.failed) ?? flow.active_routes[0];
+    let target: number;
+    if (first) {
+      const si = flow.sources.findIndex((s) => s.id === first.source_id);
+      const cx = si >= 0 ? layout.sx + FLOW_SRC_W / 2 : layout.W / 2;
+      target = cx - el.clientWidth / 2;
+    } else {
+      target = (el.scrollWidth - el.clientWidth) / 2;
+    }
+    el.scrollLeft = Math.max(0, Math.min(target, el.scrollWidth - el.clientWidth));
+  }, [layout, flow, pipelineId]);
+
+  // ---------- Route / edge resolution ----------
   const edgeRoutes = useMemo(() => {
     const m = new Map<string, FlowRoute[]>();
     const add = (id: string, r: FlowRoute) => {
@@ -215,100 +216,204 @@ export function PipelineFlowGraph({
       else m.set(id, [r]);
     };
     for (const r of routes) {
-      add(`s:${r.source_id}`, r);
-      add("c:0", r);
-      add("c:1", r);
-      add("c:2", r);
-      add(`d:${r.destination_id}`, r);
+      for (const e of litEdgesForRoute(r)) add(e, r);
     }
+    // Fading completions flash the whole path green.
     for (const f of fading) {
-      add(`s:${f.route.source_id}`, f.route);
-      add("c:0", f.route);
-      add("c:1", f.route);
-      add("c:2", f.route);
-      add(`d:${f.route.destination_id}`, f.route);
+      const r = f.route;
+      for (const e of [`s:${r.source_id}`, "c:0", "c:1", "c:2", `d:${r.destination_id}`])
+        add(e, r);
     }
     return m;
   }, [routes, fading]);
 
   const fadingKeys = useMemo(() => new Set(fading.map((f) => f.route.key)), [fading]);
 
-  const edgeLook = (id: string): { look: FlowEdgeLook; dimmed: boolean } => {
-    const rs = edgeRoutes.get(id) ?? [];
-    const liveRs = rs.filter((r) => !fadingKeys.has(r.key));
-    const activeRs = liveRs.filter((r) => !r.failed);
-    const failedRs = liveRs.filter((r) => r.failed);
-    const fadedRs = rs.filter((r) => fadingKeys.has(r.key));
+  // A route selection pointing at a vanished route behaves as no selection.
+  const effSel: Sel =
+    sel?.type === "route" && !routes.some((r) => r.key === sel.id) ? null : sel;
 
-    let inSel = true;
-    if (sel?.type === "route") {
-      inSel = liveRs.some((r) => r.key === sel.id) || fadedRs.some((r) => r.key === sel.id);
-    } else if (sel?.type === "source") {
-      if (id.startsWith("s:")) inSel = id === `s:${sel.id}`;
-      else if (id.startsWith("d:")) {
-        const dst = flow.destinations.find((d) => `d:${d.id}` === id);
-        inSel = !!dst?.enabled;
-      } else inSel = true;
-    } else if (sel?.type === "dest") {
-      if (id.startsWith("d:")) inSel = id === `d:${sel.id}`;
-      else if (id.startsWith("s:")) {
-        const src = flow.sources.find((s) => `s:${s.id}` === id);
-        inSel = !!src?.enabled;
-      } else inSel = true;
+  // Routes visible under current selection (for highlight + node glow).
+  const visibleRoutes = useMemo(() => {
+    if (!effSel) return routes;
+    if (effSel.type === "route") return routes.filter((r) => r.key === effSel.id);
+    if (effSel.type === "source") {
+      return routes.filter((r) => r.source_id === effSel.id);
     }
+    if (effSel.type === "dest") {
+      return routes.filter((r) => r.destination_id === effSel.id);
+    }
+    // proc selection
+    const stages = stagesForProc(effSel.id);
+    return routes.filter((r) => stages.includes(r.failed ? "failed" : r.stage));
+  }, [routes, effSel]);
+
+  // When a source/dest/proc with zero routes is selected, fall back to
+  // potential paths so the trace direction stays visible.
+  const potential =
+    effSel != null && effSel.type !== "route" && visibleRoutes.length === 0;
+
+  const litSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of visibleRoutes) {
+      if (fadingKeys.has(r.key)) continue;
+      for (const e of litEdgesForRoute(r)) s.add(e);
+    }
+    return s;
+  }, [visibleRoutes, fadingKeys]);
+
+  const glowProcs = useMemo(() => {
+    const s = new Set<string>();
+    litSet.forEach((e) => procsForEdge(e).forEach((p) => s.add(p)));
+    return s;
+  }, [litSet]);
+
+  const glowSources = useMemo(
+    () => new Set(visibleRoutes.filter((r) => !r.failed).map((r) => r.source_id)),
+    [visibleRoutes],
+  );
+  const glowDests = useMemo(
+    () => new Set(visibleRoutes.filter((r) => !r.failed).map((r) => r.destination_id)),
+    [visibleRoutes],
+  );
+  const failedDests = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of visibleRoutes) {
+      if (r.failed) m.set(r.destination_id, (m.get(r.destination_id) ?? 0) + 1);
+    }
+    return m;
+  }, [visibleRoutes]);
+  const uploadingDests = useMemo(
+    () => new Set(visibleRoutes.filter((r) => !r.failed && r.stage === "uploading").map((r) => r.destination_id)),
+    [visibleRoutes],
+  );
+
+  const edgeLook = (id: string): { look: FlowEdgeLook; dimmed: boolean } => {
+    const rs = (edgeRoutes.get(id) ?? []).filter((r) => !fadingKeys.has(r.key));
+    const activeRs = rs.filter((r) => !r.failed);
+    const failedRs = rs.filter((r) => r.failed);
+    const fadedHere =
+      activeRs.length === 0 &&
+      failedRs.length === 0 &&
+      (edgeRoutes.get(id) ?? []).some((r) => fadingKeys.has(r.key));
+    const isLit = litSet.has(id);
 
     if (activeRs.length > 0) {
-      if (sel?.type === "route" && !activeRs.some((r) => r.key === sel.id))
-        return { look: { kind: "idle" }, dimmed: true };
-      const idx = colorOf.get(activeRs[0].key) ?? 0;
-      return { look: { kind: "active", gradientId: PALETTE[idx] }, dimmed: !inSel };
+      if (!isLit) return { look: { kind: "idle" }, dimmed: true };
+      // Prefer the color of a route inside the current selection highlight.
+      const pick = activeRs.find((r) => visibleRoutes.includes(r)) ?? activeRs[0];
+      const idx = colorOf.get(pick.key) ?? 0;
+      return { look: { kind: "active", gradientId: PALETTE[idx] }, dimmed: false };
     }
-    if (failedRs.length > 0) return { look: { kind: "failed" }, dimmed: !inSel };
-    if (fadedRs.length > 0) return { look: { kind: "faded" }, dimmed: !inSel };
-    return { look: { kind: "idle" }, dimmed: sel != null && !inSel };
+    if (failedRs.length > 0) {
+      if (!isLit) return { look: { kind: "idle" }, dimmed: true };
+      return { look: { kind: "failed" }, dimmed: false };
+    }
+    if (fadedHere) return { look: { kind: "faded" }, dimmed: !!effSel };
+    // Idle: faint gray while the graph has activity, full gray when all idle.
+    if (!effSel) return { look: { kind: "idle" }, dimmed: routes.length > 0 };
+    if (potential && potentialEdge(id)) return { look: { kind: "idle" }, dimmed: false };
+    return { look: { kind: "idle" }, dimmed: true };
   };
 
-  const nodeDim = (kind: "s" | "d", id: string): boolean => {
-    if (!sel) return false;
-    if (sel.type === "route") {
-      const r = routes.find((x) => x.key === sel.id);
-      if (!r) return true;
-      return kind === "s" ? r.source_id !== id : r.destination_id !== id;
+  const potentialEdge = (id: string): boolean => {
+    if (!effSel || effSel.type === "route") return false;
+    if (effSel.type === "source") {
+      if (id === `s:${effSel.id}`) return true;
+      if (id.startsWith("c:")) return true;
+      if (id.startsWith("d:")) {
+        return flow.destinations.some((d) => `d:${d.id}` === id && d.enabled);
+      }
+      return false;
     }
-    if (sel.type === "source") {
-      if (kind === "s") return sel.id !== id;
-      return !(flow.destinations.find((d) => d.id === id)?.enabled ?? false);
+    if (effSel.type === "dest") {
+      if (id === `d:${effSel.id}`) return true;
+      if (id.startsWith("c:")) return true;
+      if (id.startsWith("s:")) {
+        return flow.sources.some((s) => `s:${s.id}` === id && s.enabled);
+      }
+      return false;
     }
-    // sel dest
-    if (kind === "d") return sel.id !== id;
-    return !(flow.sources.find((s) => s.id === id)?.enabled ?? false);
+    return id.startsWith("c:");
   };
+
+  const nodeDim = (kind: "s" | "d" | "p", id: string): boolean => {
+    if (!effSel) return false;
+    if (effSel.type === "route") {
+      const r = routes.find((x) => x.key === effSel.id);
+      if (!r) return false;
+      if (kind === "s") return r.source_id !== id;
+      if (kind === "d") return r.destination_id !== id;
+      return !litEdgesForRoute(r).some((e) => procsForEdge(e).includes(id));
+    }
+    if (effSel.type === "source") {
+      if (kind === "s") return effSel.id !== id;
+      if (kind === "d")
+        return visibleRoutes.length > 0
+          ? ![...glowDests].includes(id) && ![...failedDests.keys()].includes(id)
+          : !(flow.destinations.find((d) => d.id === id)?.enabled ?? false);
+      return false;
+    }
+    if (effSel.type === "dest") {
+      if (kind === "d") return effSel.id !== id;
+      if (kind === "s")
+        return visibleRoutes.length > 0
+          ? ![...glowSources].includes(id)
+          : !(flow.sources.find((s) => s.id === id)?.enabled ?? false);
+      return false;
+    }
+    // proc selection
+    if (kind === "p") return effSel.id !== id && !glowProcs.has(id);
+    if (kind === "s") return visibleRoutes.length > 0 && ![...glowSources].includes(id);
+    return visibleRoutes.length > 0 && ![...glowDests].includes(id);
+  };
+
+  const procSelected = (key: string) => effSel?.type === "proc" && effSel.id === key;
 
   const onEdgeClick = (e: PlacedEdge) => {
     const rs = (edgeRoutes.get(e.id) ?? []).filter((r) => !fadingKeys.has(r.key));
     if (rs.length > 0) {
       const first = rs.find((r) => !r.failed) ?? rs[0];
-      setSel((cur) =>
-        cur?.type === "route" && cur.id === first.key ? null : { type: "route", id: first.key },
-      );
+      selectRoute(first.key);
     } else if (e.kind === "s") {
-      setSel((cur) => (cur?.type === "source" && cur.id === e.ref ? null : { type: "source", id: e.ref }));
+      toggleSel({ type: "source", id: e.ref });
     } else if (e.kind === "d") {
-      setSel((cur) => (cur?.type === "dest" && cur.id === e.ref ? null : { type: "dest", id: e.ref }));
+      toggleSel({ type: "dest", id: e.ref });
+    } else {
+      const proc = e.id === "c:0" ? "ai" : e.id === "c:1" ? "scheduler" : "publisher";
+      toggleSel({ type: "proc", id: proc });
     }
   };
 
-  const selectedRouteKey =
-    sel?.type === "route" && routes.some((r) => r.key === sel.id) ? sel.id : null;
+  const toggleSel = (next: Exclude<Sel, null>) => {
+    setSel((cur) => (cur?.type === next.type && cur.id === next.id ? null : next));
+  };
+
+  const selectRoute = (key: string | null) => {
+    const next: Sel =
+      key && !(effSel?.type === "route" && effSel.id === key)
+        ? { type: "route", id: key }
+        : null;
+    setSel(next);
+    if (next) {
+      requestAnimationFrame(() => {
+        document
+          .getElementById("flow-route-detail")
+          ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
+  };
+
+  const selectedRouteKey = effSel?.type === "route" ? effSel.id : null;
 
   const updatedAgo = Math.max(0, Math.floor((nowMs - lastOk) / 1000));
   const s = flow.summary;
 
   return (
     <div className="space-y-3">
-      {/* Compact summary bar */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-2xl border border-slate-200/90 bg-white px-4 py-2.5 text-[13px] shadow-[0_1px_2px_rgba(15,23,42,0.05)] sm:px-5">
-        <span className="flex items-center gap-1.5 font-bold text-slate-700">
+      {/* Compact summary bar: single scrollable row */}
+      <div className="flex items-center gap-x-4 gap-y-1 overflow-x-auto whitespace-nowrap rounded-2xl border border-slate-200/90 bg-white px-4 py-2 text-[13px] shadow-[0_1px_2px_rgba(15,23,42,0.05)] sm:px-5">
+        <span className="flex shrink-0 items-center gap-1.5 font-bold text-slate-700">
           <span className="relative flex h-2 w-2">
             <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${live ? "bg-emerald-400" : "bg-amber-400"}`} />
             <span className={`relative inline-flex h-2 w-2 rounded-full ${live ? "bg-emerald-500" : "bg-amber-500"}`} />
@@ -320,35 +425,35 @@ export function PipelineFlowGraph({
         <SummaryStat label="Queue" value={s.queue} tone={s.queue > 0 ? "amber" : undefined} />
         <SummaryStat label="Publishing" value={s.publishing} tone={s.publishing > 0 ? "indigo" : undefined} />
         <SummaryStat label="Failed" value={s.failed} tone={s.failed > 0 ? "red" : undefined} />
-        <span className="tnum ml-auto text-[11px] font-medium text-slate-400">
+        <span className="tnum ml-auto shrink-0 text-[11px] font-medium text-slate-400">
           cập nhật {updatedAgo}s trước · 3s/poll
         </span>
       </div>
 
       {/* Graph canvas: horizontal swipe on mobile */}
-      <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.05)]">
+      <div className="rounded-2xl border border-slate-200/90 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.05)]">
         <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-2.5 sm:px-5">
           <p className="text-[11px] font-extrabold uppercase tracking-[0.12em] text-slate-400">
             Pipeline flow · Sources → Process → Destinations
           </p>
-          {sel ? (
+          {effSel ? (
             <button
               type="button"
               onClick={() => setSel(null)}
-              className="inline-flex min-h-[32px] items-center rounded-lg px-2.5 py-1 text-xs font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
+              className="inline-flex min-h-[32px] shrink-0 items-center rounded-lg px-2.5 py-1 text-xs font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
             >
               Xóa highlight
             </button>
           ) : (
-            <p className="hidden text-[11px] font-medium text-slate-400 sm:block">
+            <p className="hidden shrink-0 text-[11px] font-medium text-slate-400 sm:block">
               Bấm node / route để trace
             </p>
           )}
         </div>
-        <div className="overflow-x-auto">
+        <div ref={scrollRef} className="overflow-x-auto">
           <div
-            className="relative mx-auto min-w-[920px]"
-            style={{ width: layout.W, height: layout.H }}
+            className="relative mx-auto"
+            style={{ width: layout.W, height: layout.H, minWidth: FLOW_MIN_W }}
             onClick={() => setSel(null)}
           >
             <svg
@@ -392,25 +497,31 @@ export function PipelineFlowGraph({
 
             {/* Sources column */}
             {flow.sources.length === 0 ? (
-              <ColumnPlaceholder
-                x={layout.sx}
-                y={PAD}
-                width={SRC_W}
-                text="Chưa có source"
-                hint="Thêm ở tab Sources"
-              />
+              <Link
+                href={`/pipelines/${pipelineId}?tab=sources`}
+                onClick={(ev) => ev.stopPropagation()}
+                style={{ left: layout.sx, top: layout.topS, width: FLOW_SRC_W, height: FLOW_SRC_H }}
+                className="absolute flex flex-col items-center justify-center gap-1 rounded-2xl border border-dashed border-indigo-300 bg-indigo-50/50 p-3 text-center transition hover:border-indigo-400 hover:bg-indigo-50"
+              >
+                <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white">
+                  <IconPlus size={16} />
+                </span>
+                <span className="text-[13px] font-extrabold text-indigo-700">+ Add Source</span>
+                <span className="text-[11px] font-medium text-indigo-400">Mở tab Sources</span>
+              </Link>
             ) : null}
             {flow.sources.map((src, i) => {
               const st = sourceStatus(src);
+              const isLive = glowSources.has(src.id) && (effSel == null || visibleRoutes.some((r) => r.source_id === src.id && !r.failed));
               return (
                 <span key={src.id} onClick={(ev) => ev.stopPropagation()} className="contents">
                   <FlowNode
                     x={layout.sx}
-                    y={layout.topS + i * (SRC_H + GAP_Y)}
-                    width={SRC_W}
-                    height={SRC_H}
+                    y={layout.topS + i * (FLOW_SRC_H + FLOW_GAP_Y)}
+                    width={FLOW_SRC_W}
+                    height={FLOW_SRC_H}
                     avatar={
-                      <span className="flex h-full w-full items-center justify-center bg-slate-900 text-[13px] font-black tracking-tight text-cyan-300">
+                      <span className="flex h-full w-full items-center justify-center bg-slate-900 text-xs font-black tracking-tight text-cyan-300">
                         Dy
                       </span>
                     }
@@ -420,15 +531,21 @@ export function PipelineFlowGraph({
                     statusLabel={st.label}
                     statusTone={st.tone}
                     statusPulse={st.pulse}
-                    selected={sel?.type === "source" && sel.id === src.id}
+                    selected={effSel?.type === "source" && effSel.id === src.id}
+                    active={isLive}
                     dimmed={nodeDim("s", src.id)}
-                    onClick={() =>
-                      setSel((cur) =>
-                        cur?.type === "source" && cur.id === src.id
-                          ? null
-                          : { type: "source", id: src.id },
-                      )
+                    badge={
+                      isLive ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-black tracking-wide text-white shadow">
+                          <span className="relative flex h-1.5 w-1.5">
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-70" />
+                            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-white" />
+                          </span>
+                          LIVE
+                        </span>
+                      ) : undefined
                     }
+                    onClick={() => toggleSel({ type: "source", id: src.id })}
                   />
                 </span>
               );
@@ -436,12 +553,12 @@ export function PipelineFlowGraph({
 
             {/* Processor column */}
             {flow.processors.map((p) => (
-              <span key={p.key} className="contents">
+              <span key={p.key} onClick={(ev) => ev.stopPropagation()} className="contents">
                 <FlowNode
                   x={layout.mx}
                   y={layout.procY[p.key] ?? 0}
-                  width={MID_W}
-                  height={PROC_H}
+                  width={FLOW_MID_W}
+                  height={FLOW_PROC_H}
                   avatar={<ProcAvatar procKey={p.key} />}
                   title={p.label}
                   subtitle={p.sub}
@@ -449,35 +566,47 @@ export function PipelineFlowGraph({
                   statusLabel={procLabel(p.state)}
                   statusTone={procTone(p.state)}
                   statusPulse={p.state === "processing" || p.state === "syncing" || p.state === "waiting"}
+                  selected={procSelected(p.key)}
+                  active={glowProcs.has(p.key)}
+                  dimmed={nodeDim("p", p.key)}
+                  onClick={() => toggleSel({ type: "proc", id: p.key })}
+                  label={`${p.label}: ${procLabel(p.state)} — bấm để xem jobs ở bước này`}
                 />
               </span>
             ))}
 
             {/* Destinations column */}
             {flow.destinations.length === 0 ? (
-              <ColumnPlaceholder
-                x={layout.dx}
-                y={PAD}
-                width={DST_W}
-                text="Chưa có destination"
-                hint="Thêm ở tab Destinations"
-              />
+              <Link
+                href={`/pipelines/${pipelineId}?tab=destinations`}
+                onClick={(ev) => ev.stopPropagation()}
+                style={{ left: layout.dx, top: layout.topD, width: FLOW_DST_W, height: FLOW_DST_H }}
+                className="absolute flex flex-col items-center justify-center gap-1 rounded-2xl border border-dashed border-indigo-300 bg-indigo-50/50 p-3 text-center transition hover:border-indigo-400 hover:bg-indigo-50"
+              >
+                <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white">
+                  <IconPlus size={16} />
+                </span>
+                <span className="text-[13px] font-extrabold text-indigo-700">+ Add Destination</span>
+                <span className="text-[11px] font-medium text-indigo-400">Mở tab Destinations</span>
+              </Link>
             ) : null}
             {flow.destinations.map((dst, i) => {
               const lastPubMs = dst.last_published_at
                 ? new Date(dst.last_published_at).getTime()
                 : NaN;
               const recentOk = !Number.isNaN(lastPubMs) && nowMs - lastPubMs < 90_000;
+              const failN = failedDests.get(dst.id) ?? 0;
+              const receiving = uploadingDests.has(dst.id);
               return (
                 <span key={dst.id} onClick={(ev) => ev.stopPropagation()} className="contents">
                   <FlowNode
                     x={layout.dx}
-                    y={layout.topD + i * (DST_H + GAP_Y)}
-                    width={DST_W}
-                    height={DST_H}
+                    y={layout.topD + i * (FLOW_DST_H + FLOW_GAP_Y)}
+                    width={FLOW_DST_W}
+                    height={FLOW_DST_H}
                     avatar={
                       <span
-                        className={`flex h-full w-full items-center justify-center text-[15px] font-black text-white ${
+                        className={`flex h-full w-full items-center justify-center text-sm font-black text-white ${
                           dst.platform === "youtube"
                             ? "bg-gradient-to-br from-rose-500 to-red-600"
                             : dst.platform === "facebook"
@@ -496,31 +625,39 @@ export function PipelineFlowGraph({
                     }
                     statusTone={!dst.enabled ? "amber" : dst.connected ? "green" : "slate"}
                     statusPulse={!!dst.enabled && dst.connected}
-                    selected={sel?.type === "dest" && sel.id === dst.id}
+                    selected={effSel?.type === "dest" && effSel.id === dst.id}
+                    active={receiving || glowDests.has(dst.id)}
+                    failed={failN > 0}
                     dimmed={nodeDim("d", dst.id)}
                     badge={
-                      recentOk ? (
+                      receiving ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500 px-2 py-0.5 text-[10px] font-black tracking-wide text-white shadow">
+                          <span className="relative flex h-1.5 w-1.5">
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white opacity-70" />
+                            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-white" />
+                          </span>
+                          RECEIVING
+                        </span>
+                      ) : failN > 0 ? (
+                        <span className="inline-flex items-center rounded-full bg-rose-500 px-2 py-0.5 text-[10px] font-black tracking-wide text-white shadow">
+                          {failN} FAILED
+                        </span>
+                      ) : recentOk ? (
                         <span className="inline-flex items-center rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-bold text-white shadow">
                           Vừa xong ✓
                         </span>
                       ) : undefined
                     }
-                    onClick={() =>
-                      setSel((cur) =>
-                        cur?.type === "dest" && cur.id === dst.id
-                          ? null
-                          : { type: "dest", id: dst.id },
-                      )
-                    }
+                    onClick={() => toggleSel({ type: "dest", id: dst.id })}
                   />
                 </span>
               );
             })}
 
             {/* Column captions */}
-            <Caption x={layout.sx} y={4} width={SRC_W} text="SOURCES" />
-            <Caption x={layout.mx} y={4} width={MID_W} text="PIPELINE FLOW" />
-            <Caption x={layout.dx} y={4} width={DST_W} text="DESTINATIONS" />
+            <Caption x={layout.sx} y={6} width={FLOW_SRC_W} text="SOURCES" />
+            <Caption x={layout.mx} y={6} width={FLOW_MID_W} text="PIPELINE FLOW" />
+            <Caption x={layout.dx} y={6} width={FLOW_DST_W} text="DESTINATIONS" />
           </div>
         </div>
         <p className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-400 sm:hidden sm:px-5">
@@ -529,13 +666,15 @@ export function PipelineFlowGraph({
       </div>
 
       {/* Active routes panel */}
-      <ActiveRoutes
-        routes={routes}
-        fadingCount={fading.length}
-        selectedKey={selectedRouteKey}
-        onSelect={(key) => setSel(key ? { type: "route", id: key } : null)}
-        nowMs={nowMs}
-      />
+      <div id="flow-route-detail" className="scroll-mt-32">
+        <ActiveRoutes
+          routes={routes}
+          fadingCount={fading.length}
+          selectedKey={selectedRouteKey}
+          onSelect={selectRoute}
+          nowMs={nowMs}
+        />
+      </div>
     </div>
   );
 }
@@ -558,7 +697,7 @@ function SummaryStat({
           ? "text-indigo-600"
           : "text-slate-900";
   return (
-    <span className="flex items-baseline gap-1.5">
+    <span className="flex shrink-0 items-baseline gap-1.5">
       <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{label}</span>
       <span className={`tnum text-[15px] font-extrabold ${cls}`}>{value}</span>
     </span>
@@ -576,30 +715,6 @@ function Caption({ x, y, width, text }: { x: number; y: number; width: number; t
   );
 }
 
-function ColumnPlaceholder({
-  x,
-  y,
-  width,
-  text,
-  hint,
-}: {
-  x: number;
-  y: number;
-  width: number;
-  text: string;
-  hint: string;
-}) {
-  return (
-    <div
-      className="absolute flex flex-col items-center justify-center gap-1 rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 p-4 text-center"
-      style={{ left: x, top: y, width, height: 92 }}
-    >
-      <p className="text-xs font-bold text-slate-500">{text}</p>
-      <p className="text-[11px] text-slate-400">{hint}</p>
-    </div>
-  );
-}
-
 function ProcAvatar({ procKey }: { procKey: string }) {
   const style =
     procKey === "inventory"
@@ -611,15 +726,15 @@ function ProcAvatar({ procKey }: { procKey: string }) {
           : "bg-emerald-50 text-emerald-600";
   const icon =
     procKey === "inventory" ? (
-      <IconInventory size={18} />
+      <IconInventory size={17} />
     ) : procKey === "ai" ? (
-      <IconSparkles size={18} />
+      <IconSparkles size={17} />
     ) : procKey === "scheduler" ? (
-      <IconClock size={18} />
+      <IconClock size={17} />
     ) : procKey === "publisher" ? (
-      <IconBolt size={18} />
+      <IconBolt size={17} />
     ) : (
-      <IconDestinations size={18} />
+      <IconDestinations size={17} />
     );
   return (
     <span className={`flex h-full w-full items-center justify-center ${style}`}>{icon}</span>

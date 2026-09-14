@@ -33,6 +33,8 @@ export function FlowNode({
   statusTone,
   statusPulse = false,
   selected = false,
+  active = false,
+  failed = false,
   dimmed = false,
   badge,
   onClick,
@@ -50,6 +52,8 @@ export function FlowNode({
   statusTone: FlowNodeTone;
   statusPulse?: boolean;
   selected?: boolean;
+  active?: boolean;
+  failed?: boolean;
   dimmed?: boolean;
   badge?: ReactNode;
   onClick?: () => void;
@@ -71,33 +75,53 @@ export function FlowNode({
             }
           : undefined
       }
-      style={{ left: x, top: y, width, height }}
-      className={`absolute flex min-w-0 flex-col justify-center gap-1 rounded-2xl border bg-white p-2.5 text-left shadow-[0_2px_8px_-2px_rgba(15,23,42,0.12)] transition-all duration-200 ${
+      className={`absolute flex min-w-0 flex-col justify-center gap-1 rounded-2xl border bg-white p-2 text-left shadow-[0_2px_8px_-2px_rgba(15,23,42,0.12)] transition-all duration-200 ${
         onClick ? "cursor-pointer hover:-translate-y-px hover:border-indigo-300 hover:shadow-md" : ""
-      } ${selected ? "border-indigo-500 ring-2 ring-indigo-300" : "border-slate-200/90"} ${
-        dimmed ? "opacity-35 saturate-50" : "opacity-100"
-      }`}
+      } ${
+        selected
+          ? "border-indigo-500 ring-2 ring-indigo-300"
+          : failed
+            ? "border-rose-400 ring-2 ring-rose-200"
+            : active
+              ? "border-indigo-400 ring-2 ring-indigo-200"
+              : "border-slate-200/90"
+      } ${dimmed ? "opacity-30 saturate-50" : "opacity-100"}`}
+      style={{
+        left: x,
+        top: y,
+        width,
+        height,
+        ...(active && !selected && !failed
+          ? { filter: "drop-shadow(0 0 8px rgba(99,102,241,0.35))" }
+          : failed
+            ? { filter: "drop-shadow(0 0 8px rgba(244,63,94,0.35))" }
+            : undefined),
+      }}
     >
-      {badge ? <div className="absolute -top-2.5 right-2">{badge}</div> : null}
+      {badge ? <div className="absolute -top-2.5 right-2 z-10">{badge}</div> : null}
       <div className="flex min-w-0 items-center gap-2">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-xl">
           {avatar}
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-extrabold leading-tight tracking-tight text-slate-900">
+          <p className="truncate text-sm font-extrabold leading-tight tracking-tight text-slate-900">
             {title}
           </p>
           {subtitle ? (
-            <p className="truncate text-[11px] font-medium text-slate-400">{subtitle}</p>
+            <p className="truncate text-[11px] font-medium leading-tight text-slate-400">{subtitle}</p>
           ) : null}
         </div>
       </div>
-      {meta ? (
-        <div className="tnum truncate text-[11px] font-semibold text-slate-500">{meta}</div>
-      ) : null}
-      <div>
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        {meta ? (
+          <div className="tnum min-w-0 flex-1 truncate text-[11px] font-semibold leading-tight text-slate-500">
+            {meta}
+          </div>
+        ) : (
+          <span />
+        )}
         <span
-          className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${toneChip[statusTone]}`}
+          className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[10px] font-bold ring-1 ring-inset ${toneChip[statusTone]}`}
         >
           <span className="relative flex h-1.5 w-1.5">
             {statusPulse ? (

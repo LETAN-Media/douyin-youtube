@@ -226,7 +226,7 @@ export default async function PipelineDetailPage({
       <div className="mt-4">
         {activeTab === "overview" ? (
           data.flow ? (
-            <PipelineFlowGraph pipelineId={pipelineId} initial={data.flow} />
+            <PipelineFlowGraph key={pipelineId} pipelineId={pipelineId} initial={data.flow} />
           ) : (
             <Card className="p-5">
               <p className="text-sm font-bold text-rose-700">Không tải được flow state</p>
