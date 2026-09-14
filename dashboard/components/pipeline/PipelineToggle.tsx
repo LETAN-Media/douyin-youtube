@@ -42,10 +42,10 @@ export function PipelineToggle({
           }
         })
       }
-      className={`inline-flex min-h-[44px] items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`inline-flex min-h-[44px] items-center gap-2 rounded-full py-2 pl-3.5 pr-4 text-sm font-bold shadow-sm ring-1 ring-inset transition disabled:cursor-not-allowed disabled:opacity-50 ${
         optimistic
-          ? "bg-emerald-600 text-white hover:bg-emerald-500"
-          : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+          ? "bg-emerald-600 text-white ring-emerald-500 hover:bg-emerald-500"
+          : "bg-white text-slate-600 ring-slate-200 hover:bg-slate-50 hover:text-slate-900"
       }`}
     >
       <span

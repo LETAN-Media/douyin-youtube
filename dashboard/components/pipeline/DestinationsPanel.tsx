@@ -23,6 +23,7 @@ import {
 } from "@/lib/actions";
 import { formatTime, platformLabel } from "@/lib/format";
 import type { Destination, DestinationStatus } from "@/lib/types";
+import { IconDestinations } from "@/components/icons";
 
 export function DestinationsPanel({
   pipelineId,
@@ -90,6 +91,7 @@ export function DestinationsPanel({
         <CardHeader
           title={`Destinations (${items.length})`}
           subtitle="Schedule nằm ở từng destination. Mỗi destination có OAuth và lịch riêng."
+          icon={<IconDestinations size={16} />}
           action={
             <button
               type="button"
@@ -225,16 +227,21 @@ export function DestinationCard({
     });
 
   return (
-    <div className="flex flex-col rounded-xl border border-slate-200 p-4">
+    <div className={`flex flex-col rounded-2xl border p-4 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition hover:border-indigo-200 hover:shadow-md ${d.enabled ? "border-slate-200/90 bg-white" : "border-amber-200 bg-amber-50/40"}`}>
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-bold text-slate-900">{d.name}</p>
-          <p className="text-xs text-slate-500">{platformLabel(d.platform)} · {d.daily_upload_limit}/day</p>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-sm font-black text-white ${isFacebook ? "bg-gradient-to-br from-sky-500 to-blue-600" : "bg-gradient-to-br from-rose-500 to-red-600"}`}>
+            {d.name.slice(0, 1).toUpperCase()}
+          </span>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-extrabold text-slate-900">{d.name}</p>
+            <p className="text-xs text-slate-500">{platformLabel(d.platform)} · {d.daily_upload_limit}/day</p>
+          </div>
         </div>
         {connected ? (
-          <Badge tone="green">Connected</Badge>
+          <Badge tone="green" dot>Connected</Badge>
         ) : (
-          <Badge tone="slate">Not Connected</Badge>
+          <Badge tone="slate" dot>Not Connected</Badge>
         )}
       </div>
 

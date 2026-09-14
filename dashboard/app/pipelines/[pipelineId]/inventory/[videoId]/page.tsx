@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Card, CardHeader } from "@/components/ui";
+import { IconBack, IconDestinations } from "@/components/icons";
 import { getInventoryVideo, listDestinations } from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
@@ -37,27 +38,36 @@ export default async function VideoDetailPage({
 
   return (
     <Shell>
-      <Link href={`/pipelines/${pipelineId}?tab=inventory`} className="text-sm font-semibold text-indigo-600">
-        ← Inventory
+      <Link
+        href={`/pipelines/${pipelineId}?tab=inventory`}
+        className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-semibold text-slate-500 transition hover:bg-slate-200/60 hover:text-slate-800 sm:min-h-[32px]"
+      >
+        <IconBack size={15} />
+        Inventory
       </Link>
-      <div className="mt-2">
-        <h1 className="line-clamp-2 text-lg font-bold text-slate-900">
-          {video.title || video.video_id}
-        </h1>
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+      <Card className="mt-1 p-4 sm:px-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <h1 className="line-clamp-2 min-w-0 flex-1 text-lg font-extrabold tracking-tight text-slate-900">
+            {video.title || video.video_id}
+          </h1>
           <StatusBadge status={video.status} backlog={video.is_backlog} />
-          <span>Source: {video.source_name ?? "—"}</span>
-          <span>·</span>
-          <a href={video.url} target="_blank" rel="noreferrer" className="font-semibold text-indigo-600">
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+          <span>
+            Source: <span className="font-bold text-slate-700">{video.source_name ?? "—"}</span>
+          </span>
+          <span className="text-slate-300">·</span>
+          <a href={video.url} target="_blank" rel="noreferrer" className="font-bold text-indigo-600 hover:text-indigo-700">
             Open Douyin →
           </a>
         </div>
-      </div>
+      </Card>
 
       <Card className="mt-4">
         <CardHeader
           title={`Publication matrix (${destinations.length} destinations)`}
           subtitle="Action áp dụng đúng destination, không ảnh hưởng destination khác"
+          icon={<IconDestinations size={16} />}
         />
         {destinations.length === 0 ? (
           <p className="p-5 text-sm text-slate-500">Chưa có destination nào.</p>

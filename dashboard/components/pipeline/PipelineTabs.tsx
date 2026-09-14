@@ -52,10 +52,10 @@ export function PipelineTabs({
   };
 
   return (
-    <div className="sticky top-14 z-30 -mx-4 mt-4 border-y border-slate-200 bg-[#f1f5f9]/95 px-4 backdrop-blur sm:-mx-6 sm:px-6">
+    <div className="sticky top-14 z-30 -mx-4 mt-4 px-4 sm:-mx-6 sm:px-6">
       <nav
         aria-label="Pipeline tabs"
-        className="mx-auto flex max-w-7xl gap-1 overflow-x-auto py-2"
+        className="mx-auto flex max-w-7xl gap-1 overflow-x-auto rounded-2xl border border-slate-200/90 bg-white/95 p-1.5 shadow-[0_1px_2px_rgba(15,23,42,0.06)] backdrop-blur"
       >
         {TABS.map((t) => {
           const active = shown === t.key;
@@ -66,10 +66,10 @@ export function PipelineTabs({
               href={`/pipelines/${pipelineId}?tab=${t.key}`}
               onClick={go(t.key)}
               aria-current={active ? "page" : undefined}
-              className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold transition ${
+              className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-bold transition sm:min-h-[38px] ${
                 active
-                  ? "bg-indigo-600 text-white"
-                  : "text-slate-600 hover:bg-slate-200/70"
+                  ? "bg-indigo-600 text-white shadow-[0_4px_12px_-4px_rgba(79,70,229,0.7)]"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
               }`}
             >
               {pendingThis ? (
@@ -83,7 +83,7 @@ export function PipelineTabs({
           );
         })}
         {isPending ? (
-          <span className="ml-1 inline-flex min-h-[44px] shrink-0 items-center text-xs font-medium text-slate-400">
+          <span className="ml-1 inline-flex min-h-[44px] shrink-0 items-center text-xs font-semibold text-slate-400 sm:min-h-[38px]">
             Đang tải…
           </span>
         ) : null}

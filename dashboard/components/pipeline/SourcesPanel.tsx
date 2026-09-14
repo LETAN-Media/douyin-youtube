@@ -28,6 +28,7 @@ import {
 import { formatDateTime } from "@/lib/format";
 import type { DouyinSource } from "@/lib/types";
 import { DouyinSessionPanel } from "./DouyinSessionPanel";
+import { IconSources } from "@/components/icons";
 
 export function SourcesPanel({
   pipelineId,
@@ -175,6 +176,7 @@ export function SourcesPanel({
         <CardHeader
           title={`Douyin Sources (${items.length})`}
           subtitle="Paste profile URL → Sync Now → View Inventory"
+          icon={<IconSources size={16} />}
           action={
             <div className="flex flex-wrap gap-2">
               <button
@@ -254,22 +256,22 @@ export function SourcesPanel({
             {/* Desktop table */}
             <div className="hidden overflow-x-auto md:block">
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-500">
-                    <th className="px-5 py-2.5 font-semibold">Name</th>
-                    <th className="px-3 py-2.5 font-semibold">Profile</th>
-                    <th className="px-3 py-2.5 font-semibold">Sync</th>
-                    <th className="px-3 py-2.5 font-semibold">Last sync</th>
-                    <th className="px-3 py-2.5 text-right font-semibold">Actions</th>
+                <thead className="bg-slate-50/70">
+                  <tr className="border-b border-slate-100 text-left text-[11px] uppercase tracking-[0.08em] text-slate-400">
+                    <th className="px-5 py-3 font-bold">Name</th>
+                    <th className="px-3 py-3 font-bold">Profile</th>
+                    <th className="px-3 py-3 font-bold">Sync</th>
+                    <th className="px-3 py-3 font-bold">Last sync</th>
+                    <th className="px-3 py-3 text-right font-bold">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {items.map((s) => (
-                    <tr key={s.id} className="align-top">
+                    <tr key={s.id} className="align-top transition hover:bg-indigo-50/40">
                       <td className="px-5 py-3">
-                        <p className="font-semibold text-slate-900">{s.name}</p>
-                        <p className="mt-0.5">
-                          {s.enabled ? <Badge tone="green">Enabled</Badge> : <Badge tone="slate">Disabled</Badge>}
+                        <p className="font-bold text-slate-900">{s.name}</p>
+                        <p className="mt-1">
+                          {s.enabled ? <Badge tone="green" dot>Enabled</Badge> : <Badge tone="slate" dot>Disabled</Badge>}
                         </p>
                       </td>
                       <td className="max-w-56 px-3 py-3">
@@ -330,10 +332,10 @@ export function SourcesPanel({
             {/* Mobile cards */}
             <div className="grid gap-3 p-4 md:hidden">
               {items.map((s) => (
-                <div key={s.id} className="rounded-xl border border-slate-200 p-3">
+                <div key={s.id} className="rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.05)]">
                   <div className="flex items-start justify-between gap-2">
-                    <p className="min-w-0 truncate font-semibold text-slate-900">{s.name}</p>
-                    {s.enabled ? <Badge tone="green">On</Badge> : <Badge tone="slate">Off</Badge>}
+                    <p className="min-w-0 truncate font-bold text-slate-900">{s.name}</p>
+                    {s.enabled ? <Badge tone="green" dot>On</Badge> : <Badge tone="slate" dot>Off</Badge>}
                   </div>
                   <p className="mt-1 break-all text-xs text-slate-500">{s.profile_url ?? "—"}</p>
                   <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">

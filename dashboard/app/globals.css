@@ -2,26 +2,95 @@
 
 :root {
   color-scheme: light;
+  --app-bg: #edf1f7;
+  --surface: #ffffff;
+  --ink: #0f172a;
+  --ink-soft: #475569;
+  --ink-faint: #94a3b8;
+  --line: #e2e8f0;
+  --brand: #4f46e5;
+  --brand-strong: #4338ca;
+  --ring: rgba(79, 70, 229, 0.16);
 }
 
 html {
   -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
 }
 
 body {
-  background-color: #f1f5f9;
-  color: #0f172a;
+  background-color: var(--app-bg);
+  background-image:
+    radial-gradient(1100px 320px at 85% -80px, rgba(99, 102, 241, 0.1), transparent 60%),
+    radial-gradient(900px 280px at -10% -60px, rgba(16, 185, 129, 0.07), transparent 60%);
+  background-attachment: fixed;
+  color: var(--ink);
   font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(79, 70, 229, 0.18);
+}
+
+/* Refined scrollbars (desktop) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+*::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Accessible focus everywhere */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* Tabular numerals for stats / counts */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "cv11";
+}
+
+/* Card lift on hover (links) */
+.lift {
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+.lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px -14px rgba(15, 23, 42, 0.28);
+  border-color: #c7d2fe;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lift:hover {
+    transform: none;
+  }
 }
 
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(8px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -42,4 +111,28 @@ body {
   background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
   background-size: 800px 100%;
   animation: shimmer 1.4s infinite linear;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-up {
+  animation: fade-up 0.22s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fade-up,
+  .toast-enter {
+    animation: none;
+  }
+  .skeleton-bar {
+    animation-duration: 3s;
+  }
 }

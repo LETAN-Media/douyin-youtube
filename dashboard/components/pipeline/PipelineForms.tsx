@@ -3,6 +3,7 @@
 import { useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
+import { IconSettings, IconSparkles } from "@/components/icons";
 /* Optimistic + single-tap: disable + spinner immediately, targeted refresh only. */
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { Card, CardHeader, btnPrimary, inputCls, labelCls } from "@/components/ui";
@@ -26,7 +27,7 @@ export function AiProfileForm({
 
   return (
     <Card>
-      <CardHeader title="AI Profile" subtitle="Metadata generator dùng profile này cho mọi destination" />
+      <CardHeader title="AI Profile" subtitle="Metadata generator dùng profile này cho mọi destination" icon={<IconSparkles size={16} />} />
       <form
         className="space-y-4 p-4 sm:px-5"
         onSubmit={(e) => {
@@ -81,7 +82,7 @@ export function SettingsForm({
 
   return (
     <Card>
-      <CardHeader title="Settings" subtitle="Schedule ở pipeline chỉ là mặc định; schedule thực tế nằm ở từng destination" />
+      <CardHeader title="Settings" subtitle="Schedule ở pipeline chỉ là mặc định; schedule thực tế nằm ở từng destination" icon={<IconSettings size={16} />} />
       <form
         className="grid gap-4 p-4 sm:grid-cols-2 sm:px-5"
         onSubmit={(e) => {

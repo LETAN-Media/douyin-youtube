@@ -18,6 +18,7 @@ import {
 } from "@/lib/actions";
 import { formatDateTime, publicationLabel } from "@/lib/format";
 import type { Destination, Publication } from "@/lib/types";
+import { IconPublications } from "@/components/icons";
 
 const FILTERS = ["all", "queued", "scheduled", "published", "failed", "skipped"];
 
@@ -59,6 +60,7 @@ export function PublicationsPanel({
       <CardHeader
         title={`Publications (${publications.length})`}
         subtitle="Action áp dụng đúng destination, không ảnh hưởng destination khác"
+        icon={<IconPublications size={16} />}
         action={
           <div className="flex flex-wrap gap-1">
             {FILTERS.map((f) => (
@@ -84,22 +86,22 @@ export function PublicationsPanel({
           {/* Desktop */}
           <div className="hidden overflow-x-auto md:block">
             <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-500">
-                  <th className="px-5 py-2.5 font-semibold">Destination</th>
-                  <th className="px-3 py-2.5 font-semibold">Status</th>
-                  <th className="px-3 py-2.5 font-semibold">Scheduled</th>
-                  <th className="px-3 py-2.5 font-semibold">Error</th>
-                  <th className="px-3 py-2.5 text-right font-semibold">Actions</th>
+              <thead className="bg-slate-50/70">
+                <tr className="border-b border-slate-100 text-left text-[11px] uppercase tracking-[0.08em] text-slate-400">
+                  <th className="px-5 py-3 font-bold">Destination</th>
+                  <th className="px-3 py-3 font-bold">Status</th>
+                  <th className="px-3 py-3 font-bold">Scheduled</th>
+                  <th className="px-3 py-3 font-bold">Error</th>
+                  <th className="px-3 py-3 text-right font-bold">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {publications.slice(0, 100).map((p) => {
                   const label = publicationLabel(p.status);
                   return (
-                    <tr key={p.id}>
+                    <tr key={p.id} className="transition hover:bg-indigo-50/40">
                       <td className="px-5 py-3">
-                        <p className="font-semibold text-slate-900">{destName.get(p.destination_id) ?? p.platform}</p>
+                        <p className="font-bold text-slate-900">{destName.get(p.destination_id) ?? p.platform}</p>
                         <p className="text-[11px] text-slate-500">{p.platform} · attempts {p.attempts}</p>
                       </td>
                       <td className="px-3 py-3"><Badge tone={label.tone}>{label.text}</Badge></td>
@@ -149,7 +151,7 @@ export function PublicationsPanel({
             {publications.slice(0, 100).map((p) => {
               const label = publicationLabel(p.status);
               return (
-                <div key={p.id} className="rounded-xl border border-slate-200 p-3">
+                <div key={p.id} className="rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.05)]">
                   <div className="flex items-center justify-between gap-2">
                     <p className="truncate text-sm font-bold">{destName.get(p.destination_id) ?? p.platform}</p>
                     <Badge tone={label.tone}>{label.text}</Badge>

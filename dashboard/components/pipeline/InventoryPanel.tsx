@@ -14,6 +14,7 @@ import {
 } from "@/components/ui";
 import { actionPublishNow } from "@/lib/actions";
 import { formatDateTime } from "@/lib/format";
+import { IconInventory } from "@/components/icons";
 import type {
   Destination,
   DouyinSource,
@@ -70,6 +71,7 @@ export function InventoryPanel({
       <CardHeader
         title={`Inventory${inventory ? ` (${inventory.total})` : ""}`}
         subtitle="Mỗi video có publication matrix riêng theo từng destination"
+        icon={<IconInventory size={16} />}
       />
       {/* Filter bar: GET form, no JS needed */}
       <form
@@ -112,19 +114,19 @@ export function InventoryPanel({
           {/* Desktop table */}
           <div className="hidden overflow-x-auto md:block">
             <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-500">
-                  <th className="px-5 py-2.5 font-semibold">Video</th>
-                  <th className="px-3 py-2.5 font-semibold">Status</th>
-                  <th className="px-3 py-2.5 font-semibold">Created</th>
-                  <th className="px-3 py-2.5 text-right font-semibold">Actions</th>
+              <thead className="bg-slate-50/70">
+                <tr className="border-b border-slate-100 text-left text-[11px] uppercase tracking-[0.08em] text-slate-400">
+                  <th className="px-5 py-3 font-bold">Video</th>
+                  <th className="px-3 py-3 font-bold">Status</th>
+                  <th className="px-3 py-3 font-bold">Created</th>
+                  <th className="px-3 py-3 text-right font-bold">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {inventory.items.map((v) => (
-                  <tr key={v.id}>
+                  <tr key={v.id} className="transition hover:bg-indigo-50/40">
                     <td className="max-w-md px-5 py-3">
-                      <p className="truncate font-semibold text-slate-900">{v.title || v.video_id}</p>
+                      <p className="truncate font-bold text-slate-900">{v.title || v.video_id}</p>
                       <p className="mt-0.5 truncate text-xs text-slate-500">{v.url}</p>
                     </td>
                     <td className="px-3 py-3">
@@ -151,8 +153,8 @@ export function InventoryPanel({
           {/* Mobile cards */}
           <div className="grid gap-3 p-4 md:hidden">
             {inventory.items.map((v) => (
-              <div key={v.id} className="rounded-xl border border-slate-200 p-3">
-                <p className="line-clamp-2 text-sm font-semibold text-slate-900">
+              <div key={v.id} className="rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.05)]">
+                <p className="line-clamp-2 text-sm font-bold text-slate-900">
                   {v.title || v.video_id}
                 </p>
                 <div className="mt-2 flex items-center gap-2">

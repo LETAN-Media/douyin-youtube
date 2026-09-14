@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Badge, Card, CardHeader, EmptyState } from "@/components/ui";
+import { IconBack, IconClock, IconLink } from "@/components/icons";
 import {
   getDestination,
   getDestinationStatus,
@@ -57,36 +58,52 @@ export default async function DestinationDetailPage({
 
   return (
     <Shell>
-      <Link href={`/pipelines/${pipelineId}?tab=destinations`} className="text-sm font-semibold text-indigo-600">
-        ← Destinations
+      <Link
+        href={`/pipelines/${pipelineId}?tab=destinations`}
+        className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-semibold text-slate-500 transition hover:bg-slate-200/60 hover:text-slate-800 sm:min-h-[32px]"
+      >
+        <IconBack size={15} />
+        Destinations
       </Link>
 
       {oauth === "success" ? (
-        <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-900">
+        <div className="mt-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-900">
           YouTube OAuth thành công. Kiểm tra channel bên dưới.
         </div>
       ) : null}
 
-      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-bold text-slate-900">{destination.name}</h1>
-            <Badge tone={platformLabel(destination.platform) === destination.platform ? "slate" : "indigo"}>
-              {platformLabel(destination.platform)}
-            </Badge>
-            {connected ? <Badge tone="green">Connected</Badge> : <Badge tone="slate">Not Connected</Badge>}
-            {destination.enabled ? <Badge tone="green">Enabled</Badge> : <Badge tone="amber">Paused</Badge>}
+      <Card className="mt-2 overflow-hidden p-0">
+        <div className={`h-1.5 ${isFacebook ? "bg-gradient-to-r from-sky-500 to-blue-600" : "bg-gradient-to-r from-rose-500 to-red-500"}`} />
+        <div className="flex flex-wrap items-start justify-between gap-3 p-4 sm:px-5">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-lg font-black text-white ${isFacebook ? "bg-gradient-to-br from-sky-500 to-blue-600" : "bg-gradient-to-br from-rose-500 to-red-600"}`}>
+              {destination.name.slice(0, 1).toUpperCase()}
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-xl font-extrabold tracking-tight text-slate-900">{destination.name}</h1>
+                <Badge tone={platformLabel(destination.platform) === destination.platform ? "slate" : "indigo"}>
+                  {platformLabel(destination.platform)}
+                </Badge>
+                {connected ? <Badge tone="green" dot>Connected</Badge> : <Badge tone="slate" dot>Not Connected</Badge>}
+                {destination.enabled ? <Badge tone="green">Enabled</Badge> : <Badge tone="amber">Paused</Badge>}
+              </div>
+              <p className="mt-0.5 truncate text-[13px] text-slate-500">
+                Pipeline: <span className="font-semibold text-slate-700">{pipeline?.name ?? pipelineId}</span>
+                <span className="mx-1.5 text-slate-300">·</span>
+                {destination.daily_upload_limit}/day
+                <span className="mx-1.5 text-slate-300">·</span>
+                {destination.timezone}
+              </p>
+            </div>
           </div>
-          <p className="mt-1 text-sm text-slate-500">
-            Pipeline: {pipeline?.name ?? pipelineId} · {destination.daily_upload_limit}/day · {destination.timezone}
-          </p>
+          <DestinationActions pipelineId={pipelineId} destination={destination} isFacebook={isFacebook} connected={connected} />
         </div>
-        <DestinationActions pipelineId={pipelineId} destination={destination} isFacebook={isFacebook} connected={connected} />
-      </div>
+      </Card>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader title="Connection" subtitle={isFacebook ? "Facebook adapter" : "YouTube OAuth theo destination_id"} />
+          <CardHeader title="Connection" subtitle={isFacebook ? "Facebook adapter" : "YouTube OAuth theo destination_id"} icon={<IconLink size={16} />} />
           <div className="space-y-2 p-4 text-sm sm:px-5">
             {isFacebook ? (
               <p className="rounded-xl bg-amber-50 px-3 py-2.5 font-medium text-amber-800">
@@ -108,6 +125,7 @@ export default async function DestinationDetailPage({
           <CardHeader
             title="Schedule"
             subtitle={`Today ${status?.today_published ?? 0}/${destination.daily_upload_limit}`}
+            icon={<IconClock size={16} />}
           />
           <div className="p-4 sm:px-5">
             <div className="flex flex-wrap gap-1.5">

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useToast } from "@/components/Toast";
 import { Badge, Card, CardHeader, btnSmall } from "@/components/ui";
+import { IconBolt } from "@/components/icons";
 import {
   actionDisconnectDouyinSession,
   actionGetDouyinSessionAggregate,
@@ -133,6 +134,7 @@ export function DouyinSessionPanel({ pipelineId }: { pipelineId: string }) {
       <CardHeader
         title="Douyin Session"
         subtitle="QR login để retry khi anonymous scan bị challenge"
+        icon={<IconBolt size={16} />}
         action={
           <div className="flex flex-wrap gap-2">
             <button type="button" className={btnSmall} disabled={pendingKey !== null} onClick={connect}>

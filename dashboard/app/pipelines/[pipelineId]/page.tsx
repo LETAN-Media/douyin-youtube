@@ -1,7 +1,17 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
-import { Badge, Card } from "@/components/ui";
+import { Badge, Card, StatCard } from "@/components/ui";
+import {
+  IconAlert,
+  IconBack,
+  IconChevronRight,
+  IconClock,
+  IconDestinations,
+  IconInventory,
+  IconPublications,
+  IconSources,
+} from "@/components/icons";
 import {
   getDestinationStatuses,
   getPipeline,
@@ -184,64 +194,95 @@ export default async function PipelineDetailPage({
 
   return (
     <Shell>
-      <Link href="/" className="inline-flex min-h-[44px] items-center text-sm font-semibold text-indigo-600">
-        ← Dashboard
+      <Link
+        href="/"
+        className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-semibold text-slate-500 transition hover:bg-slate-200/60 hover:text-slate-800 sm:min-h-[32px]"
+      >
+        <IconBack size={15} />
+        Dashboard
       </Link>
-      <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="truncate text-xl font-bold text-slate-900">
-              {pipeline.name}
-            </h1>
-            {pipeline.enabled ? (
-              <Badge tone="green">AUTO ON</Badge>
-            ) : (
-              <Badge tone="slate">AUTO OFF</Badge>
-            )}
+
+      <Card className="mt-1 overflow-hidden p-0">
+        <div className="h-1.5 bg-gradient-to-r from-indigo-500 via-violet-500 to-emerald-400" />
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:px-5">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 text-lg font-black text-white shadow-[0_6px_16px_-6px_rgba(79,70,229,0.7)]">
+              {pipeline.name.slice(0, 1).toUpperCase()}
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-xl font-extrabold tracking-tight text-slate-900">
+                  {pipeline.name}
+                </h1>
+                {pipeline.enabled ? (
+                  <Badge tone="green" dot>AUTO ON</Badge>
+                ) : (
+                  <Badge tone="slate" dot>AUTO OFF</Badge>
+                )}
+              </div>
+              <p className="mt-0.5 truncate text-[13px] text-slate-500">
+                <span className="font-mono">/{pipeline.slug}</span>
+                <span className="mx-1.5 text-slate-300">·</span>
+                {pipeline.timezone}
+                <span className="mx-1.5 text-slate-300">·</span>
+                {pipeline.default_privacy}
+              </p>
+            </div>
           </div>
-          <p className="mt-0.5 text-sm text-slate-500">
-            /{pipeline.slug} · {pipeline.timezone} · {pipeline.default_privacy}
-          </p>
+          <PipelineToggle id={pipeline.id} enabled={pipeline.enabled} />
         </div>
-        <PipelineToggle id={pipeline.id} enabled={pipeline.enabled} />
-      </div>
+      </Card>
 
       {/* Instant tabs: optimistic active state + spinner, >=44px touch target */}
       <PipelineTabs pipelineId={pipelineId} activeTab={activeTab} />
 
       <div className="mt-4">
         {activeTab === "overview" ? (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {[
-              { label: "Sources", value: data.stats?.sources_count ?? "—" },
-              { label: "Inventory", value: data.stats?.inventory_total ?? "—" },
-              { label: "Backlog", value: data.stats?.backlog ?? "—" },
-              { label: "New", value: data.stats?.new ?? "—" },
-              { label: "Destinations", value: data.stats?.destinations_count ?? "—" },
-              { label: "Published today", value: data.stats?.published_today ?? "—" },
-              { label: "Failed", value: data.stats?.failed ?? "—" },
-              { label: "Scheduled", value: data.stats?.publications_scheduled ?? "—" },
-            ].map((s) => (
-              <div key={s.label} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{s.label}</p>
-                <p className="mt-1 text-2xl font-bold text-slate-900">{s.value}</p>
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <StatCard label="Sources" value={data.stats?.sources_count ?? "—"} icon={<IconSources size={15} />} accent="sky" />
+              <StatCard label="Inventory" value={data.stats?.inventory_total ?? "—"} icon={<IconInventory size={15} />} accent="slate" />
+              <StatCard label="Backlog" value={data.stats?.backlog ?? "—"} icon={<IconInventory size={15} />} accent="amber" />
+              <StatCard label="New" value={data.stats?.new ?? "—"} icon={<IconSources size={15} />} accent="indigo" />
+              <StatCard label="Destinations" value={data.stats?.destinations_count ?? "—"} icon={<IconDestinations size={15} />} accent="emerald" />
+              <StatCard label="Published today" value={data.stats?.published_today ?? "—"} icon={<IconPublications size={15} />} accent="emerald" />
+              <StatCard
+                label="Failed"
+                value={data.stats?.failed ?? "—"}
+                icon={<IconAlert size={15} />}
+                accent="rose"
+                alert={(data.stats?.failed ?? 0) > 0}
+              />
+              <StatCard label="Scheduled" value={data.stats?.publications_scheduled ?? "—"} icon={<IconClock size={15} />} accent="amber" />
+            </div>
+            <Card className="flex flex-wrap items-center justify-between gap-4 p-4 sm:px-5">
+              <div className="flex items-center gap-3">
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
+                  <IconClock size={18} />
+                </span>
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-slate-400">Next publication</p>
+                  <p className="tnum mt-0.5 text-[15px] font-extrabold text-slate-900">
+                    {data.stats?.next_publication ? formatTime(data.stats.next_publication) : "—"}
+                  </p>
+                </div>
               </div>
-            ))}
-            <Card className="p-4 sm:col-span-2 xl:col-span-4">
-              <p className="text-sm font-semibold text-slate-900">Next publication</p>
-              <p className="mt-1 text-sm text-slate-600">
-                {data.stats?.next_publication ? formatTime(data.stats.next_publication) : "—"}
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Link href={tabHref("sources")} className="inline-flex min-h-[44px] items-center rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                  Manage sources →
-                </Link>
-                <Link href={tabHref("destinations")} className="inline-flex min-h-[44px] items-center rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                  Manage destinations →
-                </Link>
-                <Link href={tabHref("inventory")} className="inline-flex min-h-[44px] items-center rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                  View inventory →
-                </Link>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { href: tabHref("sources"), label: "Manage sources", icon: <IconSources size={14} /> },
+                  { href: tabHref("destinations"), label: "Manage destinations", icon: <IconDestinations size={14} /> },
+                  { href: tabHref("inventory"), label: "View inventory", icon: <IconInventory size={14} /> },
+                ].map((l) => (
+                  <Link
+                    key={l.label}
+                    href={l.href}
+                    className="group inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 shadow-sm transition hover:border-indigo-200 hover:bg-indigo-50/50 hover:text-indigo-700 sm:min-h-[36px]"
+                  >
+                    {l.icon}
+                    {l.label}
+                    <IconChevronRight size={13} />
+                  </Link>
+                ))}
               </div>
             </Card>
           </div>

@@ -4,7 +4,8 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Shell } from "@/components/Shell";
-import { Card, btnPrimary, btnSecondary, inputCls, labelCls } from "@/components/ui";
+import { Card, CardHeader, PageHeader, btnPrimary, btnSecondary, inputCls, labelCls } from "@/components/ui";
+import { IconBack, IconPlus } from "@/components/icons";
 import { useToast } from "@/components/Toast";
 import { actionCreatePipeline } from "@/lib/actions";
 
@@ -16,11 +17,27 @@ export default function NewPipelinePage() {
   return (
     <Shell>
       <div className="mx-auto max-w-2xl">
-        <Link href="/" className="text-sm font-semibold text-indigo-600">
-          ← Dashboard
+        <Link
+          href="/"
+          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-semibold text-slate-500 transition hover:bg-slate-200/60 hover:text-slate-800 sm:min-h-[32px]"
+        >
+          <IconBack size={15} />
+          Dashboard
         </Link>
-        <h1 className="mt-2 text-xl font-bold text-slate-900">New Pipeline</h1>
-        <Card className="mt-4 p-4 sm:p-6">
+        <div className="mt-1">
+          <PageHeader
+            eyebrow="Workspace"
+            title="New Pipeline"
+            description="Tạo pipeline để thu thập Douyin và phân phối đa nền tảng."
+          />
+        </div>
+        <Card className="mt-4 overflow-hidden">
+          <CardHeader
+            title="Thông tin pipeline"
+            subtitle="Tên và lịch mặc định — schedule chi tiết nằm ở từng destination"
+            icon={<IconPlus size={16} />}
+          />
+          <div className="p-4 sm:p-6">
           <form
             className="space-y-4"
             onSubmit={(e) => {
@@ -80,10 +97,11 @@ export default function NewPipelinePage() {
             <div className="flex gap-2 pt-2">
               <Link href="/" className={`${btnSecondary} flex-1`}>Hủy</Link>
               <button type="submit" disabled={pending} className={`${btnPrimary} flex-1`}>
-                {pending ? "Đang tạo…" : "Create"}
+                {pending ? "Đang tạo…" : "Create pipeline"}
               </button>
             </div>
           </form>
+          </div>
         </Card>
       </div>
     </Shell>
