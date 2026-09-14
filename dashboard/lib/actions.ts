@@ -437,8 +437,94 @@ export async function actionRetryJob(
   }
 }
 
-export async function actionLogout(): Promise<never> {
-  const { cookies } = await import("next/headers");
+export async function actionStartDouyinSession(): Promise<
+  ActionResult & { sessionId?: string; qrImageB64?: string; expiresAt?: string | null }
+> {
+  try {
+    const { startDouyinSession } = await import("./api");
+    const data = await startDouyinSession();
+    return {
+      ok: true,
+      sessionId: data.session_id,
+      qrImageB64: data.qr_image_b64,
+      expiresAt: data.expires_at ?? null,
+    };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionGetDouyinSessionFlow(
+  sessionId: string,
+): Promise<
+  ActionResult & {
+    status?: string;
+    accountName?: string | null;
+    errorDetail?: string;
+    qrImageB64?: string | null;
+  }
+> {
+  try {
+    const { getDouyinSessionFlow } = await import("./api");
+    const data = await getDouyinSessionFlow(sessionId);
+    return {
+      ok: true,
+      status: data.status,
+      accountName: data.account_name ?? null,
+      errorDetail: data.error ?? undefined,
+      qrImageB64: data.qr_image_b64 ?? null,
+    };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionGetDouyinSessionAggregate(): Promise<
+  ActionResult & {
+    connected?: boolean;
+    valid?: boolean;
+    accountName?: string | null;
+    lastValidatedAt?: string | null;
+  }
+> {
+  try {
+    const { getDouyinSessionAggregate } = await import("./api");
+    const data = await getDouyinSessionAggregate();
+    return {
+      ok: true,
+      connected: data.connected,
+      valid: data.valid,
+      accountName: data.account_name ?? null,
+      lastValidatedAt: data.last_validated_at ?? null,
+    };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionValidateDouyinSessionFull(): Promise<ActionResult> {
+  try {
+    const { validateDouyinSession } = await import("./api");
+    const data = await validateDouyinSession();
+    if (data.valid) return { ok: true };
+    return { ok: false, error: data.error || "Douyin session expired" };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionDisconnectDouyinSession(): Promise<ActionResult> {
+  try {
+    const { disconnectDouyinSession } = await import("./api");
+    await disconnectDouyinSession();
+    revalidatePath("/");
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionLogout(): Promise<never> {  const { cookies } = await import("next/headers");
   const { SESSION_COOKIE } = await import("./session");
   const store = await cookies();
   store.delete(SESSION_COOKIE);

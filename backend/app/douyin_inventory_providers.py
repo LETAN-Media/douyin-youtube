@@ -415,9 +415,19 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
             return videos
 
         # Anonymous hit an auth wall (login wall / captcha / challenge /
-        # auth HTTP status / auth-caused empty response). Retry with
-        # cookies when available.
-        cookie_jar = load_cookies_optional()
+        # auth HTTP status / auth-caused empty response). Retry order:
+        # 1) saved QR-login session, 2) DOUYIN_COOKIES_B64 compatibility
+        # fallback. Only when neither exists -> auth_required.
+        cookie_jar: list[dict[str, Any]] = []
+        try:
+            from app.douyin_session import load_saved_session_cookies
+
+            cookie_jar = load_saved_session_cookies()
+        except Exception:
+            logger.warning("Saved Douyin session lookup failed", exc_info=True)
+            cookie_jar = []
+        if not cookie_jar:
+            cookie_jar = load_cookies_optional()
         if not cookie_jar:
             _record_access_probe(anonymous_ok=False, cookie_required=True)
             raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)

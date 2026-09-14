@@ -25,6 +25,7 @@ import {
 } from "@/lib/actions";
 import { formatDateTime } from "@/lib/format";
 import type { DouyinSource } from "@/lib/types";
+import { DouyinSessionPanel } from "./DouyinSessionPanel";
 
 export function SourcesPanel({
   pipelineId,
@@ -61,6 +62,7 @@ export function SourcesPanel({
 
   return (
     <div className="space-y-4">
+      <DouyinSessionPanel pipelineId={pipelineId} />
       <Card>
         <CardHeader
           title={`Douyin Sources (${sources.length})`}

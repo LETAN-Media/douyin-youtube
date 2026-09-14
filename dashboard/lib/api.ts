@@ -392,3 +392,46 @@ export async function getDouyinSession(): Promise<{
 }> {
   return apiFetch("/api/system/douyin-session");
 }
+
+export async function startDouyinSession(): Promise<{
+  session_id: string;
+  status: string;
+  qr_image_b64: string;
+  expires_at?: string | null;
+}> {
+  return apiFetch("/api/douyin/session/start", { method: "POST" });
+}
+
+export async function getDouyinSessionFlow(id: string): Promise<{
+  session_id: string;
+  status: string;
+  account_name?: string | null;
+  error?: string | null;
+  expires_at?: string | null;
+  last_validated_at?: string | null;
+  qr_image_b64?: string | null;
+}> {
+  return apiFetch(`/api/douyin/session/${encodeURIComponent(id)}/status`);
+}
+
+export async function getDouyinSessionAggregate(): Promise<{
+  connected: boolean;
+  valid: boolean;
+  account_name?: string | null;
+  last_validated_at?: string | null;
+}> {
+  return apiFetch("/api/douyin/session/status");
+}
+
+export async function validateDouyinSession(): Promise<{
+  valid: boolean;
+  account_name?: string | null;
+  error?: string | null;
+  last_validated_at?: string | null;
+}> {
+  return apiFetch("/api/douyin/session/validate", { method: "POST" });
+}
+
+export async function disconnectDouyinSession(): Promise<{ removed: number }> {
+  return apiFetch("/api/douyin/session/disconnect", { method: "POST" });
+}

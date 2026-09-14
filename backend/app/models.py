@@ -780,9 +780,75 @@ class VideoJob(Base):
     )
 
 
+class DouyinSession(Base):
+    """Saved Douyin web login session (QR login via dashboard).
+
+    The Playwright storage_state JSON is stored Fernet-encrypted and is
+    never returned by any API. Login success is only recorded after real
+    detection (login cookies + dismissed login modal), never faked.
+    """
+
+    __tablename__ = "douyin_sessions"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    label: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+        default="Douyin",
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+    )
+
+    storage_state_encrypted: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    account_name: Mapped[str | None] = mapped_column(
+        String(300),
+        nullable=True,
+    )
+
+    last_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
-
     key: Mapped[str] = mapped_column(
         String(100),
         primary_key=True,

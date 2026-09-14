@@ -78,6 +78,15 @@ def run_migrations() -> None:
                 tables=[Publication.__table__],
             )
 
+        if not table_exists(connection, "douyin_sessions"):
+            from app.models import DouyinSession
+
+            logger.info("Creating douyin_sessions table")
+            Base.metadata.create_all(
+                bind=connection,
+                tables=[DouyinSession.__table__],
+            )
+
         if not column_exists(connection, "video_jobs", "pipeline_id"):
             logger.info("Adding pipeline_id to video_jobs")
             connection.execute(

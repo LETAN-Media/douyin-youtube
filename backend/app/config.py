@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # Optional Netscape cookies.txt encoded with base64.
     douyin_cookies_b64: str = ""
 
+    # Optional key for encrypting saved Douyin login sessions at rest.
+    # Falls back to ADMIN_TOKEN-derived key when empty.
+    session_encryption_key: str = ""
+
+    # QR login flow budget (seconds the backend waits for a QR scan).
+    douyin_login_timeout_seconds: int = 300
+
     # Optional AI metadata generator
     ai_enabled: bool = True
     ai_base_url: str = "https://api.toolnet.tech/v1"

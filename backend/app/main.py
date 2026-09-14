@@ -2173,6 +2173,84 @@ def douyin_session_status() -> dict:
         }
 
 
+@app.post(
+    "/api/douyin/session/start",
+    status_code=201,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def douyin_session_start() -> dict:
+    """Start a real QR login flow. Returns the live QR image (base64 PNG)."""
+    from app.douyin_session import start_login_flow
+
+    try:
+        return start_login_flow()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get(
+    "/api/douyin/session/status",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def douyin_session_aggregate() -> dict:
+    from app.douyin_session import get_aggregate_status
+
+    return get_aggregate_status()
+
+
+@app.get(
+    "/api/douyin/session/{session_id}/status",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def douyin_session_flow_status(session_id: str) -> dict:
+    from app.douyin_session import get_flow_status
+
+    try:
+        return get_flow_status(session_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="Không tìm thấy Douyin session"
+        ) from exc
+
+
+@app.post(
+    "/api/douyin/session/validate",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def douyin_session_validate() -> dict:
+    from app.douyin_session import validate_saved_session
+
+    try:
+        return validate_saved_session()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/douyin/session/disconnect",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def douyin_session_disconnect(
+    session_id: str | None = Query(default=None),
+) -> dict:
+    from app.douyin_session import disconnect_session
+
+    removed = disconnect_session(session_id)
+    return {"removed": int(removed)}
+
+
 @app.get(
     "/api/publications/{publication_id}",
     response_model=PublicationOut,
