@@ -1515,6 +1515,340 @@ def pipeline_destination_statuses(
 
 
 @app.get(
+    "/api/pipelines/{pipeline_id}/flow-state",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def pipeline_flow_state(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> dict:
+    """Single endpoint for the realtime pipeline flow graph.
+
+    Returns nodes (sources / processors / destinations) + active routes
+    derived from REAL rows only: active VideoJobs (pending/downloading/
+    uploading), queued+scheduled Publications, and failures from the last
+    10 minutes. No N+1: fixed ~10 queries regardless of node counts.
+    Frontend polls this every few seconds; never revalidates the page.
+    """
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    sources = list(
+        db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == pipeline_id)
+            .order_by(DouyinSource.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+    destinations = list(
+        db.execute(
+            select(Destination)
+            .where(Destination.pipeline_id == pipeline_id)
+            .order_by(Destination.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+    source_by_id = {s.id: s for s in sources}
+    dest_by_id = {d.id: d for d in destinations}
+
+    inventory_total = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipeline_id)
+    ).scalar_one_or_none() or 0
+
+    pub_count_rows = db.execute(
+        select(Publication.status, func.count(Publication.id))
+        .where(Publication.pipeline_id == pipeline_id)
+        .group_by(Publication.status)
+    ).all()
+    pub_counts = {str(r[0]): int(r[1] or 0) for r in pub_count_rows}
+
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    today_rows = db.execute(
+        select(
+            Publication.destination_id,
+            func.count(Publication.id).label("cnt"),
+        )
+        .where(Publication.pipeline_id == pipeline_id)
+        .where(Publication.status == "published")
+        .where(Publication.published_at >= today_start)
+        .group_by(Publication.destination_id)
+    ).all()
+    today_by_dest = {str(r[0]): int(r[1] or 0) for r in today_rows}
+
+    last_pub_rows = db.execute(
+        select(
+            Publication.destination_id,
+            func.max(Publication.published_at).label("last"),
+        )
+        .where(Publication.pipeline_id == pipeline_id)
+        .where(Publication.status == "published")
+        .group_by(Publication.destination_id)
+    ).all()
+    last_pub_by_dest = {
+        str(r[0]): r[1].isoformat() if r[1] is not None else None
+        for r in last_pub_rows
+    }
+
+    # Active publications (queued/scheduled) joined with their video.
+    active_pub_rows = list(
+        db.execute(
+            select(Publication, DouyinVideo)
+            .join(DouyinVideo, DouyinVideo.id == Publication.douyin_video_id)
+            .where(Publication.pipeline_id == pipeline_id)
+            .where(Publication.status.in_(["queued", "scheduled"]))
+            .order_by(Publication.scheduled_at.asc())
+            .limit(60)
+        ).all()
+    )
+
+    # Recent failures (last 10 minutes) so failed paths render red.
+    failed_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    failed_pub_rows = list(
+        db.execute(
+            select(Publication, DouyinVideo)
+            .join(DouyinVideo, DouyinVideo.id == Publication.douyin_video_id)
+            .where(Publication.pipeline_id == pipeline_id)
+            .where(Publication.status == "failed")
+            .where(Publication.updated_at >= failed_since)
+            .order_by(Publication.updated_at.desc())
+            .limit(10)
+        ).all()
+    )
+
+    # Active worker jobs carry the fine-grained stage + progress.
+    active_jobs = list(
+        db.execute(
+            select(VideoJob)
+            .where(VideoJob.pipeline_id == pipeline_id)
+            .where(VideoJob.status.in_(["pending", "downloading", "uploading"]))
+            .order_by(VideoJob.updated_at.desc())
+            .limit(100)
+        )
+        .scalars()
+        .all()
+    )
+    job_video_ids = list({j.source_video_id for j in active_jobs if j.source_video_id})
+    job_videos: dict[str, DouyinVideo] = {}
+    if job_video_ids:
+        for v in db.execute(
+            select(DouyinVideo)
+            .where(DouyinVideo.pipeline_id == pipeline_id)
+            .where(DouyinVideo.video_id.in_(job_video_ids))
+        ).scalars().all():
+            job_videos[str(v.video_id)] = v
+
+    # Overlay jobs onto their publication route (unique per video+dest).
+    jobs_by_route: dict[tuple[str, str], VideoJob] = {}
+    for job in active_jobs:
+        v = job_videos.get(str(job.source_video_id or ""))
+        if v is None or not job.destination_id:
+            continue
+        jobs_by_route[(str(v.id), str(job.destination_id))] = job
+
+    def _iso(dt: Any) -> str | None:
+        try:
+            return dt.isoformat() if dt is not None else None
+        except Exception:
+            return None
+
+    routes: list[dict] = []
+    seen_routes: set[tuple[str, str]] = set()
+
+    def _route_from_pub(
+        pub: Publication, video: DouyinVideo, failed: bool = False
+    ) -> dict | None:
+        source = source_by_id.get(str(video.source_id))
+        dest = dest_by_id.get(str(pub.destination_id))
+        if dest is None:
+            return None
+        job = jobs_by_route.get((str(video.id), str(pub.destination_id)))
+        stage = str(job.status) if job is not None else str(pub.status)
+        progress = int(job.progress) if job is not None and job.progress else None
+        started = pub.started_at or pub.scheduled_at or pub.created_at
+        return {
+            "key": f"pub:{pub.id}",
+            "publication_id": pub.id,
+            "job_id": job.id if job is not None else None,
+            "video_id": video.id,
+            "video_title": video.title or video.video_id,
+            "source_id": str(video.source_id),
+            "source_name": source.name if source is not None else "—",
+            "destination_id": str(pub.destination_id),
+            "destination_name": dest.name,
+            "platform": dest.platform,
+            "stage": stage,
+            "progress": progress,
+            "attempts": int(pub.attempts or 0),
+            "started_at": _iso(started),
+            "scheduled_at": _iso(pub.scheduled_at),
+            "error": (pub.error or (job.error if job is not None else None) or None)
+            if failed
+            else None,
+            "failed": failed,
+        }
+
+    for pub, video in active_pub_rows:
+        r = _route_from_pub(pub, video)
+        if r is None:
+            continue
+        seen_routes.add((str(video.id), str(pub.destination_id)))
+        routes.append(r)
+
+    for pub, video in failed_pub_rows:
+        r = _route_from_pub(pub, video, failed=True)
+        if r is None:
+            continue
+        seen_routes.add((str(video.id), str(pub.destination_id)))
+        routes.append(r)
+
+    # Jobs without a matching publication row (should be rare).
+    for job in active_jobs:
+        v = job_videos.get(str(job.source_video_id or ""))
+        if v is None or not job.destination_id:
+            continue
+        if (str(v.id), str(job.destination_id)) in seen_routes:
+            continue
+        dest = dest_by_id.get(str(job.destination_id))
+        if dest is None:
+            continue
+        source = source_by_id.get(str(v.source_id))
+        routes.append({
+            "key": f"job:{job.id}",
+            "publication_id": None,
+            "job_id": job.id,
+            "video_id": v.id,
+            "video_title": v.title or v.video_id,
+            "source_id": str(v.source_id),
+            "source_name": source.name if source is not None else "—",
+            "destination_id": str(job.destination_id),
+            "destination_name": dest.name,
+            "platform": dest.platform,
+            "stage": str(job.status),
+            "progress": int(job.progress) if job.progress else None,
+            "attempts": int(job.attempts or 0),
+            "started_at": _iso(job.updated_at or job.created_at),
+            "scheduled_at": None,
+            "error": job.error,
+            "failed": False,
+        })
+
+    # Sort: failed first, then by stage order, then oldest started.
+    stage_order = {
+        "failed": 0, "downloading": 1, "uploading": 2, "pending": 3,
+        "queued": 4, "scheduled": 5,
+    }
+    routes.sort(
+        key=lambda r: (stage_order.get(str(r["stage"]), 9), str(r["started_at"] or ""))
+    )
+
+    syncing = sum(
+        1 for s in sources
+        if str(s.inventory_sync_status or "") in ("queued", "running")
+    )
+    sync_failed = sum(
+        1 for s in sources
+        if str(s.inventory_sync_status or "") in ("failed", "auth_required")
+    )
+    queued_n = sum(1 for r in routes if not r["failed"] and r["stage"] in ("queued", "scheduled"))
+    active_n = sum(1 for r in routes if not r["failed"] and r["stage"] in ("pending", "downloading", "uploading"))
+    failed_n = sum(1 for r in routes if r["failed"])
+
+    if syncing > 0:
+        inv_state, inv_detail = "syncing", f"{syncing} source đang quét"
+    elif sync_failed > 0:
+        inv_state, inv_detail = "error", f"{sync_failed} source lỗi sync"
+    else:
+        inv_state, inv_detail = "idle", f"{int(inventory_total)} videos"
+    if active_n > 0:
+        ai_state, ai_detail = "processing", f"{active_n} video đang xử lý"
+    elif queued_n > 0:
+        ai_state, ai_detail = "waiting", f"{queued_n} video chờ"
+    else:
+        ai_state, ai_detail = "idle", "Sẵn sàng"
+    if any(not r["failed"] and r["stage"] == "scheduled" for r in routes):
+        sch_state, sch_detail = "processing", "Đang lên lịch"
+    elif pub_counts.get("scheduled", 0) + pub_counts.get("queued", 0) > 0:
+        sch_state, sch_detail = (
+            "waiting",
+            f"{pub_counts.get('queued', 0) + pub_counts.get('scheduled', 0)} chờ lịch",
+        )
+    else:
+        sch_state, sch_detail = "idle", "Trống"
+    if any(not r["failed"] and r["stage"] == "uploading" for r in routes):
+        pub_state, pub_detail = "processing", "Đang upload"
+    elif failed_n > 0:
+        pub_state, pub_detail = "error", f"{failed_n} lỗi gần đây"
+    elif queued_n > 0:
+        pub_state, pub_detail = "waiting", f"{queued_n} chờ upload"
+    else:
+        pub_state, pub_detail = "idle", "Sẵn sàng"
+
+    def _username(s: DouyinSource) -> str | None:
+        if s.douyin_user_id:
+            return f"@{s.douyin_user_id}"
+        if s.douyin_sec_uid:
+            return f"@{s.douyin_sec_uid[:16]}…"
+        return None
+
+    return {
+        "pipeline_id": pipeline_id,
+        "summary": {
+            "sources": len(sources),
+            "inventory_total": int(inventory_total),
+            "queue": int(pub_counts.get("queued", 0) + pub_counts.get("scheduled", 0)),
+            "publishing": int(active_n),
+            "failed": int(pub_counts.get("failed", 0)),
+        },
+        "sources": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "username": _username(s),
+                "inventory_count": int(s.inventory_count or 0),
+                "sync_status": str(s.inventory_sync_status or "idle"),
+                "enabled": bool(s.enabled),
+            }
+            for s in sources
+        ],
+        "processors": [
+            {"key": "inventory", "label": "Inventory", "sub": "Thu thập Douyin", "state": inv_state, "detail": inv_detail},
+            {"key": "ai", "label": "AI Metadata", "sub": "Title · Hashtags", "state": ai_state, "detail": ai_detail},
+            {"key": "scheduler", "label": "Scheduler", "sub": "Upload slots", "state": sch_state, "detail": sch_detail},
+            {"key": "publisher", "label": "Publisher", "sub": "Upload worker", "state": pub_state, "detail": pub_detail},
+        ],
+        "destinations": [
+            {
+                "id": d.id,
+                "platform": d.platform,
+                "name": d.name,
+                "connected": bool(d.connected),
+                "enabled": bool(d.enabled),
+                "today_published": int(today_by_dest.get(str(d.id), 0)),
+                "daily_upload_limit": int(d.daily_upload_limit or 0),
+                "next_upload": _destination_next_upload(d),
+                "last_published_at": last_pub_by_dest.get(str(d.id)),
+            }
+            for d in destinations
+        ],
+        "active_routes": routes,
+    }
+
+
+@app.get(
     "/api/youtube/status",
     dependencies=[
         Depends(require_admin)

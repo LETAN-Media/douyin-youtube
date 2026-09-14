@@ -7,6 +7,7 @@ import type {
   Destination,
   DestinationStatus,
   DouyinSource,
+  FlowState,
   InventoryList,
   Job,
   Pipeline,
@@ -357,6 +358,13 @@ export async function getDestinationStatuses(
 
 export async function getSource(id: string): Promise<DouyinSource> {
   return apiFetch<DouyinSource>(`/api/sources/${encodeURIComponent(id)}`);
+}
+
+/** Realtime flow graph state: nodes + active routes. Poll every 2-5s. */
+export async function getFlowState(pipelineId: string): Promise<FlowState> {
+  return apiFetch<FlowState>(
+    `/api/pipelines/${encodeURIComponent(pipelineId)}/flow-state`,
+  );
 }
 
 // ---------- Publications ----------

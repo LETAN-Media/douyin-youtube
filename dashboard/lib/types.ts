@@ -168,6 +168,70 @@ export interface DestinationStatus {
   enabled: boolean;
 }
 
+export interface FlowSource {
+  id: string;
+  name: string;
+  username?: string | null;
+  inventory_count: number;
+  sync_status: string;
+  enabled: boolean;
+}
+
+export interface FlowProcessor {
+  key: string;
+  label: string;
+  sub: string;
+  state: "idle" | "syncing" | "waiting" | "processing" | "error" | string;
+  detail: string;
+}
+
+export interface FlowDestination {
+  id: string;
+  platform: string;
+  name: string;
+  connected: boolean;
+  enabled: boolean;
+  today_published: number;
+  daily_upload_limit: number;
+  next_upload?: string | null;
+  last_published_at?: string | null;
+}
+
+export interface FlowRoute {
+  key: string;
+  publication_id?: string | null;
+  job_id?: string | null;
+  video_id: string;
+  video_title: string;
+  source_id: string;
+  source_name: string;
+  destination_id: string;
+  destination_name: string;
+  platform: string;
+  stage: string;
+  progress?: number | null;
+  attempts: number;
+  started_at?: string | null;
+  scheduled_at?: string | null;
+  error?: string | null;
+  failed: boolean;
+}
+
+export interface FlowState {
+  pipeline_id: string;
+  summary: {
+    sources: number;
+    inventory_total: number;
+    queue: number;
+    publishing: number;
+    failed: number;
+  };
+  sources: FlowSource[];
+  processors: FlowProcessor[];
+  destinations: FlowDestination[];
+  active_routes: FlowRoute[];
+}
+
 export interface YoutubeStatus {
   connected: boolean;
   destination_id?: string | null;

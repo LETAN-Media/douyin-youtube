@@ -215,6 +215,22 @@ export async function actionSyncPipeline(pipelineId: string): Promise<ActionResu
   }
 }
 
+// Polling helper for the realtime flow graph: no revalidation, tiny GET.
+export async function actionGetFlowState(
+  pipelineId: string,
+): Promise<
+  { ok: true; flow: import("./types").FlowState } | { ok: false; error: string }
+> {
+  try {
+    const { getFlowState } = await import("./api");
+    const flow = await getFlowState(pipelineId);
+    return { ok: true, flow };
+  } catch (e) {
+    if (e instanceof ApiError) return { ok: false, error: e.message };
+    return { ok: false, error: e instanceof Error ? e.message : "Không tải được flow state." };
+  }
+}
+
 // Polling helper for background sync: no revalidation, tiny GET (8s timeout).
 export async function actionGetSourceStatus(
   id: string,

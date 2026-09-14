@@ -113,6 +113,17 @@ textarea:focus-visible {
   animation: shimmer 1.4s infinite linear;
 }
 
+/* Animated signal on active flow connectors */
+.flow-dash {
+  stroke-dasharray: 7 9;
+  animation: flow-dash-move 0.7s linear infinite;
+}
+@keyframes flow-dash-move {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+
 @keyframes fade-up {
   from {
     opacity: 0;
@@ -129,7 +140,8 @@ textarea:focus-visible {
 }
 @media (prefers-reduced-motion: reduce) {
   .fade-up,
-  .toast-enter {
+  .toast-enter,
+  .flow-dash {
     animation: none;
   }
   .skeleton-bar {
