@@ -1,0 +1,388 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import {
+  createDestination,
+  createPipeline,
+  createSource,
+  deleteDestination,
+  deletePipeline,
+  deleteSource,
+  getYoutubeOauthUrl,
+  publishNow,
+  reschedulePublication,
+  retryJob,
+  retryPublication,
+  skipPublication,
+  syncPipeline,
+  syncSource,
+  updateDestination,
+  updatePipeline,
+  updateSource,
+} from "./api";
+import { ApiError } from "./api";
+import { slugify, parseSlots } from "./format";
+import type { ActionResult } from "./types";
+
+function err(e: unknown): ActionResult {
+  if (e instanceof ApiError) return { ok: false, error: e.message };
+  return { ok: false, error: e instanceof Error ? e.message : "Thao tác thất bại." };
+}
+
+function revalidatePipeline(id: string) {
+  revalidatePath("/");
+  revalidatePath(`/pipelines/${id}`);
+}
+
+// ---------- Pipelines ----------
+
+export async function actionCreatePipeline(
+  form: FormData,
+): Promise<ActionResult & { id?: string }> {
+  try {
+    const name = String(form.get("name") ?? "").trim();
+    if (!name) return { ok: false, error: "Thiếu tên pipeline." };
+    const slugRaw = String(form.get("slug") ?? "").trim();
+    const slug = slugRaw ? slugify(slugRaw) : slugify(name);
+    if (!slug) return { ok: false, error: "Slug không hợp lệ." };
+    const pipeline = await createPipeline({
+      name,
+      slug,
+      niche: String(form.get("niche") ?? "").trim() || undefined,
+      language: String(form.get("language") ?? "").trim() || undefined,
+      default_privacy: String(form.get("default_privacy") ?? "public"),
+      timezone: String(form.get("timezone") ?? "UTC").trim() || "UTC",
+      daily_upload_limit: Number(form.get("daily_upload_limit") ?? 6) || 6,
+      upload_slots: parseSlots(String(form.get("upload_slots") ?? "08:00,11:00,14:00,17:00,20:00,23:00")),
+    });
+    revalidatePath("/");
+    return { ok: true, id: pipeline.id };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionTogglePipeline(
+  id: string,
+  enabled: boolean,
+): Promise<ActionResult> {
+  try {
+    await updatePipeline(id, { enabled });
+    revalidatePipeline(id);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionUpdatePipelineSettings(
+  id: string,
+  form: FormData,
+): Promise<ActionResult> {
+  try {
+    const payload: Record<string, unknown> = {};
+    const name = String(form.get("name") ?? "").trim();
+    if (name) payload.name = name;
+    const niche = String(form.get("niche") ?? "");
+    payload.niche = niche.trim() || null;
+    const language = String(form.get("language") ?? "").trim();
+    if (language) payload.language = language;
+    payload.default_privacy = String(form.get("default_privacy") ?? "public");
+    payload.timezone = String(form.get("timezone") ?? "UTC").trim() || "UTC";
+    payload.daily_upload_limit = Number(form.get("daily_upload_limit") ?? 6) || 6;
+    payload.upload_slots = parseSlots(String(form.get("upload_slots") ?? ""));
+    payload.backlog_slots_per_day = Number(form.get("backlog_slots_per_day") ?? 4);
+    payload.new_slots_per_day = Number(form.get("new_slots_per_day") ?? 2);
+    payload.backlog_order = String(form.get("backlog_order") ?? "asc");
+    payload.backlog_threshold_days = Number(form.get("backlog_threshold_days") ?? 7) || 7;
+    await updatePipeline(id, payload);
+    revalidatePipeline(id);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionUpdateAiProfile(
+  id: string,
+  form: FormData,
+): Promise<ActionResult> {
+  try {
+    const split = (v: FormDataEntryValue | null) =>
+      String(v ?? "")
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    await updatePipeline(id, {
+      niche: String(form.get("niche") ?? "").trim() || null,
+      language: String(form.get("language") ?? "").trim() || null,
+      fixed_hashtags: split(form.get("fixed_hashtags")),
+      adaptive_hashtags: split(form.get("adaptive_hashtags")),
+      prompt_profile: String(form.get("prompt_profile") ?? ""),
+    });
+    revalidatePipeline(id);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionDeletePipeline(id: string): Promise<ActionResult> {
+  try {
+    await deletePipeline(id);
+    revalidatePath("/");
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+// ---------- Sources ----------
+
+export async function actionCreateSource(
+  pipelineId: string,
+  form: FormData,
+): Promise<ActionResult> {
+  try {
+    const name = String(form.get("name") ?? "").trim();
+    const profileUrl = String(form.get("profile_url") ?? "").trim();
+    if (!name) return { ok: false, error: "Thiếu tên source." };
+    if (!profileUrl) return { ok: false, error: "Thiếu profile URL." };
+    await createSource(pipelineId, { name, profile_url: profileUrl });
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionToggleSource(
+  pipelineId: string,
+  id: string,
+  enabled: boolean,
+): Promise<ActionResult> {
+  try {
+    await updateSource(id, { enabled });
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionDeleteSource(
+  pipelineId: string,
+  id: string,
+): Promise<ActionResult> {
+  try {
+    await deleteSource(id);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionSyncSource(
+  pipelineId: string,
+  id: string,
+): Promise<ActionResult> {
+  try {
+    await syncSource(id);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionSyncPipeline(pipelineId: string): Promise<ActionResult> {
+  try {
+    await syncPipeline(pipelineId);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+// ---------- Destinations ----------
+
+export async function actionCreateDestination(
+  pipelineId: string,
+  form: FormData,
+): Promise<ActionResult & { id?: string; oauthUrl?: string }> {
+  try {
+    const name = String(form.get("name") ?? "").trim();
+    if (!name) return { ok: false, error: "Thiếu tên destination." };
+    const dest = await createDestination(pipelineId, {
+      platform: String(form.get("platform") ?? "youtube"),
+      name,
+      publish_strategy: String(form.get("publish_strategy") ?? "broadcast"),
+      daily_upload_limit: Number(form.get("daily_upload_limit") ?? 6) || 6,
+      timezone: String(form.get("timezone") ?? "UTC").trim() || "UTC",
+      upload_slots: parseSlots(
+        String(form.get("upload_slots") ?? "08:00,11:00,14:00,17:00,20:00,23:00"),
+      ),
+      metadata_language: String(form.get("metadata_language") ?? "").trim() || undefined,
+      metadata_profile: String(form.get("metadata_profile") ?? "").trim() || undefined,
+    });
+    revalidatePipeline(pipelineId);
+    // For YouTube, fetch OAuth URL right away so the wizard can continue.
+    if (dest.platform === "youtube") {
+      try {
+        const oauth = await getYoutubeOauthUrl(dest.id);
+        return { ok: true, id: dest.id, oauthUrl: oauth.url };
+      } catch {
+        return { ok: true, id: dest.id };
+      }
+    }
+    return { ok: true, id: dest.id };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionToggleDestination(
+  pipelineId: string,
+  id: string,
+  enabled: boolean,
+): Promise<ActionResult> {
+  try {
+    await updateDestination(id, { enabled });
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionUpdateDestination(
+  pipelineId: string,
+  id: string,
+  form: FormData,
+): Promise<ActionResult> {
+  try {
+    const payload: Record<string, unknown> = {};
+    const name = String(form.get("name") ?? "").trim();
+    if (name) payload.name = name;
+    payload.daily_upload_limit = Number(form.get("daily_upload_limit") ?? 6) || 6;
+    payload.timezone = String(form.get("timezone") ?? "UTC").trim() || "UTC";
+    const slots = parseSlots(String(form.get("upload_slots") ?? ""));
+    if (slots.length > 0) payload.upload_slots = slots;
+    payload.publish_strategy = String(form.get("publish_strategy") ?? "broadcast");
+    const lang = String(form.get("metadata_language") ?? "").trim();
+    if (lang) payload.metadata_language = lang;
+    const profile = String(form.get("metadata_profile") ?? "").trim();
+    if (profile) payload.metadata_profile = profile;
+    await updateDestination(id, payload);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionDeleteDestination(
+  pipelineId: string,
+  id: string,
+): Promise<ActionResult> {
+  try {
+    await deleteDestination(id);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionGetOauthUrl(
+  destinationId: string,
+): Promise<ActionResult & { url?: string }> {
+  try {
+    const data = await getYoutubeOauthUrl(destinationId);
+    return { ok: true, url: data.url };
+  } catch (e) {
+    const r = err(e);
+    return { ...r, url: undefined };
+  }
+}
+
+// ---------- Publications ----------
+
+export async function actionPublishNow(
+  pipelineId: string,
+  videoId: string,
+  destinationId: string,
+): Promise<ActionResult> {
+  try {
+    await publishNow(pipelineId, videoId, destinationId);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionRetryPublication(
+  pipelineId: string,
+  publicationId: string,
+): Promise<ActionResult> {
+  try {
+    await retryPublication(publicationId);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionSkipPublication(
+  pipelineId: string,
+  publicationId: string,
+): Promise<ActionResult> {
+  try {
+    await skipPublication(publicationId);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionReschedulePublication(
+  pipelineId: string,
+  publicationId: string,
+  scheduledAt: string,
+): Promise<ActionResult> {
+  try {
+    const iso = new Date(scheduledAt).toISOString();
+    await reschedulePublication(publicationId, iso);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionRetryJob(
+  pipelineId: string,
+  jobId: string,
+): Promise<ActionResult> {
+  try {
+    await retryJob(jobId);
+    revalidatePipeline(pipelineId);
+    return { ok: true };
+  } catch (e) {
+    return err(e);
+  }
+}
+
+export async function actionLogout(): Promise<never> {
+  const { cookies } = await import("next/headers");
+  const { SESSION_COOKIE } = await import("./session");
+  const store = await cookies();
+  store.delete(SESSION_COOKIE);
+  redirect("/login");
+}

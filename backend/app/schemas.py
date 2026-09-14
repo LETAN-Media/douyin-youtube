@@ -339,8 +339,46 @@ class DestinationBase(BaseModel):
     )
 
 
-class DestinationCreate(DestinationBase):
-    pass
+class DestinationCreate(BaseModel):
+    pipeline_id: str | None = Field(
+        default=None,
+        max_length=36,
+    )
+    platform: Literal["youtube", "facebook"] = "youtube"
+    name: str = Field(
+        max_length=200,
+    )
+    external_account_id: str | None = Field(
+        default=None,
+        max_length=200,
+    )
+    external_account_name: str | None = Field(
+        default=None,
+        max_length=300,
+    )
+    enabled: bool = True
+    daily_upload_limit: int = Field(default=6, ge=1, le=50)
+    timezone: str = Field(default="UTC", max_length=50)
+    upload_slots: list[str] | None = Field(
+        default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+    )
+    publish_strategy: Literal["broadcast", "rotate", "selected"] = "broadcast"
+    metadata_language: str | None = Field(
+        default=None,
+        max_length=10,
+    )
+    metadata_profile: str | None = Field(
+        default=None,
+    )
+    fixed_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    adaptive_hashtags: list[str] | None = Field(
+        default=None,
+    )
+    prompt_override: str | None = Field(
+        default=None,
+    )
 
 
 class DestinationUpdate(BaseModel):
@@ -423,3 +461,51 @@ class PublicationOut(BaseModel):
     error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class DouyinVideoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    source_id: str
+    pipeline_id: str
+    video_id: str
+    title: str
+    description: str
+    url: str
+    douyin_created_at: datetime | None
+    status: str
+    is_backlog: bool
+    scheduled_at: datetime | None
+    published_at: datetime | None
+    youtube_video_id: str | None
+    youtube_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DouyinVideoWithPublications(DouyinVideoOut):
+    source_name: str | None = None
+    publications: list[PublicationOut] = Field(default_factory=list)
+
+
+class InventoryListResponse(BaseModel):
+    items: list[DouyinVideoOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class PublicationRescheduleRequest(BaseModel):
+    scheduled_at: datetime
+
+
+class PublicationPublishRequest(BaseModel):
+    destination_id: str = Field(max_length=36)
+
+
+class SourceSyncResponse(BaseModel):
+    source_id: str
+    status: str
+    new: int = 0
+    updated: int = 0

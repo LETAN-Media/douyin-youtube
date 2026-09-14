@@ -6,6 +6,7 @@ from datetime import (
     timedelta,
     timezone,
 )
+from typing import Any
 
 from fastapi import (
     Depends,
@@ -45,12 +46,18 @@ from app.schemas import (
     DouyinSourceCreate,
     DouyinSourceOut,
     DouyinSourceUpdate,
+    DouyinVideoOut,
+    DouyinVideoWithPublications,
+    InventoryListResponse,
     JobCreate,
     JobOut,
     PipelineCreate,
     PipelineOut,
     PipelineUpdate,
     PublicationOut,
+    PublicationPublishRequest,
+    PublicationRescheduleRequest,
+    SourceSyncResponse,
 )
 from app.security import require_admin
 from app.worker import (
@@ -78,6 +85,11 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("douyin-youtube-api")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 worker_task: asyncio.Task | None = None
 monitor_task: asyncio.Task | None = None
@@ -299,6 +311,49 @@ def dashboard_stats(
                 "published": int(row.published or 0),
             }
 
+    destination_counts: dict[str, int] = {}
+    if pipeline_ids:
+        dest_rows = db.execute(
+            select(
+                Destination.pipeline_id,
+                func.count(Destination.id).label("count"),
+            )
+            .where(Destination.pipeline_id.in_(pipeline_ids))
+            .group_by(Destination.pipeline_id)
+        ).all()
+
+        for row in dest_rows:
+            destination_counts[str(row.pipeline_id)] = int(row.count or 0)
+
+    publication_stats: dict[str, dict[str, int]] = {}
+    if pipeline_ids:
+        for pid in pipeline_ids:
+            pub_total = db.execute(
+                select(func.count(Publication.id))
+                .where(Publication.pipeline_id == pid)
+            ).scalar_one_or_none() or 0
+            pub_failed = db.execute(
+                select(func.count(Publication.id))
+                .where(Publication.pipeline_id == pid)
+                .where(Publication.status == "failed")
+            ).scalar_one_or_none() or 0
+            pub_scheduled = db.execute(
+                select(func.count(Publication.id))
+                .where(Publication.pipeline_id == pid)
+                .where(Publication.status.in_(["scheduled", "queued"]))
+            ).scalar_one_or_none() or 0
+            pub_published = db.execute(
+                select(func.count(Publication.id))
+                .where(Publication.pipeline_id == pid)
+                .where(Publication.status == "published")
+            ).scalar_one_or_none() or 0
+            publication_stats[str(pid)] = {
+                "total": int(pub_total),
+                "failed": int(pub_failed),
+                "scheduled": int(pub_scheduled),
+                "published": int(pub_published),
+            }
+
     result = []
 
     for pipeline in pipelines:
@@ -311,8 +366,14 @@ def dashboard_stats(
             "scheduled": 0,
             "published": 0,
         })
+        pub_stat = publication_stats.get(pipeline_id, {
+            "total": 0,
+            "failed": 0,
+            "scheduled": 0,
+            "published": 0,
+        })
 
-        today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         today_published = db.execute(
             select(func.count(VideoJob.id))
             .where(VideoJob.pipeline_id == pipeline.id)
@@ -326,24 +387,34 @@ def dashboard_stats(
             slot_times = []
             for slot_str in pipeline.upload_slots:
                 try:
-                    hour, minute = map(int, slot_str.split(":"))
-                    slot_time = datetime.combine(utcnow().date(), datetime.min.time().replace(hour=hour, minute=minute))
+                    hour, minute = map(int, str(slot_str).split(":"))
+                    slot_time = datetime.combine(_utcnow().date(), datetime.min.time().replace(hour=hour, minute=minute))
                     if slot_time.tzinfo is None:
                         slot_time = slot_time.replace(tzinfo=timezone.utc)
                     slot_times.append(slot_time)
-                except ValueError:
+                except (ValueError, AttributeError):
                     continue
 
-            future_slots = [s for s in slot_times if s >= utcnow()]
+            future_slots = [s for s in slot_times if s >= _utcnow()]
             if future_slots:
                 next_upload = min(future_slots).isoformat()
             elif slot_times:
-                tomorrow = utcnow().date() + datetime.timedelta(days=1)
-                hour, minute = map(int, pipeline.upload_slots[0].split(":"))
-                slot_time = datetime.combine(tomorrow, datetime.min.time().replace(hour=hour, minute=minute))
-                if slot_time.tzinfo is None:
-                    slot_time = slot_time.replace(tzinfo=timezone.utc)
-                next_upload = slot_time.isoformat()
+                tomorrow = _utcnow().date() + timedelta(days=1)
+                try:
+                    hour, minute = map(int, str(pipeline.upload_slots[0]).split(":"))
+                    slot_time = datetime.combine(tomorrow, datetime.min.time().replace(hour=hour, minute=minute))
+                    if slot_time.tzinfo is None:
+                        slot_time = slot_time.replace(tzinfo=timezone.utc)
+                    next_upload = slot_time.isoformat()
+                except (ValueError, AttributeError):
+                    next_upload = None
+
+        pub_today = db.execute(
+            select(func.count(Publication.id))
+            .where(Publication.pipeline_id == pipeline.id)
+            .where(Publication.status == "published")
+            .where(Publication.published_at >= today_start)
+        ).scalar_one_or_none() or 0
 
         result.append({
             "id": pipeline_id,
@@ -353,6 +424,7 @@ def dashboard_stats(
             "youtube_connected": pipeline.youtube_connected,
             "youtube_channel_title": pipeline.youtube_channel_title,
             "sources_count": source_counts.get(pipeline_id, 0),
+            "destinations_count": destination_counts.get(pipeline_id, 0),
             "jobs_total": job_stat["total"],
             "jobs_published": job_stat["published"],
             "jobs_pending": job_stat["pending"],
@@ -363,6 +435,12 @@ def dashboard_stats(
             "scheduled": inv_stat["scheduled"],
             "published_inventory": inv_stat["published"],
             "today_published": today_published,
+            "publications_total": pub_stat["total"],
+            "publications_failed": pub_stat["failed"],
+            "publications_scheduled": pub_stat["scheduled"],
+            "publications_published": pub_stat["published"],
+            "published_today": int(pub_today),
+            "failed": int(pub_stat["failed"]),
             "daily_upload_limit": pipeline.daily_upload_limit,
             "next_upload": next_upload,
         })
@@ -1243,6 +1321,18 @@ def list_publications(
     destination_id: str | None = Query(
         default=None,
     ),
+    status: str | None = Query(
+        default=None,
+    ),
+    limit: int = Query(
+        default=200,
+        ge=1,
+        le=500,
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+    ),
     db: Session = Depends(
         get_db
     ),
@@ -1255,9 +1345,14 @@ def list_publications(
     if destination_id:
         query = query.where(Publication.destination_id == destination_id)
 
+    if status:
+        query = query.where(Publication.status == status)
+
     return list(
         db.execute(
             query.order_by(Publication.created_at.desc())
+            .offset(offset)
+            .limit(limit)
         )
         .scalars()
         .all()
@@ -1447,6 +1542,8 @@ def youtube_callback(
         get_db
     ),
 ):
+    from fastapi.responses import RedirectResponse
+
     authorization_response = str(request.url)
 
     try:
@@ -1467,6 +1564,47 @@ def youtube_callback(
             ),
             status_code=400,
         )
+
+    # Resolve destination/pipeline for frontend redirect.
+    resolved_destination_id = destination_id
+    resolved_pipeline_id = pipeline_id
+
+    # Best-effort: look up destination to build frontend URL.
+    frontend_base = (settings.frontend_url or "").rstrip("/")
+    if frontend_base and resolved_destination_id:
+        destination = db.get(Destination, resolved_destination_id)
+        if destination is not None:
+            resolved_pipeline_id = resolved_pipeline_id or destination.pipeline_id
+            return RedirectResponse(
+                url=(
+                    f"{frontend_base}/pipelines/{destination.pipeline_id}"
+                    f"/destinations/{destination.id}?oauth=success"
+                ),
+                status_code=302,
+            )
+
+    if frontend_base and resolved_pipeline_id and not resolved_destination_id:
+        return RedirectResponse(
+            url=f"{frontend_base}/pipelines/{resolved_pipeline_id}?oauth=success",
+            status_code=302,
+        )
+
+    # Fallback: try to find most recently connected destination.
+    if frontend_base:
+        latest = db.execute(
+            select(Destination)
+            .where(Destination.connected == True)  # noqa: E712
+            .order_by(Destination.updated_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if latest is not None:
+            return RedirectResponse(
+                url=(
+                    f"{frontend_base}/pipelines/{latest.pipeline_id}"
+                    f"/destinations/{latest.id}?oauth=success"
+                ),
+                status_code=302,
+            )
 
     return HTMLResponse(
         """
@@ -1489,3 +1627,613 @@ def youtube_callback(
         </html>
         """
     )
+
+
+# ============================================================
+# Multi-destination control panel APIs
+# (Pipeline -> Sources -> Inventory -> Destinations -> Publications)
+# ============================================================
+
+
+@app.delete(
+    "/api/pipelines/{pipeline_id}",
+    status_code=204,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def delete_pipeline(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> None:
+    pipeline = db.get(Pipeline, pipeline_id)
+
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    db.delete(pipeline)
+    db.commit()
+
+
+@app.get(
+    "/api/pipelines/{pipeline_id}/stats",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def pipeline_stats(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> dict:
+    from app.scheduler import get_next_upload_slot
+
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    sources_count = db.execute(
+        select(func.count(DouyinSource.id))
+        .where(DouyinSource.pipeline_id == pipeline_id)
+    ).scalar_one_or_none() or 0
+
+    destinations = list(
+        db.execute(
+            select(Destination)
+            .where(Destination.pipeline_id == pipeline_id)
+            .order_by(Destination.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    inventory_total = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipeline_id)
+    ).scalar_one_or_none() or 0
+
+    backlog = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipeline_id)
+        .where(DouyinVideo.status == "backlog")
+    ).scalar_one_or_none() or 0
+
+    new_count = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipeline_id)
+        .where(DouyinVideo.status == "new")
+    ).scalar_one_or_none() or 0
+
+    scheduled = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipeline_id)
+        .where(DouyinVideo.status == "scheduled")
+    ).scalar_one_or_none() or 0
+
+    inv_published = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipeline_id)
+        .where(DouyinVideo.status == "published")
+    ).scalar_one_or_none() or 0
+
+    today_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    published_today = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.pipeline_id == pipeline_id)
+        .where(Publication.status == "published")
+        .where(Publication.published_at >= today_start)
+    ).scalar_one_or_none() or 0
+
+    failed = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.pipeline_id == pipeline_id)
+        .where(Publication.status == "failed")
+    ).scalar_one_or_none() or 0
+
+    pub_scheduled = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.pipeline_id == pipeline_id)
+        .where(Publication.status.in_(["scheduled", "queued"]))
+    ).scalar_one_or_none() or 0
+
+    now = _utcnow()
+    next_publication = None
+    for destination in destinations:
+        if not destination.enabled or not destination.upload_slots:
+            continue
+        try:
+            slot = get_next_upload_slot(
+                destination.upload_slots or [],
+                destination.timezone or "UTC",
+                now,
+            )
+        except Exception:
+            continue
+        if slot is None:
+            continue
+        if next_publication is None or slot < next_publication:
+            next_publication = slot
+
+    return {
+        "pipeline_id": pipeline_id,
+        "sources_count": int(sources_count),
+        "destinations_count": len(destinations),
+        "inventory_total": int(inventory_total),
+        "backlog": int(backlog),
+        "new": int(new_count),
+        "scheduled": int(scheduled),
+        "published_inventory": int(inv_published),
+        "published_today": int(published_today),
+        "failed": int(failed),
+        "publications_scheduled": int(pub_scheduled),
+        "next_publication": next_publication.isoformat() if next_publication else None,
+    }
+
+
+@app.get(
+    "/api/pipelines/{pipeline_id}/inventory",
+    response_model=InventoryListResponse,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def list_inventory(
+    pipeline_id: str,
+    source_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(
+        get_db
+    ),
+) -> InventoryListResponse:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    query = select(DouyinVideo).where(DouyinVideo.pipeline_id == pipeline_id)
+    count_query = select(func.count(DouyinVideo.id)).where(
+        DouyinVideo.pipeline_id == pipeline_id
+    )
+
+    if source_id:
+        query = query.where(DouyinVideo.source_id == source_id)
+        count_query = count_query.where(DouyinVideo.source_id == source_id)
+
+    if status and status != "all":
+        query = query.where(DouyinVideo.status == status)
+        count_query = count_query.where(DouyinVideo.status == status)
+
+    if search:
+        like = f"%{search}%"
+        query = query.where(
+            (DouyinVideo.title.ilike(like)) | (DouyinVideo.video_id.ilike(like))
+        )
+        count_query = count_query.where(
+            (DouyinVideo.title.ilike(like)) | (DouyinVideo.video_id.ilike(like))
+        )
+
+    total = db.execute(count_query).scalar_one_or_none() or 0
+
+    items = list(
+        db.execute(
+            query.order_by(DouyinVideo.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
+
+    return InventoryListResponse(
+        items=[DouyinVideoOut.model_validate(v) for v in items],
+        total=int(total),
+        page=page,
+        page_size=page_size,
+    )
+
+
+@app.get(
+    "/api/pipelines/{pipeline_id}/inventory/{video_id}",
+    response_model=DouyinVideoWithPublications,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def get_inventory_video(
+    pipeline_id: str,
+    video_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> DouyinVideoWithPublications:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    video = db.get(DouyinVideo, video_id)
+    if video is None or video.pipeline_id != pipeline_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy video",
+        )
+
+    publications = list(
+        db.execute(
+            select(Publication)
+            .where(Publication.douyin_video_id == video.id)
+            .order_by(Publication.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    source_name = None
+    if video.source_id:
+        source = db.get(DouyinSource, video.source_id)
+        if source is not None:
+            source_name = source.name
+
+    out = DouyinVideoWithPublications.model_validate(video)
+    out.source_name = source_name
+    out.publications = [PublicationOut.model_validate(p) for p in publications]
+    return out
+
+
+@app.post(
+    "/api/pipelines/{pipeline_id}/inventory/{video_id}/publish",
+    response_model=PublicationOut,
+    status_code=201,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def publish_inventory_video_now(
+    pipeline_id: str,
+    video_id: str,
+    payload: PublicationPublishRequest,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Publication:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    video = db.get(DouyinVideo, video_id)
+    if video is None or video.pipeline_id != pipeline_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy video",
+        )
+
+    destination = db.get(Destination, payload.destination_id)
+    if destination is None or destination.pipeline_id != pipeline_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy destination",
+        )
+
+    if not destination.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Destination đang bị pause",
+        )
+
+    if destination.platform == "facebook":
+        raise HTTPException(
+            status_code=400,
+            detail="Facebook publishing adapter not configured",
+        )
+
+    existing = db.execute(
+        select(Publication)
+        .where(Publication.douyin_video_id == video.id)
+        .where(Publication.destination_id == destination.id)
+        .limit(1)
+    ).scalar_one_or_none()
+
+    now = _utcnow()
+
+    if existing is not None:
+        if existing.status == "published":
+            raise HTTPException(
+                status_code=409,
+                detail="Video đã published trên destination này",
+            )
+        existing.status = "queued"
+        existing.scheduled_at = now
+        existing.error = None
+        existing.attempts = 0
+        publication = existing
+    else:
+        publication = Publication(
+            pipeline_id=pipeline_id,
+            douyin_video_id=video.id,
+            destination_id=destination.id,
+            platform=destination.platform,
+            status="queued",
+            scheduled_at=now,
+        )
+        db.add(publication)
+
+    job = VideoJob(
+        source_url=video.url,
+        source_title=video.title,
+        title=None,
+        description=video.description,
+        privacy_status=pipeline.default_privacy,
+        status="pending",
+        pipeline_id=pipeline_id,
+        source_video_id=video.video_id,
+        destination_id=destination.id,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(publication)
+
+    return publication
+
+
+@app.post(
+    "/api/sources/{source_id}/sync",
+    response_model=SourceSyncResponse,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def sync_source_now(
+    source_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> SourceSyncResponse:
+    source = db.get(DouyinSource, source_id)
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy source",
+        )
+
+    source.inventory_sync_status = "syncing"
+    db.commit()
+
+    try:
+        from app.inventory import sync_source_inventory
+
+        result = sync_source_inventory(source.id)
+        source.inventory_sync_status = "completed"
+        db.commit()
+        return SourceSyncResponse(
+            source_id=source.id,
+            status="completed",
+            new=int(result.get("new", 0)),
+            updated=int(result.get("updated", 0)),
+        )
+    except Exception as exc:
+        logger.exception("Manual inventory sync failed for source %s", source.id)
+        source.inventory_sync_status = "failed"
+        db.commit()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Sync thất bại: {exc}",
+        ) from exc
+
+
+@app.post(
+    "/api/pipelines/{pipeline_id}/sync",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def sync_pipeline_now(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> dict:
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    sources = list(
+        db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == pipeline_id)
+            .where(DouyinSource.enabled == True)  # noqa: E712
+        )
+        .scalars()
+        .all()
+    )
+
+    from app.inventory import sync_source_inventory
+
+    total_new = 0
+    total_updated = 0
+    for source in sources:
+        try:
+            result = sync_source_inventory(source.id)
+            total_new += int(result.get("new", 0))
+            total_updated += int(result.get("updated", 0))
+        except Exception:
+            logger.exception("Pipeline sync failed for source %s", source.id)
+
+    return {"new": total_new, "updated": total_updated}
+
+
+@app.get(
+    "/api/publications/{publication_id}",
+    response_model=PublicationOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def get_publication(
+    publication_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Publication:
+    publication = db.get(Publication, publication_id)
+    if publication is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy publication",
+        )
+    return publication
+
+
+@app.post(
+    "/api/publications/{publication_id}/retry",
+    response_model=PublicationOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def retry_publication(
+    publication_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Publication:
+    publication = db.get(Publication, publication_id)
+    if publication is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy publication",
+        )
+
+    if publication.status not in {"failed", "skipped", "queued", "scheduled"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Chỉ retry publication đang failed/skipped/queued/scheduled",
+        )
+
+    if publication.status == "published":
+        raise HTTPException(
+            status_code=409,
+            detail="Publication đã published",
+        )
+
+    destination = db.get(Destination, publication.destination_id)
+    if destination is not None and destination.platform == "facebook":
+        raise HTTPException(
+            status_code=400,
+            detail="Facebook publishing adapter not configured",
+        )
+
+    publication.status = "queued"
+    publication.error = None
+    publication.attempts = 0
+    publication.scheduled_at = _utcnow()
+
+    # Enqueue a worker job scoped to this destination so retry actually publishes.
+    video = db.get(DouyinVideo, publication.douyin_video_id)
+    pipeline = db.get(Pipeline, publication.pipeline_id)
+    if video is not None and pipeline is not None:
+        job = VideoJob(
+            source_url=video.url,
+            source_title=video.title,
+            title=publication.title,
+            description=publication.description or video.description,
+            privacy_status=pipeline.default_privacy,
+            status="pending",
+            pipeline_id=pipeline.id,
+            source_video_id=video.video_id,
+            destination_id=publication.destination_id,
+        )
+        db.add(job)
+
+    db.commit()
+    db.refresh(publication)
+    return publication
+
+
+@app.post(
+    "/api/publications/{publication_id}/skip",
+    response_model=PublicationOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def skip_publication(
+    publication_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Publication:
+    publication = db.get(Publication, publication_id)
+    if publication is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy publication",
+        )
+
+    if publication.status == "published":
+        raise HTTPException(
+            status_code=409,
+            detail="Không thể skip publication đã published",
+        )
+
+    publication.status = "skipped"
+    db.commit()
+    db.refresh(publication)
+    return publication
+
+
+@app.post(
+    "/api/publications/{publication_id}/reschedule",
+    response_model=PublicationOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def reschedule_publication(
+    publication_id: str,
+    payload: PublicationRescheduleRequest,
+    db: Session = Depends(
+        get_db
+    ),
+) -> Publication:
+    publication = db.get(Publication, publication_id)
+    if publication is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy publication",
+        )
+
+    if publication.status == "published":
+        raise HTTPException(
+            status_code=409,
+            detail="Không thể reschedule publication đã published",
+        )
+
+    publication.status = "scheduled"
+    publication.scheduled_at = payload.scheduled_at
+    publication.error = None
+    db.commit()
+    db.refresh(publication)
+    return publication

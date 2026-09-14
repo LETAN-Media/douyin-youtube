@@ -186,6 +186,15 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "douyin_sources", "destination_id"):
+            logger.info("Adding destination_id to douyin_sources")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_sources "
+                    "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
+                )
+            )
+
         pipeline_columns = [
             ("daily_upload_limit", "INTEGER DEFAULT 6"),
             ("upload_slots", "JSON"),

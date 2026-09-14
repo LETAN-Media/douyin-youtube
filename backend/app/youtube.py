@@ -12,6 +12,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings

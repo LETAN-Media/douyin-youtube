@@ -41,7 +41,7 @@ def get_publisher(destination: Destination) -> PublisherAdapter | None:
     platform = (destination.platform or "").lower()
 
     if platform == "youtube":
-        from app.youtube import YouTubePublisher
+        from app.youtube_publisher import YouTubePublisher
         return YouTubePublisher(destination)
 
     if platform == "facebook":

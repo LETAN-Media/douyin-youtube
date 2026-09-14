@@ -2,14 +2,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.db import SessionLocal
 from app.models import Destination
 from app.publishers import PublisherAdapter
 from app.youtube import (
-    _load_from_json,
     load_credentials,
     upload_video,
 )
-from sqlalchemy.orm import Session
 
 logger = logging.getLogger("douyin-youtube-youtube-publisher")
 
@@ -17,20 +16,22 @@ logger = logging.getLogger("douyin-youtube-youtube-publisher")
 class YouTubePublisher(PublisherAdapter):
     def connect(self) -> bool:
         try:
-            load_credentials(
-                Session(),
-                destination_id=self.destination.id,
-            )
+            with SessionLocal() as db:
+                load_credentials(
+                    db,
+                    destination_id=self.destination.id,
+                )
             return True
         except Exception:
             return False
 
     def validate_credentials(self) -> bool:
         try:
-            load_credentials(
-                Session(),
-                destination_id=self.destination.id,
-            )
+            with SessionLocal() as db:
+                load_credentials(
+                    db,
+                    destination_id=self.destination.id,
+                )
             return True
         except Exception:
             return False
@@ -53,17 +54,15 @@ class YouTubePublisher(PublisherAdapter):
         publish_at: Any = None,
     ) -> dict[str, Any] | None:
         path = Path(file_path)
-        video_id = upload_video(
-            db=Session(),
-            file_path=path,
-            title=title,
-            description=description,
-            privacy_status=(
-                self.destination.metadata_profile
-                or "public"
-            ),
-            destination_id=self.destination.id,
-        )
+        with SessionLocal() as db:
+            video_id = upload_video(
+                db=db,
+                file_path=path,
+                title=title,
+                description=description,
+                privacy_status="public",
+                destination_id=self.destination.id,
+            )
 
         return {
             "video_id": video_id,

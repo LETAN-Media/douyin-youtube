@@ -5,3 +5,20 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
+
+  - type: web
+    name: douyin-dashboard
+    runtime: node
+    rootDir: dashboard
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- -H 0.0.0.0 -p $PORT
+    healthCheckPath: /login
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DOUYIN_API_URL
+        value: https://douyin-api.toolnet.tech
+      - key: DOUYIN_ADMIN_TOKEN
+        sync: false
+      - key: DASHBOARD_SECRET
+        sync: false

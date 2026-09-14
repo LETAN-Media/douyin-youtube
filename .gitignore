@@ -8,6 +8,10 @@ backend/test_dual_rcuts.py
 .venv/
 .vercel/
 node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/tsconfig.tsbuildinfo
+dashboard/next-env.d.ts
 .DS_Store
 backend/.env
 .env
