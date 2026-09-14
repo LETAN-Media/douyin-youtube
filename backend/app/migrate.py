@@ -195,6 +195,42 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "douyin_sources", "inventory_count"):
+            logger.info("Adding inventory_count to douyin_sources")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_sources "
+                    "ADD COLUMN IF NOT EXISTS inventory_count INTEGER DEFAULT 0"
+                )
+            )
+
+        if not column_exists(connection, "douyin_sources", "inventory_synced_at"):
+            logger.info("Adding inventory_synced_at to douyin_sources")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_sources "
+                    "ADD COLUMN IF NOT EXISTS inventory_synced_at TIMESTAMPTZ"
+                )
+            )
+
+        if not column_exists(connection, "douyin_sources", "inventory_sync_error"):
+            logger.info("Adding inventory_sync_error to douyin_sources")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_sources "
+                    "ADD COLUMN IF NOT EXISTS inventory_sync_error TEXT"
+                )
+            )
+
+        if not column_exists(connection, "douyin_videos", "is_backfill"):
+            logger.info("Adding is_backfill to douyin_videos")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_videos "
+                    "ADD COLUMN IF NOT EXISTS is_backfill BOOLEAN DEFAULT FALSE"
+                )
+            )
+
         pipeline_columns = [
             ("daily_upload_limit", "INTEGER DEFAULT 6"),
             ("upload_slots", "JSON"),

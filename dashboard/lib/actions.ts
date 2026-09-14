@@ -309,6 +309,47 @@ export async function actionGetOauthUrl(
   }
 }
 
+export async function actionGetDouyinSession(): Promise<
+  ActionResult & {
+    configured?: boolean;
+    valid?: boolean;
+    errorDetail?: string;
+    lastValidation?: string | null;
+  }
+> {
+  try {
+    const { getDouyinSession } = await import("./api");
+    const data = await getDouyinSession();
+    if (!data.configured) {
+      return {
+        ok: false,
+        error: "Douyin Login Required: DOUYIN_COOKIES_B64 chưa được cấu hình.",
+        configured: false,
+        valid: false,
+      };
+    }
+    if (!data.valid) {
+      return {
+        ok: false,
+        error: data.error || "Douyin session expired",
+        configured: true,
+        valid: false,
+        errorDetail: data.error ?? undefined,
+        lastValidation: data.last_validation ?? null,
+      };
+    }
+    return {
+      ok: true,
+      configured: true,
+      valid: true,
+      lastValidation: data.last_validation ?? null,
+    };
+  } catch (e) {
+    const r = err(e);
+    return { ...r };
+  }
+}
+
 // ---------- Publications ----------
 
 export async function actionPublishNow(

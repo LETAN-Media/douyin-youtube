@@ -166,7 +166,9 @@ def run_monitor_once() -> None:
 
             logger.info("Checking source=%s pipeline=%s profile=%s", source.id, pipeline.id, profile_url)
 
-            sync_source_inventory(source.id)
+            # Continuous monitor: latest pages only with early stop.
+            # Initial full scans happen on source creation / manual Sync.
+            sync_source_inventory(source.id, mode="latest")
 
         except Exception:
             logger.exception("Failed to process source=%s", source.id)

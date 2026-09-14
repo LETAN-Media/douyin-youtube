@@ -18,6 +18,7 @@ import {
 import {
   actionCreateSource,
   actionDeleteSource,
+  actionGetDouyinSession,
   actionSyncPipeline,
   actionSyncSource,
   actionToggleSource,
@@ -42,6 +43,16 @@ export function SourcesPanel({
       toast(r.ok ? okMsg : r.error, r.ok ? "success" : "error");
     });
 
+  const validateSession = () =>
+    start(async () => {
+      const r = await actionGetDouyinSession();
+      if (r.ok) {
+        toast("Douyin session hợp lệ.", "success");
+      } else {
+        toast(r.error, "error");
+      }
+    });
+
   return (
     <div className="space-y-4">
       <Card>
@@ -57,6 +68,14 @@ export function SourcesPanel({
                 onClick={() => run(() => actionSyncPipeline(pipelineId), "Đã sync tất cả sources.")}
               >
                 {pending ? "…" : "Sync all"}
+              </button>
+              <button
+                type="button"
+                className={btnSmall}
+                disabled={pending}
+                onClick={validateSession}
+              >
+                {pending ? "…" : "Validate Session"}
               </button>
               <button
                 type="button"
@@ -140,9 +159,24 @@ export function SourcesPanel({
                       </td>
                       <td className="px-3 py-3">
                         <SyncBadge status={s.inventory_sync_status} />
+                        {s.inventory_sync_status === "auth_required" ? (
+                          <p className="mt-1">
+                            <Badge tone="red">Douyin Login Required</Badge>
+                          </p>
+                        ) : null}
+                        {typeof s.inventory_count === "number" ? (
+                          <p className="mt-1 text-xs text-slate-600">
+                            Inventory: {s.inventory_count}
+                          </p>
+                        ) : null}
+                        {s.inventory_sync_error ? (
+                          <p className="mt-1 max-w-56 break-words text-[11px] text-red-600">
+                            {s.inventory_sync_error.slice(0, 200)}
+                          </p>
+                        ) : null}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-xs text-slate-600">
-                        {formatDateTime(s.last_checked_at)}
+                        {formatDateTime(s.inventory_synced_at ?? s.last_checked_at)}
                       </td>
                       <td className="px-5 py-3">
                         <div className="flex flex-wrap justify-end gap-1.5">
@@ -183,8 +217,21 @@ export function SourcesPanel({
                   <p className="mt-1 break-all text-xs text-slate-500">{s.profile_url ?? "—"}</p>
                   <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
                     <SyncBadge status={s.inventory_sync_status} />
-                    <span>· {formatDateTime(s.last_checked_at)}</span>
+                    <span>· {formatDateTime(s.inventory_synced_at ?? s.last_checked_at)}</span>
                   </div>
+                  {s.inventory_sync_status === "auth_required" ? (
+                    <p className="mt-2">
+                      <Badge tone="red">Douyin Login Required</Badge>
+                    </p>
+                  ) : null}
+                  {typeof s.inventory_count === "number" ? (
+                    <p className="mt-1 text-xs text-slate-600">Inventory: {s.inventory_count}</p>
+                  ) : null}
+                  {s.inventory_sync_error ? (
+                    <p className="mt-1 break-words text-[11px] text-red-600">
+                      {s.inventory_sync_error.slice(0, 200)}
+                    </p>
+                  ) : null}
                   <div className="mt-3 grid grid-cols-2 gap-1.5">
                     <button type="button" className={btnSmall} disabled={pending}
                       onClick={() => run(() => actionSyncSource(pipelineId, s.id), "Sync xong.")}>
@@ -210,8 +257,9 @@ export function SourcesPanel({
 }
 
 function SyncBadge({ status }: { status: string }) {
+  if (status === "auth_required") return <Badge tone="red">auth_required</Badge>;
   const tone =
-    status === "completed" ? "green" : status === "failed" ? "red" : status === "syncing" || status === "queued" ? "amber" : "slate";
+    status === "completed" ? "green" : status === "failed" ? "red" : status === "running" || status === "syncing" || status === "queued" ? "amber" : "slate";
   return <Badge tone={tone}>{status}</Badge>;
 }
 

@@ -1,21 +1,42 @@
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import yt_dlp
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
+from app.douyin_inventory_providers import (
+    AUTH_REQUIRED_MESSAGE,
+    DouyinAuthRequiredError,
+    discover_profile_videos,
+)
 from app.models import DouyinSource, DouyinVideo, Pipeline
 
 logger = logging.getLogger("douyin-youtube-inventory")
 
+_inventory_semaphore: threading.Semaphore | None = None
+_inventory_semaphore_size: int | None = None
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _get_semaphore() -> threading.Semaphore:
+    global _inventory_semaphore, _inventory_semaphore_size
+    try:
+        size = int(getattr(settings, "douyin_inventory_concurrency", 1) or 1)
+    except (TypeError, ValueError):
+        size = 1
+    size = max(1, min(size, 4))
+    if _inventory_semaphore is None or _inventory_semaphore_size != size:
+        _inventory_semaphore = threading.Semaphore(size)
+        _inventory_semaphore_size = size
+    return _inventory_semaphore
 
 
 def extract_video_id_from_url(url: str | None) -> str | None:
@@ -37,6 +58,11 @@ def fetch_all_videos_from_source(
     profile_url: str,
     source_id: str,
 ) -> list[dict[str, Any]]:
+    """Legacy yt-dlp listing kept as LAST fallback (and for tests).
+
+    Primary discovery lives in app.douyin_inventory_providers.
+    Never downloads MP4 (download=False).
+    """
     if not profile_url:
         return []
 
@@ -123,109 +149,229 @@ def fetch_all_videos_from_source(
     return videos
 
 
-def sync_source_inventory(source_id: str) -> dict[str, int]:
-    with SessionLocal() as db:
-        source = db.get(DouyinSource, source_id)
-        if source is None:
-            return {"new": 0, "updated": 0}
+def _set_source_state(
+    db: Session,
+    source_id: str,
+    *,
+    status: str,
+    error: str | None = None,
+    count: int | None = None,
+    last_video_id: str | None = None,
+) -> None:
+    source = db.get(DouyinSource, source_id)
+    if source is None:
+        return
+    source.inventory_sync_status = status
+    source.inventory_sync_error = error
+    if count is not None:
+        source.inventory_count = int(count)
+    if last_video_id is not None:
+        source.last_video_id = last_video_id
+    if status in ("completed", "auth_required", "failed"):
+        source.inventory_synced_at = utcnow()
+        source.last_checked_at = utcnow()
+    db.commit()
 
-        if not source.enabled:
-            return {"new": 0, "updated": 0}
 
-        pipeline_id = source.pipeline_id
-        profile_url = source.profile_url or ""
-        user_id = source.douyin_sec_uid or source.douyin_user_id or ""
-
-        if user_id and not profile_url:
-            profile_url = f"https://www.douyin.com/user/{user_id}"
-
-        if not profile_url:
-            logger.info("Source %s has no profile_url, skipping", source.id)
-            return {"new": 0, "updated": 0}
-
-        pipeline = None
-        if pipeline_id:
-            pipeline = db.get(Pipeline, pipeline_id)
-
-        if pipeline is None:
-            logger.warning("Source %s has no pipeline, skipping", source.id)
-            return {"new": 0, "updated": 0}
-
-        if not pipeline.enabled:
-            logger.info("Pipeline %s is disabled, skipping source %s", pipeline.id, source.id)
-            return {"new": 0, "updated": 0}
-
-    videos = fetch_all_videos_from_source(profile_url, source.id)
-    if not videos:
-        logger.info("No videos found for source=%s", source.id)
-        return {"new": 0, "updated": 0}
+def _upsert_videos(
+    db: Session,
+    *,
+    source: DouyinSource,
+    pipeline: Pipeline,
+    videos: list[dict[str, Any]],
+    backfill: bool,
+) -> tuple[int, int]:
+    now = utcnow()
+    threshold_days = pipeline.backlog_threshold_days or 7
+    threshold_date = now - __import__("datetime").timedelta(days=threshold_days)
 
     new_count = 0
     updated_count = 0
 
-    with SessionLocal.begin() as db:
-        now = utcnow()
-        threshold_days = pipeline.backlog_threshold_days or 7
-        threshold_date = now - __import__("datetime").timedelta(days=threshold_days)
-
-        for video in videos:
-            video_id = video["video_id"]
-            existing = db.execute(
-                select(DouyinVideo)
-                .where(
-                    DouyinVideo.source_id == source.id,
-                    DouyinVideo.video_id == video_id,
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-
-            douyin_created_at = video.get("douyin_created_at")
-            is_backlog = False
-            if douyin_created_at and douyin_created_at < threshold_date:
-                is_backlog = True
-
-            if existing is not None:
-                existing.title = video.get("title", "")
-                existing.description = video.get("description", "")
-                existing.url = video.get("url", "")
-                existing.douyin_created_at = douyin_created_at
-                existing.is_backlog = is_backlog
-                if existing.status == "inventory":
-                    existing.status = "backlog" if is_backlog else "new"
-                updated_count += 1
-            else:
-                status = "backlog" if is_backlog else "new"
-                db.add(DouyinVideo(
-                    source_id=source.id,
-                    pipeline_id=pipeline.id,
-                    video_id=video_id,
-                    title=video.get("title", ""),
-                    description=video.get("description", ""),
-                    url=video.get("url", ""),
-                    douyin_created_at=douyin_created_at,
-                    status=status,
-                    is_backlog=is_backlog,
-                ))
-                new_count += 1
-
-        db.execute(
-            __import__("sqlalchemy")
-            .update(DouyinSource)
-            .where(DouyinSource.id == source.id)
-            .values(
-                last_checked_at=now,
-                last_video_id=videos[0]["video_id"],
+    for video in videos:
+        video_id = str(video.get("video_id") or "").strip()
+        if not video_id:
+            continue
+        existing = db.execute(
+            select(DouyinVideo)
+            .where(
+                DouyinVideo.source_id == source.id,
+                DouyinVideo.video_id == video_id,
             )
+            .limit(1)
+        ).scalar_one_or_none()
+
+        douyin_created_at = video.get("douyin_created_at")
+        is_backlog = False
+        if douyin_created_at and douyin_created_at < threshold_date:
+            is_backlog = True
+
+        title = str(video.get("title") or "")[:200]
+        description = str(video.get("description") or "")[:1000]
+        url = str(video.get("url") or "")
+
+        if existing is not None:
+            existing.title = title
+            existing.description = description
+            existing.url = url
+            existing.douyin_created_at = douyin_created_at
+            existing.is_backlog = is_backlog
+            if existing.status == "inventory":
+                existing.status = "backlog" if is_backlog else "new"
+            updated_count += 1
+        else:
+            # Continuous monitor inserts genuinely new videos as status=new
+            # with is_backfill=False. Initial full scans mark is_backfill=True.
+            status = "new" if (not backfill and not is_backlog) else (
+                "backlog" if is_backlog else "new"
+            )
+            db.add(DouyinVideo(
+                source_id=source.id,
+                pipeline_id=pipeline.id,
+                video_id=video_id,
+                title=title,
+                description=description,
+                url=url,
+                douyin_created_at=douyin_created_at,
+                status=status,
+                is_backlog=is_backlog,
+                is_backfill=bool(backfill),
+            ))
+            new_count += 1
+
+    return new_count, updated_count
+
+
+def sync_source_inventory(
+    source_id: str,
+    mode: str = "full",
+) -> dict[str, int]:
+    """Full initial sync (mode='full') or lightweight monitor (mode='latest').
+
+    Never silently returns completed with 0 when cookies are missing:
+    sets status='auth_required' with a clear error instead.
+    """
+    full = mode != "latest"
+
+    with SessionLocal() as db:
+        source = db.get(DouyinSource, source_id)
+        if source is None:
+            return {"new": 0, "updated": 0}
+        if not source.enabled:
+            return {"new": 0, "updated": 0}
+        pipeline_id = source.pipeline_id
+        profile_url = source.profile_url or ""
+        sec_uid = source.douyin_sec_uid or source.douyin_user_id or ""
+        if sec_uid and not profile_url:
+            profile_url = f"https://www.douyin.com/user/{sec_uid}"
+        if not profile_url and not sec_uid:
+            logger.info("Source %s has no profile_url, skipping", source.id)
+            return {"new": 0, "updated": 0}
+        pipeline = db.get(Pipeline, pipeline_id) if pipeline_id else None
+        if pipeline is None:
+            logger.warning("Source %s has no pipeline, skipping", source.id)
+            return {"new": 0, "updated": 0}
+        if not pipeline.enabled:
+            logger.info(
+                "Pipeline %s is disabled, skipping source %s",
+                pipeline.id,
+                source.id,
+            )
+            return {"new": 0, "updated": 0}
+        source.inventory_sync_status = "running"
+        source.inventory_sync_error = None
+        db.commit()
+
+    semaphore = _get_semaphore()
+    acquired = semaphore.acquire(blocking=False)
+    if not acquired:
+        logger.info("Inventory scan already running, skipping source=%s", source_id)
+        return {"new": 0, "updated": 0}
+
+    try:
+        try:
+            videos, provider = discover_profile_videos(
+                profile_url, sec_uid, source_id, full=full,
+            )
+        except DouyinAuthRequiredError as exc:
+            with SessionLocal.begin() as db:
+                _set_source_state(
+                    db, source_id, status="auth_required",
+                    error=str(exc) or AUTH_REQUIRED_MESSAGE,
+                )
+            logger.warning("Source %s inventory auth_required", source_id)
+            return {"new": 0, "updated": 0}
+
+        if not videos:
+            # Real empty result (profile private/blocked/empty), never fake.
+            # Keep prior count; mark completed only when cookies exist.
+            # If the primary explicitly needed auth it already returned above.
+            with SessionLocal.begin() as db:
+                source = db.get(DouyinSource, source_id)
+                if source is None:
+                    return {"new": 0, "updated": 0}
+                source.inventory_sync_status = "completed"
+                source.inventory_sync_error = None
+                source.inventory_synced_at = utcnow()
+                source.last_checked_at = utcnow()
+                logger.info(
+                    "No videos found for source=%s via provider=%s",
+                    source.id,
+                    provider,
+                )
+            return {"new": 0, "updated": 0}
+
+        with SessionLocal.begin() as db:
+            source = db.get(DouyinSource, source_id)
+            if source is None:
+                return {"new": 0, "updated": 0}
+            pipeline = db.get(Pipeline, source.pipeline_id) if source.pipeline_id else None
+            if pipeline is None:
+                return {"new": 0, "updated": 0}
+            new_count, updated_count = _upsert_videos(
+                db, source=source, pipeline=pipeline,
+                videos=videos, backfill=full,
+            )
+            if videos:
+                source.last_video_id = str(videos[0].get("video_id") or "")
+            total = db.execute(
+                select(func.count(DouyinVideo.id)).where(
+                    DouyinVideo.source_id == source.id
+                )
+            ).scalar_one_or_none() or 0
+            source.inventory_count = int(total)
+            source.inventory_sync_status = "completed"
+            source.inventory_sync_error = None
+            source.inventory_synced_at = utcnow()
+            source.last_checked_at = utcnow()
+
+        logger.info(
+            "Source %s inventory sync via %s: %s new, %s updated",
+            source_id,
+            provider,
+            new_count,
+            updated_count,
         )
-
-    logger.info(
-        "Source %s inventory sync: %s new, %s updated",
-        source.id,
-        new_count,
-        updated_count,
-    )
-
-    return {"new": new_count, "updated": updated_count}
+        return {"new": new_count, "updated": updated_count}
+    except DouyinAuthRequiredError as exc:
+        with SessionLocal.begin() as db:
+            _set_source_state(
+                db, source_id, status="auth_required",
+                error=str(exc) or AUTH_REQUIRED_MESSAGE,
+            )
+        return {"new": 0, "updated": 0}
+    except Exception as exc:
+        logger.exception("Inventory sync failed for source %s", source_id)
+        with SessionLocal.begin() as db:
+            _set_source_state(
+                db, source_id, status="failed", error=str(exc)[:2000],
+            )
+        return {"new": 0, "updated": 0}
+    finally:
+        try:
+            semaphore.release()
+        except Exception:
+            pass
 
 
 def sync_pipeline_inventory(pipeline_id: str) -> dict[str, int]:
@@ -241,7 +387,7 @@ def sync_pipeline_inventory(pipeline_id: str) -> dict[str, int]:
     total_updated = 0
 
     for source in sources:
-        result = sync_source_inventory(source.id)
+        result = sync_source_inventory(source.id, mode="full")
         total_new += result["new"]
         total_updated += result["updated"]
 

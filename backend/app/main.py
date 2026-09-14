@@ -1040,23 +1040,29 @@ def create_pipeline_source(
         douyin_user_id=payload.douyin_user_id,
         enabled=payload.enabled,
         inventory_sync_status="queued",
+        inventory_count=0,
+        inventory_sync_error=None,
     )
 
     db.add(source)
     db.commit()
     db.refresh(source)
 
+    # Initial full background inventory sync (queued -> running ->
+    # completed/auth_required/failed). sync_source_inventory owns the
+    # terminal status; never overwrite auth_required/failed with completed.
     try:
         from app.inventory import sync_source_inventory
-        sync_source_inventory(source.id)
-        source.inventory_sync_status = "completed"
-        db.commit()
+        sync_source_inventory(source.id, mode="full")
         db.refresh(source)
     except Exception:
         logger.exception("Background inventory sync failed for source %s", source.id)
-        source.inventory_sync_status = "failed"
-        db.commit()
-        db.refresh(source)
+        try:
+            source.inventory_sync_status = "failed"
+            db.commit()
+            db.refresh(source)
+        except Exception:
+            pass
 
     return source
 
@@ -2015,25 +2021,28 @@ def sync_source_now(
             detail="Không tìm thấy source",
         )
 
-    source.inventory_sync_status = "syncing"
+    source.inventory_sync_status = "running"
+    source.inventory_sync_error = None
     db.commit()
 
     try:
         from app.inventory import sync_source_inventory
 
-        result = sync_source_inventory(source.id)
-        source.inventory_sync_status = "completed"
-        db.commit()
+        result = sync_source_inventory(source.id, mode="full")
+        db.refresh(source)
         return SourceSyncResponse(
             source_id=source.id,
-            status="completed",
+            status=source.inventory_sync_status or "completed",
             new=int(result.get("new", 0)),
             updated=int(result.get("updated", 0)),
         )
     except Exception as exc:
         logger.exception("Manual inventory sync failed for source %s", source.id)
-        source.inventory_sync_status = "failed"
-        db.commit()
+        try:
+            source.inventory_sync_status = "failed"
+            db.commit()
+        except Exception:
+            pass
         raise HTTPException(
             status_code=500,
             detail=f"Sync thất bại: {exc}",
@@ -2075,13 +2084,69 @@ def sync_pipeline_now(
     total_updated = 0
     for source in sources:
         try:
-            result = sync_source_inventory(source.id)
+            result = sync_source_inventory(source.id, mode="full")
             total_new += int(result.get("new", 0))
             total_updated += int(result.get("updated", 0))
         except Exception:
             logger.exception("Pipeline sync failed for source %s", source.id)
 
     return {"new": total_new, "updated": total_updated}
+
+
+@app.get(
+    "/api/system/douyin-session",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def douyin_session_status() -> dict:
+    """Cookie status only. Never returns cookie values."""
+    from app.douyin_inventory_providers import (
+        cookies_configured,
+        cookies_look_expired,
+        parse_netscape_cookies,
+    )
+
+    configured = cookies_configured()
+    if not configured:
+        return {
+            "configured": False,
+            "last_validation": _utcnow().isoformat(),
+            "valid": False,
+            "error": "Douyin login cookies are required for profile inventory sync",
+        }
+
+    try:
+        from app.douyin_inventory_providers import decode_netscape_cookies_raw
+
+        text = decode_netscape_cookies_raw()
+        parsed = parse_netscape_cookies(text)
+        if not parsed:
+            return {
+                "configured": True,
+                "last_validation": _utcnow().isoformat(),
+                "valid": False,
+                "error": "Douyin session expired",
+            }
+        if cookies_look_expired(parsed):
+            return {
+                "configured": True,
+                "last_validation": _utcnow().isoformat(),
+                "valid": False,
+                "error": "Douyin session expired",
+            }
+        return {
+            "configured": True,
+            "last_validation": _utcnow().isoformat(),
+            "valid": True,
+        }
+    except Exception as exc:
+        return {
+            "configured": True,
+            "last_validation": _utcnow().isoformat(),
+            "valid": False,
+            "error": str(exc)[:500],
+        }
 
 
 @app.get(

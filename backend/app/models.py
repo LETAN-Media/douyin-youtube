@@ -252,6 +252,22 @@ class DouyinSource(Base):
         default="idle",
     )
 
+    inventory_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    inventory_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    inventory_sync_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     enabled: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -338,6 +354,12 @@ class DouyinVideo(Base):
     )
 
     is_backlog: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    is_backfill: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False,

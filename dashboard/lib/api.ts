@@ -380,3 +380,12 @@ export async function getYoutubeOauthUrl(destinationId: string): Promise<{
     { method: "POST" },
   );
 }
+
+export async function getDouyinSession(): Promise<{
+  configured: boolean;
+  last_validation?: string | null;
+  valid: boolean;
+  error?: string | null;
+}> {
+  return apiFetch("/api/system/douyin-session");
+}

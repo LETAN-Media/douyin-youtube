@@ -74,6 +74,9 @@ export interface DouyinSource {
   douyin_sec_uid?: string | null;
   douyin_user_id?: string | null;
   inventory_sync_status: string;
+  inventory_count?: number | null;
+  inventory_synced_at?: string | null;
+  inventory_sync_error?: string | null;
   enabled: boolean;
   last_video_id?: string | null;
   last_checked_at?: string | null;
@@ -92,6 +95,7 @@ export interface InventoryVideo {
   douyin_created_at?: string | null;
   status: string;
   is_backlog: boolean;
+  is_backfill?: boolean | null;
   scheduled_at?: string | null;
   published_at?: string | null;
   youtube_video_id?: string | null;
@@ -196,3 +200,10 @@ export interface Job {
 }
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
+
+export interface DouyinSessionStatus {
+  configured: boolean;
+  last_validation?: string | null;
+  valid: boolean;
+  error?: string | null;
+}

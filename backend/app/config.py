@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     monitor_poll_seconds: int = 300
     monitor_startup_delay_seconds: int = 10
 
+    # Douyin browser inventory configuration
+    max_inventory_pages: int = 200
+    douyin_inventory_concurrency: int = 1
+
     # Scheduler configuration
     scheduler_enabled: bool = True
     scheduler_poll_seconds: int = 60

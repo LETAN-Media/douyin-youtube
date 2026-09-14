@@ -193,6 +193,9 @@ class DouyinSourceOut(DouyinSourceBase):
     douyin_sec_uid: str | None
     douyin_user_id: str | None
     inventory_sync_status: str
+    inventory_count: int = 0
+    inventory_synced_at: datetime | None = None
+    inventory_sync_error: str | None = None
     last_video_id: str | None
     last_checked_at: datetime | None
     created_at: datetime
@@ -476,6 +479,7 @@ class DouyinVideoOut(BaseModel):
     douyin_created_at: datetime | None
     status: str
     is_backlog: bool
+    is_backfill: bool = False
     scheduled_at: datetime | None
     published_at: datetime | None
     youtube_video_id: str | None
