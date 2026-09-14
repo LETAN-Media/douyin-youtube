@@ -250,10 +250,20 @@ export async function actionGetSourceStatus(
 
 // ---------- Destinations ----------
 
+export type CreateDestinationResult =
+  | { ok: true; id: string; oauthUrl?: string }
+  | {
+      ok: false;
+      error: string;
+      destinationCreated?: boolean;
+      destinationId?: string;
+      destinationName?: string;
+    };
+
 export async function actionCreateDestination(
   pipelineId: string,
   form: FormData,
-): Promise<ActionResult & { id?: string; oauthUrl?: string }> {
+): Promise<CreateDestinationResult> {
   try {
     const name = String(form.get("name") ?? "").trim();
     if (!name) return { ok: false, error: "Thiếu tên destination." };
@@ -270,18 +280,37 @@ export async function actionCreateDestination(
       metadata_profile: String(form.get("metadata_profile") ?? "").trim() || undefined,
     });
     revalidatePipeline(pipelineId);
-    // For YouTube, fetch OAuth URL right away so the wizard can continue.
+    // For YouTube, fetch the REAL OAuth URL right away so the wizard can
+    // redirect immediately. NEVER swallow this error: the destination exists
+    // but Google login cannot start, and the user must see why.
     if (dest.platform === "youtube") {
       try {
         const oauth = await getYoutubeOauthUrl(dest.id);
+        if (!oauth.url) {
+          return {
+            ok: false,
+            error: "Backend không trả YouTube OAuth URL.",
+            destinationCreated: true,
+            destinationId: dest.id,
+            destinationName: dest.name,
+          };
+        }
         return { ok: true, id: dest.id, oauthUrl: oauth.url };
-      } catch {
-        return { ok: true, id: dest.id };
+      } catch (e) {
+        const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Lỗi không xác định.";
+        return {
+          ok: false,
+          error: `Không tạo được YouTube OAuth URL: ${msg}`,
+          destinationCreated: true,
+          destinationId: dest.id,
+          destinationName: dest.name,
+        };
       }
     }
     return { ok: true, id: dest.id };
   } catch (e) {
-    return err(e);
+    if (e instanceof ApiError) return { ok: false, error: e.message };
+    return { ok: false, error: e instanceof Error ? e.message : "Tạo destination thất bại." };
   }
 }
 

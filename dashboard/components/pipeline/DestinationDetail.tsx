@@ -35,13 +35,16 @@ export function DestinationActions({
           type="button"
           className={btnSmall}
           disabled={pending}
-          onClick={() =>
+          onClick={() => {
+            if (pending) return;
             start(async () => {
               const r = await actionGetOauthUrl(destination.id);
-              if (r.ok && r.url) window.location.href = r.url;
-              else toast(r.ok ? "Lỗi." : r.error, "error");
-            })
-          }
+              if (r.ok && r.url) {
+                toast(`Đang mở Google login cho "${destination.name}"…`, "success");
+                window.location.assign(r.url);
+              } else toast(r.ok ? "Backend không trả YouTube OAuth URL." : r.error, "error");
+            });
+          }}
         >
           {pending ? "…" : connected ? "Reconnect" : "Connect"}
         </button>

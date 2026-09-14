@@ -76,6 +76,12 @@ export function DestinationsPanel({
     router.refresh();
   };
 
+  // Refresh the list the moment a destination exists, even before OAuth.
+  // The new destination must never flash "Chưa có destination".
+  const refreshList = () => {
+    router.refresh();
+  };
+
   const youtubes = items.filter((d) => d.platform === "youtube");
   const facebooks = items.filter((d) => d.platform === "facebook");
 
@@ -105,6 +111,7 @@ export function DestinationsPanel({
         {showWizard ? (
           <DestinationWizard
             pipelineId={pipelineId}
+            onCreated={refreshList}
             onDone={handleCreated}
           />
         ) : null}
@@ -199,24 +206,32 @@ export function DestinationCard({
   const { toast } = useToast();
   const router = useRouter();
   const [pending, start] = useTransition();
+  const [connectError, setConnectError] = useState<string | null>(null);
   const isFacebook = d.platform === "facebook";
   const connected = isFacebook ? false : (status?.connected ?? d.connected);
   const todayCount = status?.today_published ?? 0;
   const next = status?.next_upload ?? null;
 
-  const connect = () =>
+  const connect = () => {
+    if (pending) return;
+    setConnectError(null);
     start(async () => {
       if (isFacebook) {
         toast("Facebook publishing adapter not configured", "error");
         return;
       }
+      // REAL destination_id -> REAL accounts.google.com URL -> redirect now.
       const r = await actionGetOauthUrl(d.id);
       if (r.ok && r.url) {
-        window.location.href = r.url;
+        toast(`Đang mở Google login cho "${d.name}"…`, "success");
+        window.location.assign(r.url);
       } else {
-        toast(r.ok ? "Không lấy được OAuth URL." : r.error, "error");
+        const msg = r.ok ? "Backend không trả YouTube OAuth URL." : r.error;
+        setConnectError(msg);
+        toast(msg, "error");
       }
     });
+  };
 
   const doToggleFallback = () =>
     start(async () => {
@@ -250,16 +265,29 @@ export function DestinationCard({
           Facebook publishing adapter not configured
         </p>
       ) : (
-        <p className="mt-2 text-xs text-slate-600">
+        <div className="mt-2 text-xs text-slate-600">
           {d.external_account_name ? (
-            <>Kênh: <span className="font-semibold">{d.external_account_name}</span></>
+            <p>
+              Kênh: <span className="font-bold text-slate-900">{d.external_account_name}</span>
+            </p>
           ) : (
-            <>Chưa kết nối kênh</>
+            <p className="font-medium text-slate-500">Chưa kết nối kênh</p>
           )}
-          <br />
-          Today {todayCount}/{d.daily_upload_limit} · Next: {next ? formatTime(next) : "—"}
-        </p>
+          {d.external_account_id ? (
+            <p className="mt-0.5">
+              Channel ID: <span className="font-mono text-[11px] font-semibold text-slate-700">{d.external_account_id}</span>
+            </p>
+          ) : null}
+          <p className="tnum mt-0.5">
+            Today {todayCount}/{d.daily_upload_limit} · Next: {next ? formatTime(next) : "—"}
+          </p>
+        </div>
       )}
+      {connectError ? (
+        <p className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+          {connectError}
+        </p>
+      ) : null}
 
       {/* Schedule slots */}
       <div className="mt-2 flex flex-wrap gap-1">
@@ -273,6 +301,16 @@ export function DestinationCard({
         </span>
       </div>
 
+      {!isFacebook && !connected ? (
+        <button
+          type="button"
+          disabled={pending}
+          onClick={connect}
+          className="mt-3 inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-xl bg-red-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {pending ? "Connecting YouTube…" : "Connect YouTube"}
+        </button>
+      ) : null}
       <div className="mt-3 flex flex-wrap gap-1.5">
         <Link
           href={`/pipelines/${pipelineId}/destinations/${d.id}`}
@@ -280,9 +318,9 @@ export function DestinationCard({
         >
           Detail
         </Link>
-        {!isFacebook ? (
+        {!isFacebook && connected ? (
           <button type="button" className={btnSmall} disabled={pending} onClick={connect}>
-            {pending ? "…" : connected ? "Reconnect" : "Connect"}
+            {pending ? "…" : "Reconnect YouTube"}
           </button>
         ) : null}
         {onToggle ? (
@@ -352,13 +390,108 @@ function DestinationPauseButton({
 
 function DestinationWizard({
   pipelineId,
+  onCreated,
   onDone,
 }: {
   pipelineId: string;
+  onCreated: () => void;
   onDone: () => void;
 }) {
   const { toast } = useToast();
+  const router = useRouter();
   const [pending, start] = useTransition();
+  const [created, setCreated] = useState<{ id: string; name: string } | null>(null);
+  const [oauthUrl, setOauthUrl] = useState<string | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+
+  const goGoogle = (url: string) => {
+    // Immediate redirect to the REAL accounts.google.com auth URL.
+    window.location.assign(url);
+  };
+
+  const retryConnect = (destId: string, destName: string) => {
+    if (connecting) return;
+    setConnecting(true);
+    setOauthError(null);
+    start(async () => {
+      const r = await actionGetOauthUrl(destId);
+      if (r.ok && r.url) {
+        setOauthUrl(r.url);
+        toast(`Đang mở Google login cho "${destName}"…`, "success");
+        goGoogle(r.url);
+      } else {
+        setConnecting(false);
+        const msg = r.ok ? "Backend không trả YouTube OAuth URL." : r.error;
+        setOauthError(msg);
+        toast(msg, "error");
+      }
+    });
+  };
+
+  // After a destination exists, show the YouTube connect panel instead of
+  // the form — with retry + a real fallback link, never a dead end.
+  if (created) {
+    return (
+      <div className="space-y-3 border-b border-slate-100 p-4 sm:px-5">
+        <div className="rounded-2xl border border-indigo-200 bg-indigo-50/60 p-4">
+          <p className="text-sm font-extrabold text-slate-900">
+            YouTube Destination Created
+          </p>
+          <p className="mt-0.5 text-sm text-slate-600">
+            <span className="font-bold text-slate-900">{created.name}</span>
+            {" · "}
+            {connecting && !oauthError ? (
+              <span className="font-semibold text-indigo-700">Connecting YouTube…</span>
+            ) : oauthError ? (
+              <span className="font-semibold text-rose-700">Chưa kết nối</span>
+            ) : (
+              <span className="font-semibold text-indigo-700">Connecting YouTube…</span>
+            )}
+          </p>
+          {oauthError ? (
+            <p className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+              {oauthError}
+            </p>
+          ) : null}
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              disabled={connecting}
+              onClick={() => retryConnect(created.id, created.name)}
+              className="inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-xl bg-red-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {connecting && !oauthError ? "Connecting YouTube…" : "Connect YouTube"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onCreated();
+                onDone();
+              }}
+              className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+            >
+              Để sau
+            </button>
+          </div>
+          {oauthUrl ? (
+            <p className="mt-2 text-xs text-slate-500">
+              Nếu trình duyệt không tự chuyển, bấm{" "}
+              <a
+                href={oauthUrl}
+                target="_self"
+                rel="noreferrer"
+                className="font-bold text-indigo-700 underline"
+              >
+                Open Google Login
+              </a>
+              .
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <form
@@ -370,14 +503,32 @@ function DestinationWizard({
         start(async () => {
           const r = await actionCreateDestination(pipelineId, form);
           if (!r.ok) {
+            if (r.destinationCreated && r.destinationId) {
+              // Destination exists but Google login cannot start: show it
+              // explicitly with retry instead of failing silently.
+              onCreated();
+              setCreated({
+                id: r.destinationId,
+                name: r.destinationName ?? "YouTube",
+              });
+              setOauthError(r.error);
+              toast(r.error, "error");
+              return;
+            }
             toast(r.error, "error");
             return;
           }
+          onCreated();
           toast("Đã tạo destination.", "success");
-          onDone();
-          if (r.oauthUrl) {
-            window.location.href = r.oauthUrl;
+          if (r.oauthUrl && r.id) {
+            setCreated({ id: r.id, name: String(form.get("name") ?? "YouTube") });
+            setOauthUrl(r.oauthUrl);
+            setConnecting(true);
+            goGoogle(r.oauthUrl);
+            return;
           }
+          onDone();
+          router.refresh();
         });
       }}
     >

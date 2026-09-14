@@ -1982,6 +1982,8 @@ def youtube_callback(
         )
 
     # Resolve destination/pipeline for frontend redirect.
+    # Always land on the Destinations tab so the user immediately sees
+    # Connected + channel title (never a dead-end page).
     resolved_destination_id = destination_id
     resolved_pipeline_id = pipeline_id
 
@@ -1994,7 +1996,7 @@ def youtube_callback(
             return RedirectResponse(
                 url=(
                     f"{frontend_base}/pipelines/{destination.pipeline_id}"
-                    f"/destinations/{destination.id}?oauth=success"
+                    f"?tab=destinations&oauth=success"
                 ),
                 status_code=302,
             )
