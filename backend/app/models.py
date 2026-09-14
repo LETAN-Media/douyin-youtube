@@ -10,6 +10,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import (
     Mapped,
@@ -120,6 +121,59 @@ class Pipeline(Base):
         lazy="selectin",
     )
 
+    videos: Mapped[list["DouyinVideo"]] = relationship(
+        back_populates="pipeline",
+        lazy="selectin",
+    )
+
+    daily_upload_limit: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=6,
+    )
+
+    upload_slots: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        default=lambda: ["09:00", "13:00", "17:00", "21:00"],
+    )
+
+    backlog_slots_per_day: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=4,
+    )
+
+    new_slots_per_day: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=2,
+    )
+
+    backlog_order: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        default="asc",
+    )
+
+    source_selection_strategy: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="round_robin",
+    )
+
+    source_selection_cursor: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    backlog_threshold_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=7,
+    )
+
 
 class DouyinSource(Base):
     __tablename__ = "douyin_sources"
@@ -140,9 +194,19 @@ class DouyinSource(Base):
         back_populates="sources",
     )
 
+    videos: Mapped[list["DouyinVideo"]] = relationship(
+        back_populates="source",
+        lazy="selectin",
+    )
+
     name: Mapped[str] = mapped_column(
         String(200),
         nullable=False,
+    )
+
+    original_profile_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
     )
 
     profile_url: Mapped[str | None] = mapped_column(
@@ -158,6 +222,12 @@ class DouyinSource(Base):
     douyin_user_id: Mapped[str | None] = mapped_column(
         String(200),
         nullable=True,
+    )
+
+    inventory_sync_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="idle",
     )
 
     enabled: Mapped[bool] = mapped_column(
@@ -187,6 +257,109 @@ class DouyinSource(Base):
         default=utcnow,
         onupdate=utcnow,
         nullable=False,
+    )
+
+
+class DouyinVideo(Base):
+    __tablename__ = "douyin_videos"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    source_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("douyin_sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    pipeline_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("pipelines.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    video_id: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(300),
+        nullable=False,
+        default="",
+    )
+
+    description: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+    )
+
+    url: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    douyin_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="inventory",
+        index=True,
+    )
+
+    is_backlog: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    youtube_video_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    youtube_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    pipeline: Mapped["Pipeline"] = relationship(
+        back_populates="videos",
+    )
+
+    source: Mapped["DouyinSource"] = relationship(
+        back_populates="videos",
     )
 
 

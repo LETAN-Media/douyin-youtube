@@ -37,6 +37,16 @@ class PipelineBase(BaseModel):
     ] = "public"
     enabled: bool = True
 
+    daily_upload_limit: int = 6
+    upload_slots: list[str] | None = Field(
+        default=["09:00", "13:00", "17:00", "21:00"],
+    )
+    backlog_slots_per_day: int = 4
+    new_slots_per_day: int = 2
+    backlog_order: Literal["asc", "desc"] = "asc"
+    source_selection_strategy: Literal["round_robin"] = "round_robin"
+    backlog_threshold_days: int = 7
+
 
 class PipelineCreate(PipelineBase):
     pass
@@ -77,6 +87,31 @@ class PipelineUpdate(BaseModel):
     )
     enabled: bool | None = Field(
         default=None,
+    )
+    daily_upload_limit: int | None = Field(
+        default=None,
+        ge=1,
+    )
+    upload_slots: list[str] | None = Field(
+        default=None,
+    )
+    backlog_slots_per_day: int | None = Field(
+        default=None,
+        ge=0,
+    )
+    new_slots_per_day: int | None = Field(
+        default=None,
+        ge=0,
+    )
+    backlog_order: Literal["asc", "desc"] | None = Field(
+        default=None,
+    )
+    source_selection_strategy: Literal["round_robin"] | None = Field(
+        default=None,
+    )
+    backlog_threshold_days: int | None = Field(
+        default=None,
+        ge=1,
     )
 
 
@@ -148,6 +183,11 @@ class DouyinSourceOut(DouyinSourceBase):
 
     id: str
     pipeline_id: str | None
+    original_profile_url: str | None
+    profile_url: str | None
+    douyin_sec_uid: str | None
+    douyin_user_id: str | None
+    inventory_sync_status: str
     last_video_id: str | None
     last_checked_at: datetime | None
     created_at: datetime

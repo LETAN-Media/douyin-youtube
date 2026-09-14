@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import engine
-from app.models import Base, DouyinSource, Pipeline
+from app.models import Base, DouyinSource, DouyinVideo, Pipeline
 
 logger = logging.getLogger("douyin-youtube-migrate")
 
@@ -55,6 +55,13 @@ def run_migrations() -> None:
             Base.metadata.create_all(
                 bind=connection,
                 tables=[DouyinSource.__table__],
+            )
+
+        if not table_exists(connection, "douyin_videos"):
+            logger.info("Creating douyin_videos table")
+            Base.metadata.create_all(
+                bind=connection,
+                tables=[DouyinVideo.__table__],
             )
 
         if not column_exists(connection, "video_jobs", "pipeline_id"):
@@ -119,6 +126,45 @@ def run_migrations() -> None:
                     "ADD COLUMN IF NOT EXISTS source_video_id VARCHAR(200)"
                 )
             )
+
+        if not column_exists(connection, "douyin_sources", "original_profile_url"):
+            logger.info("Adding original_profile_url to douyin_sources")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_sources "
+                    "ADD COLUMN IF NOT EXISTS original_profile_url TEXT"
+                )
+            )
+
+        if not column_exists(connection, "douyin_sources", "inventory_sync_status"):
+            logger.info("Adding inventory_sync_status to douyin_sources")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_sources "
+                    "ADD COLUMN IF NOT EXISTS inventory_sync_status VARCHAR(20) DEFAULT 'idle'"
+                )
+            )
+
+        pipeline_columns = [
+            ("daily_upload_limit", "INTEGER DEFAULT 6"),
+            ("upload_slots", "JSON"),
+            ("backlog_slots_per_day", "INTEGER DEFAULT 4"),
+            ("new_slots_per_day", "INTEGER DEFAULT 2"),
+            ("backlog_order", "VARCHAR(10) DEFAULT 'asc'"),
+            ("source_selection_strategy", "VARCHAR(50) DEFAULT 'round_robin'"),
+            ("source_selection_cursor", "INTEGER DEFAULT 0"),
+            ("backlog_threshold_days", "INTEGER DEFAULT 7"),
+        ]
+
+        for column_name, column_type in pipeline_columns:
+            if not column_exists(connection, "pipelines", column_name):
+                logger.info("Adding %s to pipelines", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE pipelines "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
 
         default_pipeline_id = ensure_default_pipeline(connection)
 

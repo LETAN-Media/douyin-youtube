@@ -27,6 +27,7 @@ from app.db import (
 from app.migrate import run_migrations
 from app.models import (
     DouyinSource,
+    DouyinVideo,
     Pipeline,
     VideoJob,
 )
@@ -51,6 +52,8 @@ from app.youtube import (
     get_youtube_status,
 )
 from app.monitor import monitor_loop
+from app.scheduler import scheduler_loop
+from app.douyin_url import parse_douyin_profile_url
 
 
 logging.basicConfig(
@@ -67,6 +70,7 @@ logger = logging.getLogger("douyin-youtube-api")
 
 worker_task: asyncio.Task | None = None
 monitor_task: asyncio.Task | None = None
+scheduler_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
@@ -100,6 +104,16 @@ async def lifespan(
         monitor_task = None
         logger.info("Douyin monitor is disabled via MONITOR_ENABLED=false")
 
+    if getattr(settings, "scheduler_enabled", True):
+        scheduler_task = (
+            asyncio.create_task(
+                scheduler_loop()
+            )
+        )
+    else:
+        scheduler_task = None
+        logger.info("Douyin scheduler is disabled via SCHEDULER_ENABLED=false")
+
     yield
 
     if worker_task:
@@ -115,6 +129,14 @@ async def lifespan(
 
         try:
             await monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+
+        try:
+            await scheduler_task
         except asyncio.CancelledError:
             pass
 
@@ -218,11 +240,99 @@ def dashboard_stats(
         for row in source_rows:
             source_counts[str(row.pipeline_id)] = int(row.count or 0)
 
+    inventory_stats: dict[str, dict[str, Any]] = {}
+    if pipeline_ids:
+        inv_rows = db.execute(
+            select(
+                DouyinVideo.pipeline_id,
+                func.count(DouyinVideo.id).label("inventory_total"),
+                func.sum(
+                    __import__("sqlalchemy")
+                    .case(
+                        (DouyinVideo.status == "backlog", 1),
+                        else_=0,
+                    )
+                ).label("backlog"),
+                func.sum(
+                    __import__("sqlalchemy")
+                    .case(
+                        (DouyinVideo.status == "new", 1),
+                        else_=0,
+                    )
+                ).label("new"),
+                func.sum(
+                    __import__("sqlalchemy")
+                    .case(
+                        (DouyinVideo.status == "scheduled", 1),
+                        else_=0,
+                    )
+                ).label("scheduled"),
+                func.sum(
+                    __import__("sqlalchemy")
+                    .case(
+                        (DouyinVideo.status == "published", 1),
+                        else_=0,
+                    )
+                ).label("published"),
+            )
+            .where(DouyinVideo.pipeline_id.in_(pipeline_ids))
+            .group_by(DouyinVideo.pipeline_id)
+        ).all()
+
+        for row in inv_rows:
+            inventory_stats[str(row.pipeline_id)] = {
+                "inventory_total": int(row.inventory_total or 0),
+                "backlog": int(row.backlog or 0),
+                "new": int(row.new or 0),
+                "scheduled": int(row.scheduled or 0),
+                "published": int(row.published or 0),
+            }
+
     result = []
 
     for pipeline in pipelines:
         pipeline_id = str(pipeline.id)
         job_stat = stats.get(pipeline_id, {"total": 0, "published": 0, "pending": 0})
+        inv_stat = inventory_stats.get(pipeline_id, {
+            "inventory_total": 0,
+            "backlog": 0,
+            "new": 0,
+            "scheduled": 0,
+            "published": 0,
+        })
+
+        today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_published = db.execute(
+            select(func.count(VideoJob.id))
+            .where(VideoJob.pipeline_id == pipeline.id)
+            .where(VideoJob.status == "published")
+            .where(VideoJob.created_at >= today_start)
+        ).scalar_one_or_none()
+        today_published = today_published or 0
+
+        next_upload = None
+        if pipeline.upload_slots:
+            slot_times = []
+            for slot_str in pipeline.upload_slots:
+                try:
+                    hour, minute = map(int, slot_str.split(":"))
+                    slot_time = datetime.combine(utcnow().date(), datetime.min.time().replace(hour=hour, minute=minute))
+                    if slot_time.tzinfo is None:
+                        slot_time = slot_time.replace(tzinfo=timezone.utc)
+                    slot_times.append(slot_time)
+                except ValueError:
+                    continue
+
+            future_slots = [s for s in slot_times if s >= utcnow()]
+            if future_slots:
+                next_upload = min(future_slots).isoformat()
+            elif slot_times:
+                tomorrow = utcnow().date() + datetime.timedelta(days=1)
+                hour, minute = map(int, pipeline.upload_slots[0].split(":"))
+                slot_time = datetime.combine(tomorrow, datetime.min.time().replace(hour=hour, minute=minute))
+                if slot_time.tzinfo is None:
+                    slot_time = slot_time.replace(tzinfo=timezone.utc)
+                next_upload = slot_time.isoformat()
 
         result.append({
             "id": pipeline_id,
@@ -236,6 +346,14 @@ def dashboard_stats(
             "jobs_published": job_stat["published"],
             "jobs_pending": job_stat["pending"],
             "default_privacy": pipeline.default_privacy,
+            "inventory_total": inv_stat["inventory_total"],
+            "backlog": inv_stat["backlog"],
+            "new": inv_stat["new"],
+            "scheduled": inv_stat["scheduled"],
+            "published_inventory": inv_stat["published"],
+            "today_published": today_published,
+            "daily_upload_limit": pipeline.daily_upload_limit,
+            "next_upload": next_upload,
         })
 
     return {
@@ -814,18 +932,42 @@ def create_pipeline_source(
             detail="Không tìm thấy pipeline",
         )
 
+    profile_url = payload.profile_url
+    douyin_sec_uid = payload.douyin_sec_uid
+    original_profile_url = profile_url
+
+    if profile_url and not douyin_sec_uid:
+        parsed = parse_douyin_profile_url(profile_url)
+        if parsed:
+            douyin_sec_uid = parsed.sec_uid
+            profile_url = parsed.canonical
+
     source = DouyinSource(
         pipeline_id=pipeline_id,
         name=payload.name,
-        profile_url=payload.profile_url,
-        douyin_sec_uid=payload.douyin_sec_uid,
+        original_profile_url=original_profile_url,
+        profile_url=profile_url,
+        douyin_sec_uid=douyin_sec_uid or payload.douyin_sec_uid,
         douyin_user_id=payload.douyin_user_id,
         enabled=payload.enabled,
+        inventory_sync_status="queued",
     )
 
     db.add(source)
     db.commit()
     db.refresh(source)
+
+    try:
+        from app.inventory import sync_source_inventory
+        sync_source_inventory(source.id)
+        source.inventory_sync_status = "completed"
+        db.commit()
+        db.refresh(source)
+    except Exception:
+        logger.exception("Background inventory sync failed for source %s", source.id)
+        source.inventory_sync_status = "failed"
+        db.commit()
+        db.refresh(source)
 
     return source
 

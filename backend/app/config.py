@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     monitor_poll_seconds: int = 300
     monitor_startup_delay_seconds: int = 10
 
+    # Scheduler configuration
+    scheduler_enabled: bool = True
+    scheduler_poll_seconds: int = 60
+    scheduler_startup_delay_seconds: int = 10
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
-from app.models import DouyinSource, Pipeline, VideoJob
+from app.inventory import sync_source_inventory
+from app.models import DouyinSource, Pipeline
 
 logger = logging.getLogger("douyin-youtube-monitor")
 
@@ -165,61 +166,7 @@ def run_monitor_once() -> None:
 
             logger.info("Checking source=%s pipeline=%s profile=%s", source.id, pipeline.id, profile_url)
 
-            videos = fetch_latest_videos_from_source(profile_url, source.id)
-            if not videos:
-                logger.info("No videos found for source=%s", source.id)
-                continue
-
-            new_count = 0
-
-            with SessionLocal.begin() as db:
-                for video in videos:
-                    video_id = video["video_id"]
-
-                    existing = db.execute(
-                        select(VideoJob)
-                        .where(
-                            VideoJob.pipeline_id == pipeline.id,
-                            VideoJob.source_video_id == video_id,
-                        )
-                        .limit(1)
-                    ).scalar_one_or_none()
-
-                    if existing is not None:
-                        continue
-
-                    title = video.get("title") or ""
-                    description = video.get("description") or video.get("url") or ""
-
-                    job = VideoJob(
-                        source_url=video.get("url") or profile_url,
-                        source_title=title,
-                        title=None,
-                        description=description,
-                        privacy_status=pipeline.default_privacy,
-                        status="pending",
-                        pipeline_id=pipeline.id,
-                        source_video_id=video_id,
-                    )
-
-                    db.add(job)
-                    new_count += 1
-
-                db.execute(
-                    __import__("sqlalchemy")
-                    .update(DouyinSource)
-                    .where(DouyinSource.id == source.id)
-                    .values(
-                        last_checked_at=utcnow(),
-                        last_video_id=videos[0]["video_id"],
-                    )
-                )
-
-            logger.info(
-                "Source %s produced %s new jobs",
-                source.id,
-                new_count,
-            )
+            sync_source_inventory(source.id)
 
         except Exception:
             logger.exception("Failed to process source=%s", source.id)

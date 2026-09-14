@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select, update
 
@@ -11,13 +13,17 @@ from app.douyin import (
     cleanup_job_files,
     download_video,
 )
-from app.models import Pipeline, VideoJob
+from app.models import DouyinVideo, Pipeline, VideoJob
 from app.youtube import upload_video
 
 
 logger = logging.getLogger(
     "douyin-youtube-worker"
 )
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def is_raw_douyin_share_text(text: str | None) -> bool:
@@ -112,6 +118,23 @@ def recover_incomplete_jobs() -> None:
                 ),
             )
         )
+
+        scheduled_videos = db.execute(
+            select(DouyinVideo)
+            .where(DouyinVideo.status == "scheduled")
+        ).scalars().all()
+
+        for video in scheduled_videos:
+            job = db.execute(
+                select(VideoJob)
+                .where(VideoJob.pipeline_id == video.pipeline_id)
+                .where(VideoJob.source_video_id == video.video_id)
+                .limit(1)
+            ).scalar_one_or_none()
+
+            if job is None or job.status in ("published", "failed"):
+                video.status = "backlog" if video.is_backlog else "new"
+                video.scheduled_at = None
 
 
 def claim_job() -> str | None:
@@ -417,6 +440,19 @@ def process_job(
             job.status = "published"
             job.progress = 100
             job.error = None
+
+            video = db.execute(
+                select(DouyinVideo)
+                .where(DouyinVideo.pipeline_id == job.pipeline_id)
+                .where(DouyinVideo.video_id == job.source_video_id)
+                .limit(1)
+            ).scalar_one_or_none()
+
+            if video is not None:
+                video.status = "published"
+                video.published_at = utcnow()
+                video.youtube_video_id = video_id
+                video.youtube_url = f"https://youtu.be/{video_id}"
 
         logger.info(
             "Published job=%s video=%s",
