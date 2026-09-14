@@ -407,18 +407,24 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
 
                 for _ in range(max_pages):
                     # Drain intercepted aweme/post responses.
+                    payloads_this_round = 0
+                    round_had_more = False
+                    cursor_repeated_this_round = False
                     while responses:
                         response = responses.pop(0)
                         try:
                             payload = response.json()
                         except Exception:
                             continue
+                        payloads_this_round += 1
                         videos, has_more, max_cursor = parse_aweme_post_response(payload)
                         for video in videos:
                             collected.setdefault(video["video_id"], video)
+                        if has_more != 0:
+                            round_had_more = True
                         if max_cursor:
                             if max_cursor in seen_cursors:
-                                pass
+                                cursor_repeated_this_round = True
                             seen_cursors.add(max_cursor)
                         if not full and len(collected) >= 30:
                             break
@@ -426,7 +432,8 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
                             break
 
                     current_total = len(collected)
-                    if current_total > last_new_count:
+                    new_ids_this_round = current_total > last_new_count
+                    if new_ids_this_round:
                         last_new_count = current_total
                         no_progress_rounds = 0
                     else:
@@ -434,9 +441,18 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
 
                     if not full and current_total >= 30:
                         break
-                    # Full mode stops only on repeated no-progress; the
-                    # has_more==0 signal arrives inside payloads above and
-                    # is reflected by no new IDs across scrolls.
+                    # Spec stop conditions (only when we actually observed
+                    # payloads this round, to avoid stopping on idle rounds):
+                    # 1) has_more == 0 terminal page, 2) no new video IDs,
+                    # 3) repeated cursor (pagination loop).
+                    if payloads_this_round > 0 and not round_had_more:
+                        break
+                    if (
+                        payloads_this_round > 0
+                        and cursor_repeated_this_round
+                        and not new_ids_this_round
+                    ):
+                        break
                     if no_progress_rounds >= 4:
                         break
 
