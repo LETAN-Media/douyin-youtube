@@ -48,6 +48,9 @@ export interface DashboardPipelineRow {
   failed: number;
   daily_upload_limit: number;
   next_upload?: string | null;
+  inventory_available?: number | null;
+  connected_destinations?: number | null;
+  auto_reason?: string | null;
 }
 
 export interface PipelineStats {
@@ -154,6 +157,10 @@ export interface Destination {
   fixed_hashtags?: string[] | null;
   adaptive_hashtags?: string[] | null;
   prompt_override?: string | null;
+  last_scheduler_check_at?: string | null;
+  last_cycle_at?: string | null;
+  last_job_created_at?: string | null;
+  last_skip_reason?: string | null;
   created_at: string;
   updated_at: string;
 }

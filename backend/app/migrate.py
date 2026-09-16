@@ -177,6 +177,42 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "video_jobs", "publication_id"):
+            logger.info("Adding publication_id to video_jobs")
+            connection.execute(
+                text(
+                    "ALTER TABLE video_jobs "
+                    "ADD COLUMN IF NOT EXISTS publication_id VARCHAR(36)"
+                )
+            )
+            try:
+                connection.execute(
+                    text(
+                        "ALTER TABLE video_jobs "
+                        "ADD CONSTRAINT fk_video_jobs_publication_id "
+                        "FOREIGN KEY (publication_id) "
+                        "REFERENCES publications(id) "
+                        "ON DELETE SET NULL"
+                    )
+                )
+            except Exception:
+                logger.info("FK video_jobs.publication_id already exists or skipped")
+
+        for _col, _typ in [
+            ("last_scheduler_check_at", "TIMESTAMPTZ"),
+            ("last_cycle_at", "TIMESTAMPTZ"),
+            ("last_job_created_at", "TIMESTAMPTZ"),
+            ("last_skip_reason", "TEXT"),
+        ]:
+            if not column_exists(connection, "destinations", _col):
+                logger.info("Adding %s to destinations", _col)
+                connection.execute(
+                    text(
+                        f"ALTER TABLE destinations "
+                        f"ADD COLUMN IF NOT EXISTS {_col} {_typ}"
+                    )
+                )
+
         if not column_exists(connection, "douyin_sources", "original_profile_url"):
             logger.info("Adding original_profile_url to douyin_sources")
             connection.execute(

@@ -420,14 +420,35 @@ def load_credentials(
     pipeline_id: str | None = None,
     destination_id: str | None = None,
 ) -> Credentials:
-    raw = None
-
+    # Destination OAuth isolation: when a destination is specified, its own
+    # credentials MUST be used. Never fall back to another destination,
+    # pipeline-global or app-global token (would upload YouTube A with B's
+    # credentials).
     if destination_id:
         destination = db.get(Destination, destination_id)
-        if destination is not None and destination.credentials:
+        raw = None
+        if destination is not None:
             raw = destination.credentials
+        if not raw:
+            raise RuntimeError(
+                "Destination YouTube chưa được kết nối OAuth "
+                f"(destination_id={destination_id})"
+            )
+        credentials = _load_from_json(raw)
+        # Persist refreshed access token back to this destination only.
+        try:
+            data = json.loads(raw)
+            if credentials.token and data.get("token") != credentials.token:
+                data["token"] = credentials.token
+                destination.credentials = json.dumps(data)
+                db.commit()
+        except Exception:
+            pass
+        return credentials
 
-    if not raw and pipeline_id:
+    raw = None
+
+    if pipeline_id:
         pipeline = db.get(Pipeline, pipeline_id)
         if pipeline is not None and pipeline.youtube_credentials:
             raw = pipeline.youtube_credentials
@@ -439,6 +460,32 @@ def load_credentials(
         )
 
     return _load_from_json(raw)
+
+
+def destination_oauth_ready(
+    destination: Destination | None,
+) -> tuple[bool, str | None]:
+    """Check a Destination is ready for YouTube scheduling/upload.
+
+    Returns (ready, reason). Reasons use scheduler reason codes.
+    """
+    if destination is None:
+        return False, "DESTINATION_NOT_FOUND"
+    if not destination.enabled:
+        return False, "SCHEDULER_DISABLED"
+    if (destination.platform or "").lower() != "youtube":
+        return False, "UNSUPPORTED_PLATFORM"
+    if not destination.connected:
+        return False, "DESTINATION_NOT_CONNECTED"
+    if not destination.credentials:
+        return False, "DESTINATION_NOT_CONNECTED"
+    try:
+        data = json.loads(destination.credentials)
+    except Exception:
+        return False, "DESTINATION_NOT_CONNECTED"
+    if not data.get("refresh_token"):
+        return False, "DESTINATION_NOT_CONNECTED"
+    return True, None
 
 
 def youtube_connected(

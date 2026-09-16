@@ -123,6 +123,22 @@ export default async function DashboardPage() {
                   const done = (p.inventory_total ?? 0) > 0
                     ? Math.round(((p.published_inventory ?? 0) / Math.max(1, p.inventory_total)) * 100)
                     : 0;
+                  const noInventory = (p.inventory_available ?? p.inventory_total ?? 0) <= 0;
+                  const reasonLabel = !p.enabled
+                    ? null
+                    : p.auto_reason === "NO_AVAILABLE_INVENTORY" || (noInventory && (p.published_today ?? 0) === 0)
+                      ? "Auto ON · No videos available"
+                      : p.auto_reason === "DESTINATION_NOT_CONNECTED"
+                        ? "Auto ON · Destination not connected"
+                        : p.auto_reason === "DAILY_LIMIT_REACHED"
+                          ? "Auto ON · Daily limit reached"
+                          : p.auto_reason === "WAITING_NEXT_SLOT"
+                            ? "Auto ON · Waiting next slot"
+                            : p.auto_reason === "SCHEDULER_DISABLED"
+                              ? "Auto ON · Scheduler disabled"
+                              : p.auto_reason === "WORKER_ERROR"
+                                ? "Auto ON · Worker error"
+                                : null;
                   return (
                     <Link
                       key={p.id}
@@ -166,6 +182,11 @@ export default async function DashboardPage() {
                         <div className="mt-1.5">
                           <ProgressBar value={done} tone={p.failed > 0 ? "amber" : "indigo"} />
                         </div>
+                        {reasonLabel ? (
+                          <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-700">
+                            {reasonLabel}
+                          </p>
+                        ) : null}
                       </div>
 
                       <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs">

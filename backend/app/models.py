@@ -542,6 +542,26 @@ class Destination(Base):
         nullable=False,
     )
 
+    last_scheduler_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_cycle_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_job_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_skip_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     publications: Mapped[list["Publication"]] = relationship(
         back_populates="destination",
         lazy="selectin",
@@ -658,6 +678,12 @@ class Publication(Base):
         nullable=False,
     )
 
+    jobs: Mapped[list["VideoJob"]] = relationship(
+        back_populates="publication",
+        foreign_keys="VideoJob.publication_id",
+        lazy="selectin",
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "douyin_video_id",
@@ -746,6 +772,17 @@ class VideoJob(Base):
         String(36),
         ForeignKey("destinations.id", ondelete="SET NULL"),
         nullable=True,
+    )
+
+    publication_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("publications.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    publication: Mapped["Publication | None"] = relationship(
+        back_populates="jobs",
+        foreign_keys="VideoJob.publication_id",
     )
 
     source_video_id: Mapped[str | None] = mapped_column(

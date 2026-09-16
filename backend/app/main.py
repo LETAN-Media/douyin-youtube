@@ -416,6 +416,55 @@ def dashboard_stats(
             .where(Publication.published_at >= today_start)
         ).scalar_one_or_none() or 0
 
+        # Inventory guard + auto reason for Overview observability.
+        inv_available = int(inv_stat.get("new", 0) or 0) + int(
+            inv_stat.get("backlog", 0) or 0
+        )
+        dests = list(
+            db.execute(
+                select(Destination)
+                .where(Destination.pipeline_id == pipeline.id)
+            ).scalars().all()
+        )
+        connected_dests = [
+            d for d in dests
+            if d.enabled and d.connected and d.credentials
+            and (d.platform or "").lower() == "youtube"
+        ]
+        auto_reason: str | None = None
+        if not pipeline.enabled:
+            auto_reason = "SCHEDULER_DISABLED"
+        elif not dests:
+            auto_reason = "DESTINATION_NOT_CONNECTED"
+        elif not connected_dests:
+            auto_reason = "DESTINATION_NOT_CONNECTED"
+        elif inv_available <= 0:
+            auto_reason = "NO_AVAILABLE_INVENTORY"
+        else:
+            # Surface stored per-destination skip reason if any.
+            reasons = [
+                d.last_skip_reason for d in dests
+                if d.last_skip_reason
+            ]
+            if reasons:
+                # Prefer actionable reasons over waiting.
+                for cand in (
+                    "NO_AVAILABLE_INVENTORY",
+                    "DESTINATION_NOT_CONNECTED",
+                    "DAILY_LIMIT_REACHED",
+                    "WORKER_ERROR",
+                    "SCHEDULER_DISABLED",
+                ):
+                    if cand in reasons:
+                        auto_reason = cand
+                        break
+                auto_reason = auto_reason or reasons[0]
+            else:
+                auto_reason = (
+                    "WAITING_NEXT_SLOT"
+                    if int(pub_today or 0) == 0 else None
+                )
+
         result.append({
             "id": pipeline_id,
             "name": pipeline.name,
@@ -443,6 +492,9 @@ def dashboard_stats(
             "failed": int(pub_stat["failed"]),
             "daily_upload_limit": pipeline.daily_upload_limit,
             "next_upload": next_upload,
+            "inventory_available": int(inv_available),
+            "connected_destinations": len(connected_dests),
+            "auto_reason": auto_reason,
         })
 
     return {
@@ -2407,6 +2459,15 @@ def publish_inventory_video_now(
         destination_id=destination.id,
     )
     db.add(job)
+    db.flush()
+    # Link Job <-> Publication so worker updates the right Publication
+    # even when the same video targets multiple destinations.
+    try:
+        if publication.id is not None:
+            job.publication_id = publication.id
+            db.flush()
+    except Exception:
+        pass
     db.commit()
     db.refresh(publication)
 
@@ -2759,6 +2820,7 @@ def retry_publication(
             pipeline_id=pipeline.id,
             source_video_id=video.video_id,
             destination_id=publication.destination_id,
+            publication_id=publication.id,
         )
         db.add(job)
 
@@ -2832,3 +2894,176 @@ def reschedule_publication(
     db.commit()
     db.refresh(publication)
     return publication
+
+
+@app.get(
+    "/api/pipelines/{pipeline_id}/scheduler-status",
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def pipeline_scheduler_status(
+    pipeline_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> dict:
+    """Scheduler observability: why auto-publish did/did not run.
+
+    Reason codes: NO_AVAILABLE_INVENTORY, DESTINATION_NOT_CONNECTED,
+    DAILY_LIMIT_REACHED, WAITING_NEXT_SLOT, SCHEDULER_DISABLED, WORKER_ERROR.
+    """
+    from app.scheduler import (
+        count_inventory_available,
+        count_todays_released_jobs,
+        get_local_day_bounds,
+        get_next_upload_slot,
+        get_slots_between,
+    )
+
+    pipeline = db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy pipeline",
+        )
+
+    now = _utcnow()
+    destinations = list(
+        db.execute(
+            select(Destination)
+            .where(Destination.pipeline_id == pipeline_id)
+            .order_by(Destination.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    inventory_available = count_inventory_available(db, pipeline)
+    connected = [
+        d for d in destinations
+        if d.enabled and d.connected and d.credentials
+        and (d.platform or "").lower() == "youtube"
+    ]
+
+    last_cycle = None
+    last_job_created = None
+    for d in destinations:
+        for cand in (d.last_cycle_at, d.last_scheduler_check_at):
+            if cand is not None:
+                if cand.tzinfo is None:
+                    cand = cand.replace(tzinfo=timezone.utc)
+                if last_cycle is None or cand > last_cycle:
+                    last_cycle = cand
+        if d.last_job_created_at is not None:
+            cand = d.last_job_created_at
+            if cand.tzinfo is None:
+                cand = cand.replace(tzinfo=timezone.utc)
+            if last_job_created is None or cand > last_job_created:
+                last_job_created = cand
+    # Fallback to newest job/publication when destination fields are null
+    # (e.g. before first scheduler cycle after deploy).
+    if last_job_created is None:
+        newest_job = db.execute(
+            select(func.max(VideoJob.created_at))
+            .where(VideoJob.pipeline_id == pipeline_id)
+        ).scalar_one_or_none()
+        newest_pub = db.execute(
+            select(func.max(Publication.created_at))
+            .where(Publication.pipeline_id == pipeline_id)
+        ).scalar_one_or_none()
+        for cand in (newest_job, newest_pub):
+            if cand is not None:
+                if cand.tzinfo is None:
+                    cand = cand.replace(tzinfo=timezone.utc)
+                if last_job_created is None or cand > last_job_created:
+                    last_job_created = cand
+
+    next_slots: list[str] = []
+    try:
+        for d in destinations:
+            if not d.enabled or not (d.upload_slots or []):
+                continue
+            nxt = get_next_upload_slot(
+                d.upload_slots or [], d.timezone or "UTC", now
+            )
+            if nxt is not None:
+                next_slots.append(nxt.isoformat())
+        next_slots = sorted(set(next_slots))
+    except Exception:
+        pass
+
+    today_rows: list[dict] = []
+    for d in destinations:
+        try:
+            day_start, _ = get_local_day_bounds(d.timezone or "UTC", now)
+        except Exception:
+            day_start = now.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+        published = db.execute(
+            select(func.count(Publication.id))
+            .where(Publication.destination_id == d.id)
+            .where(Publication.status == "published")
+            .where(Publication.published_at >= day_start)
+        ).scalar_one_or_none() or 0
+        released = count_todays_released_jobs(db, pipeline, day_start, d)
+        try:
+            nxt = get_next_upload_slot(
+                d.upload_slots or [], d.timezone or "UTC", now
+            )
+            nxt_iso = nxt.isoformat() if nxt is not None else None
+        except Exception:
+            nxt_iso = None
+        reason = d.last_skip_reason
+        # Derive live reason when no stored reason yet.
+        if not reason:
+            if not pipeline.enabled:
+                reason = "SCHEDULER_DISABLED"
+            elif not (d.enabled and d.connected and d.credentials):
+                reason = "DESTINATION_NOT_CONNECTED"
+            elif int(released or 0) >= int(d.daily_upload_limit or 6):
+                reason = "DAILY_LIMIT_REACHED"
+            elif int(inventory_available or 0) <= 0:
+                reason = "NO_AVAILABLE_INVENTORY"
+            else:
+                reason = "WAITING_NEXT_SLOT"
+        today_rows.append({
+            "destination_id": d.id,
+            "destination_name": d.name,
+            "platform": d.platform,
+            "enabled": bool(d.enabled),
+            "connected": bool(d.connected),
+            "published": int(published or 0),
+            "released": int(released or 0),
+            "limit": int(d.daily_upload_limit or 6),
+            "next_slot": nxt_iso,
+            "last_skip_reason": reason,
+            "last_check_at": (
+                d.last_scheduler_check_at.isoformat()
+                if d.last_scheduler_check_at is not None else None
+            ),
+            "last_job_created_at": (
+                d.last_job_created_at.isoformat()
+                if d.last_job_created_at is not None else None
+            ),
+        })
+
+    return {
+        "enabled": bool(
+            pipeline.enabled and getattr(
+                __import__("app.config", fromlist=["settings"]).settings,
+                "scheduler_enabled", True,
+            )
+        ),
+        "pipeline_enabled": bool(pipeline.enabled),
+        "last_cycle_at": last_cycle.isoformat() if last_cycle else None,
+        "last_job_created_at": (
+            last_job_created.isoformat() if last_job_created else None
+        ),
+        "next_slots": next_slots,
+        "inventory_available": int(inventory_available or 0),
+        "connected_destinations": len(connected),
+        "destinations_total": len(destinations),
+        "today": today_rows,
+    }

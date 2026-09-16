@@ -159,9 +159,43 @@ def pick_video(
     return _try_pick_video(db, pipeline, other_type)
 
 
-def count_todays_released_jobs(db: Session, pipeline: Pipeline, local_day_start_utc: datetime) -> int:
+def count_todays_released_jobs(
+    db: Session,
+    pipeline: Pipeline,
+    local_day_start_utc: datetime,
+    destination: Destination | None = None,
+) -> int:
+    """Per-destination daily count (preferred) with pipeline fallback.
+
+    When destination is given, count Publications for that destination
+    created today excluding failed/skipped. Otherwise legacy pipeline
+    VideoJob count.
+    """
     today_start = local_day_start_utc
     today_end = today_start + timedelta(days=1)
+
+    if destination is not None:
+        pub_count = db.execute(
+            select(func.count(Publication.id))
+            .where(Publication.destination_id == destination.id)
+            .where(Publication.created_at >= today_start)
+            .where(Publication.created_at < today_end)
+            .where(Publication.status.notin_(["failed", "skipped"]))
+        ).scalar_one_or_none()
+        job_count = db.execute(
+            select(func.count(VideoJob.id))
+            .where(VideoJob.destination_id == destination.id)
+            .where(VideoJob.created_at >= today_start)
+            .where(VideoJob.created_at < today_end)
+            .where(
+                VideoJob.status.in_(
+                    ["published", "pending", "downloading", "uploading"]
+                )
+            )
+        ).scalar_one_or_none()
+        # Each schedule creates 1 Publication + 1 Job; take max to be safe
+        # against legacy rows missing one side.
+        return int(max(int(pub_count or 0), int(job_count or 0)))
 
     count = db.execute(
         select(func.count(VideoJob.id))
@@ -186,108 +220,335 @@ def get_slot_type(slot_index: int, backlog_slots: int, new_slots: int) -> str:
     return "new"
 
 
+def count_inventory_available(db: Session, pipeline: Pipeline) -> int:
+    count = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipeline.id)
+        .where(DouyinVideo.status.in_(["new", "backlog"]))
+    ).scalar_one_or_none()
+    return int(count or 0)
+
+
+def is_destination_ready(
+    destination: Destination,
+) -> tuple[bool, str | None]:
+    """Destination must be connected before any Publication/VideoJob is made."""
+    if not destination.enabled:
+        return False, REASON_DISABLED
+    if (destination.platform or "").lower() != "youtube":
+        return False, "UNSUPPORTED_PLATFORM"
+    if not destination.connected:
+        return False, REASON_NOT_CONNECTED
+    if not destination.credentials:
+        return False, REASON_NOT_CONNECTED
+    return True, None
+
+
+def _mark_destination_cycle(
+    db: Session,
+    destination: Destination,
+    now: datetime,
+    skip_reason: str | None,
+    job_created: bool = False,
+) -> None:
+    try:
+        destination.last_scheduler_check_at = now
+        destination.last_cycle_at = now
+        destination.last_skip_reason = skip_reason
+        if job_created:
+            destination.last_job_created_at = now
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+SLOT_GRACE_MINUTES = 10
+CATCHUP_MAX_HOURS = 24
+
+# Scheduler skip-reason codes surfaced via scheduler-status for observability.
+REASON_NOT_CONNECTED = "DESTINATION_NOT_CONNECTED"
+REASON_NO_INVENTORY = "NO_AVAILABLE_INVENTORY"
+REASON_DAILY_LIMIT = "DAILY_LIMIT_REACHED"
+REASON_WAITING_SLOT = "WAITING_NEXT_SLOT"
+REASON_DISABLED = "SCHEDULER_DISABLED"
+REASON_WORKER_ERROR = "WORKER_ERROR"
+
+
+def _resolve_tz(timezone_name: str):
+    tz_name = timezone_name or "UTC"
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tz_name)
+    except Exception:
+        return timezone.utc
+
+
+def get_slots_between(
+    slots: list[str],
+    timezone_name: str,
+    start: datetime,
+    end: datetime,
+) -> list[datetime]:
+    """Enumerate all upload slot datetimes (UTC) with start < slot <= end."""
+    if not slots:
+        return []
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if end <= start:
+        return []
+    local_tz = _resolve_tz(timezone_name)
+    start_local = start.astimezone(local_tz)
+    end_local = end.astimezone(local_tz)
+    results: list[datetime] = []
+    day = start_local.date()
+    last_day = end_local.date()
+    while day <= last_day:
+        for time_str in slots:
+            try:
+                hour, minute = map(int, str(time_str).split(":"))
+            except ValueError:
+                continue
+            try:
+                slot_local = datetime.combine(
+                    day, datetime.min.time().replace(hour=hour, minute=minute)
+                ).replace(tzinfo=local_tz)
+            except ValueError:
+                continue
+            slot_utc = slot_local.astimezone(timezone.utc)
+            if start < slot_utc <= end:
+                results.append(slot_utc)
+        day = day + timedelta(days=1)
+    results.sort()
+    return results
+
+
+def get_due_slots(
+    slots: list[str],
+    timezone_name: str,
+    now: datetime,
+    last_check: datetime | None,
+    catchup_max_hours: int = CATCHUP_MAX_HOURS,
+) -> list[datetime]:
+    """Return due slots including catch-up for missed windows.
+
+    - Normal steady state: only the current grace-window slot is due.
+    - After sleep/restart: every slot in (last_check, now] is due (capped
+      at catchup_max_hours, default 24h) plus the current grace slot.
+    Deduplication is enforced by schedule_slot_key downstream.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    due: list[datetime] = []
+    seen: set[str] = set()
+
+    def _add(slot: datetime):
+        key = slot.isoformat()
+        if key not in seen:
+            seen.add(key)
+            due.append(slot)
+
+    # Current grace-window slot always qualifies (if any).
+    current = get_next_upload_slot(slots or [], timezone_name, now)
+    if current is not None and (
+        current <= now < current + timedelta(minutes=SLOT_GRACE_MINUTES)
+    ):
+        _add(current)
+
+    if last_check is not None:
+        if last_check.tzinfo is None:
+            last_check = last_check.replace(tzinfo=timezone.utc)
+        capped = max(last_check, now - timedelta(hours=catchup_max_hours))
+        for slot in get_slots_between(slots or [], timezone_name, capped, now):
+            _add(slot)
+    elif current is None:
+        pass
+
+    due.sort()
+    return due
+
+
 def schedule_for_destination(
     db: Session,
     destination: Destination,
     now: datetime | None = None,
+    catchup_max_hours: int = CATCHUP_MAX_HOURS,
 ) -> None:
     if now is None:
         now = utcnow()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
 
     if not destination.enabled:
+        _mark_destination_cycle(db, destination, now, REASON_DISABLED)
         return
 
     pipeline = db.get(Pipeline, destination.pipeline_id)
     if pipeline is None or not pipeline.enabled:
+        _mark_destination_cycle(db, destination, now, REASON_DISABLED)
+        return
+
+    # Destination must be connected before scheduling (no late worker fail).
+    ready, reason = is_destination_ready(destination)
+    if not ready:
+        logger.warning(
+            "destination_not_connected destination=%s platform=%s connected=%s",
+            destination.id,
+            destination.platform,
+            destination.connected,
+        )
+        _mark_destination_cycle(
+            db, destination, now, reason or REASON_NOT_CONNECTED
+        )
         return
 
     slots = destination.upload_slots or ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"]
     if not slots:
+        _mark_destination_cycle(db, destination, now, REASON_WAITING_SLOT)
         return
 
-    next_slot = get_next_upload_slot(slots, destination.timezone, now)
-    if next_slot is None:
-        return
+    last_check = destination.last_scheduler_check_at
+    if last_check is not None and last_check.tzinfo is None:
+        last_check = last_check.replace(tzinfo=timezone.utc)
 
-    if not (next_slot <= now < next_slot + timedelta(minutes=10)):
-        logger.info(
-            "Destination %s next slot %s, outside grace window",
-            destination.id,
-            next_slot,
-        )
+    due_slots = get_due_slots(
+        slots, destination.timezone, now, last_check, catchup_max_hours
+    )
+
+    if not due_slots:
+        try:
+            nxt = get_next_upload_slot(slots, destination.timezone, now)
+            logger.info(
+                "Destination %s next slot %s, outside grace window",
+                destination.id,
+                nxt,
+            )
+        except Exception:
+            pass
+        _mark_destination_cycle(db, destination, now, REASON_WAITING_SLOT)
         return
 
     local_day_start_utc, _ = get_local_day_bounds(destination.timezone, now)
-    today_released = count_todays_released_jobs(db, pipeline, local_day_start_utc)
+    created_any = False
 
-    if today_released >= destination.daily_upload_limit:
-        logger.info(
-            "Destination %s reached daily limit %s/%s",
-            destination.id,
-            today_released,
-            destination.daily_upload_limit,
+    for slot in due_slots:
+        # Per-destination daily limit (checked before every slot).
+        today_released = count_todays_released_jobs(
+            db, pipeline, local_day_start_utc, destination
         )
-        return
+        if today_released >= (destination.daily_upload_limit or 6):
+            logger.info(
+                "Destination %s reached daily limit %s/%s",
+                destination.id,
+                today_released,
+                destination.daily_upload_limit,
+            )
+            _mark_destination_cycle(db, destination, now, REASON_DAILY_LIMIT)
+            return
 
-    slot_index = next_slot.hour * 60 + next_slot.minute
-    slot_type = get_slot_type(slot_index, destination.backlog_slots_per_day or 4, destination.new_slots_per_day or 2)
-
-    video = pick_video(db, pipeline, slot_type)
-    if video is None:
-        logger.info(
-            "Destination %s has no available videos for %s slot",
-            destination.id,
-            slot_type,
+        slot_index = slot.hour * 60 + slot.minute
+        slot_type = get_slot_type(
+            slot_index,
+            destination.backlog_slots_per_day or 4,
+            destination.new_slots_per_day or 2,
         )
-        return
 
-    slot_key = f"{destination.id}:{next_slot.isoformat()}"
+        video = pick_video(db, pipeline, slot_type)
+        if video is None:
+            logger.warning(
+                "NO_AVAILABLE_INVENTORY destination=%s slot=%s type=%s",
+                destination.id,
+                slot.isoformat(),
+                slot_type,
+            )
+            _mark_destination_cycle(db, destination, now, REASON_NO_INVENTORY)
+            return
 
-    publication = Publication(
-        pipeline_id=pipeline.id,
-        douyin_video_id=video.id,
-        destination_id=destination.id,
-        platform=destination.platform,
-        status="scheduled",
-        scheduled_at=next_slot,
-    )
+        slot_key = f"{destination.id}:{slot.isoformat()}"
 
-    db.add(publication)
+        # Idempotency: schedule_slot_key unique prevents duplicates after
+        # restart / catch-up replays.
+        existing = db.execute(
+            select(VideoJob)
+            .where(VideoJob.schedule_slot_key == slot_key)
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            logger.info(
+                "Destination %s slot %s already claimed, skipping",
+                destination.id,
+                slot_key,
+            )
+            continue
 
-    job = VideoJob(
-        source_url=video.url,
-        source_title=video.title,
-        title=None,
-        description=video.description,
-        privacy_status=pipeline.default_privacy,
-        status="pending",
-        pipeline_id=pipeline.id,
-        source_video_id=video.video_id,
-        destination_id=destination.id,
-        schedule_slot_key=slot_key,
-    )
-
-    db.add(job)
-
-    video.status = "scheduled"
-    video.scheduled_at = now
-
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        logger.info(
-            "Destination %s slot %s already claimed, skipping",
-            destination.id,
-            slot_key,
+        publication = Publication(
+            pipeline_id=pipeline.id,
+            douyin_video_id=video.id,
+            destination_id=destination.id,
+            platform=destination.platform,
+            status="scheduled",
+            scheduled_at=slot,
         )
-        return
+        db.add(publication)
+        try:
+            db.flush()  # assign publication.id for job link
+        except IntegrityError:
+            db.rollback()
+            logger.info(
+                "Destination %s publication already exists, skipping slot %s",
+                destination.id,
+                slot_key,
+            )
+            continue
 
-    logger.info(
-        "Scheduled video %s for destination %s at slot %s",
-        video.video_id,
-        destination.id,
-        next_slot,
+        job = VideoJob(
+            source_url=video.url,
+            source_title=video.title,
+            title=None,
+            description=video.description,
+            privacy_status=pipeline.default_privacy,
+            status="pending",
+            pipeline_id=pipeline.id,
+            source_video_id=video.video_id,
+            destination_id=destination.id,
+            publication_id=publication.id,
+            schedule_slot_key=slot_key,
+        )
+        db.add(job)
+
+        video.status = "scheduled"
+        video.scheduled_at = now
+
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.info(
+                "Destination %s slot %s already claimed, skipping",
+                destination.id,
+                slot_key,
+            )
+            continue
+
+        created_any = True
+        logger.info(
+            "Scheduled video %s for destination %s at slot %s",
+            video.video_id,
+            destination.id,
+            slot,
+        )
+        # Refresh day bounds in case catch-up spans midnight.
+        local_day_start_utc, _ = get_local_day_bounds(
+            destination.timezone, now
+        )
+
+    _mark_destination_cycle(
+        db, destination, now, None if created_any else REASON_WAITING_SLOT,
+        job_created=created_any,
     )
 
 
@@ -310,19 +571,27 @@ def schedule_for_pipeline(
 
 
 def run_scheduler_once() -> None:
-    with SessionLocal.begin() as db:
+    with SessionLocal() as db:
         destinations = db.execute(
             select(Destination)
             .where(Destination.enabled == True)  # noqa: E712
         ).scalars().all()
 
-        for destination in destinations:
+        # Detach ids first: schedule_for_destination commits per destination.
+        dest_ids = [d.id for d in destinations]
+
+        for dest_id in dest_ids:
             try:
-                schedule_for_destination(db, destination)
+                with SessionLocal() as ddb:
+                    destination = ddb.get(Destination, dest_id)
+                    if destination is None:
+                        continue
+                    # Reattach pipeline check inside schedule_for_destination.
+                    schedule_for_destination(ddb, destination)
             except Exception:
                 logger.exception(
                     "Failed to schedule destination %s",
-                    destination.id,
+                    dest_id,
                 )
 
 

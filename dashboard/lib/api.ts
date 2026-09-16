@@ -356,6 +356,42 @@ export async function getDestinationStatuses(
   );
 }
 
+export interface SchedulerStatusToday {
+  destination_id: string;
+  destination_name?: string | null;
+  platform?: string | null;
+  enabled: boolean;
+  connected: boolean;
+  published: number;
+  released?: number | null;
+  limit: number;
+  next_slot?: string | null;
+  last_skip_reason?: string | null;
+  last_check_at?: string | null;
+  last_job_created_at?: string | null;
+}
+
+export interface SchedulerStatus {
+  enabled: boolean;
+  pipeline_enabled?: boolean | null;
+  last_cycle_at?: string | null;
+  last_job_created_at?: string | null;
+  next_slots: string[];
+  inventory_available: number;
+  connected_destinations: number;
+  destinations_total?: number | null;
+  today: SchedulerStatusToday[];
+}
+
+/** Scheduler observability: why auto-publish did/did not run. */
+export async function getSchedulerStatus(
+  pipelineId: string,
+): Promise<SchedulerStatus> {
+  return apiFetch<SchedulerStatus>(
+    `/api/pipelines/${encodeURIComponent(pipelineId)}/scheduler-status`,
+  );
+}
+
 export async function getSource(id: string): Promise<DouyinSource> {
   return apiFetch<DouyinSource>(`/api/sources/${encodeURIComponent(id)}`);
 }

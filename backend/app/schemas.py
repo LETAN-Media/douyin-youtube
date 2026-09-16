@@ -297,6 +297,8 @@ class JobOut(BaseModel):
 
     destination_id: str | None
 
+    publication_id: str | None = None
+
     created_at: datetime
     updated_at: datetime
 
@@ -440,6 +442,10 @@ class DestinationOut(DestinationBase):
 
     id: str
     connected: bool
+    last_scheduler_check_at: datetime | None = None
+    last_cycle_at: datetime | None = None
+    last_job_created_at: datetime | None = None
+    last_skip_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 

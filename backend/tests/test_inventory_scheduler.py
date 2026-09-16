@@ -151,6 +151,19 @@ class TestScheduler(unittest.TestCase):
         return pipeline
 
     def _make_destination(self, pipeline, **kwargs):
+        import json as _json
+        kwargs.setdefault("connected", True)
+        kwargs.setdefault(
+            "credentials",
+            _json.dumps({
+                "token": "test-token",
+                "refresh_token": "test-refresh",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "test-client",
+                "client_secret": "test-secret",
+                "scopes": [],
+            }),
+        )
         destination = Destination(
             id=str(uuid4()),
             pipeline_id=pipeline.id,
@@ -269,12 +282,15 @@ class TestScheduler(unittest.TestCase):
             db.add(pipeline)
             db.flush()
 
+            import json as _json2
             destination = Destination(
                 id=str(uuid4()),
                 pipeline_id=pipeline.id,
                 platform="youtube",
                 name="YouTube",
                 enabled=True,
+                connected=True,
+                credentials=_json2.dumps({"token": "t", "refresh_token": "r", "token_uri": "https://oauth2.googleapis.com/token", "client_id": "c", "client_secret": "s", "scopes": []}),
                 daily_upload_limit=6,
                 timezone="UTC",
                 upload_slots=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
@@ -357,12 +373,15 @@ class TestScheduler(unittest.TestCase):
             db.add(pipeline)
             db.flush()
 
+            import json as _json2
             destination = Destination(
                 id=str(uuid4()),
                 pipeline_id=pipeline.id,
                 platform="youtube",
                 name="YouTube",
                 enabled=True,
+                connected=True,
+                credentials=_json2.dumps({"token": "t", "refresh_token": "r", "token_uri": "https://oauth2.googleapis.com/token", "client_id": "c", "client_secret": "s", "scopes": []}),
                 daily_upload_limit=6,
                 timezone="UTC",
                 upload_slots=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],

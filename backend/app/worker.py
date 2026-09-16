@@ -13,7 +13,7 @@ from app.douyin import (
     cleanup_job_files,
     download_video,
 )
-from app.models import DouyinVideo, Pipeline, VideoJob
+from app.models import DouyinVideo, Pipeline, Publication, VideoJob
 from app.youtube import upload_video
 
 
@@ -99,6 +99,73 @@ def validate_hashtags(
     return True
 
 
+def _find_linked_publication(db, job: VideoJob) -> Publication | None:
+    """Resolve Job -> Publication via publication_id (preferred).
+
+    Never guess by bare video_id when multiple destinations exist:
+    fallback always scopes by destination_id.
+    """
+    if getattr(job, "publication_id", None):
+        pub = db.get(Publication, job.publication_id)
+        if pub is not None:
+            return pub
+    if job.destination_id and job.source_video_id and job.pipeline_id:
+        video = db.execute(
+            select(DouyinVideo)
+            .where(DouyinVideo.pipeline_id == job.pipeline_id)
+            .where(DouyinVideo.video_id == job.source_video_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if video is not None:
+            pub = db.execute(
+                select(Publication)
+                .where(Publication.douyin_video_id == video.id)
+                .where(
+                    Publication.destination_id == job.destination_id
+                )
+                .order_by(Publication.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if pub is not None:
+                # Backfill link for legacy jobs.
+                try:
+                    job.publication_id = pub.id
+                except Exception:
+                    pass
+                return pub
+    return None
+
+
+def _set_publication_status(
+    db,
+    publication: Publication | None,
+    status: str,
+    error: str | None = None,
+    external_post_id: str | None = None,
+    external_url: str | None = None,
+) -> None:
+    if publication is None:
+        return
+    publication.status = status
+    if status in ("downloading", "ai_metadata", "uploading", "processing"):
+        if publication.started_at is None:
+            publication.started_at = utcnow()
+        try:
+            publication.attempts = int(publication.attempts or 0) + 1
+        except Exception:
+            pass
+    if error is not None:
+        publication.error = error[:5000] if len(error) > 5000 else error
+    elif status == "published":
+        publication.error = None
+    if external_post_id is not None:
+        publication.external_post_id = external_post_id
+    if external_url is not None:
+        publication.external_url = external_url
+    if status == "published":
+        publication.published_at = utcnow()
+
+
 def recover_incomplete_jobs() -> None:
     with SessionLocal.begin() as db:
         db.execute(
@@ -118,6 +185,29 @@ def recover_incomplete_jobs() -> None:
                 ),
             )
         )
+
+        # Publications stuck in processing states go back to queued so the
+        # scheduler/worker can continue after a Render restart.
+        try:
+            db.execute(
+                update(Publication)
+                .where(
+                    Publication.status.in_(
+                        [
+                            "downloading",
+                            "ai_metadata",
+                            "uploading",
+                            "processing",
+                        ]
+                    )
+                )
+                .values(
+                    status="queued",
+                    error="Recovered after worker restart",
+                )
+            )
+        except Exception:
+            logger.exception("Failed to recover publications")
 
         scheduled_videos = db.execute(
             select(DouyinVideo)
@@ -168,6 +258,13 @@ def claim_job() -> str | None:
         job.error = None
         job.attempts += 1
 
+        # Mirror state to Publication: scheduled/queued -> downloading.
+        try:
+            pub = _find_linked_publication(db, job)
+            _set_publication_status(db, pub, "downloading")
+        except Exception:
+            logger.exception("Failed to update publication on claim %s", job.id)
+
         return job.id
 
 
@@ -194,6 +291,12 @@ def mark_failed(
         job.status = "failed"
         job.progress = 0
         job.error = error_text
+
+        try:
+            pub = _find_linked_publication(db, job)
+            _set_publication_status(db, pub, "failed", error=error_text)
+        except Exception:
+            logger.exception("Failed to update publication on job fail %s", job_id)
 
 
 def process_job(
@@ -240,6 +343,12 @@ def process_job(
 
             job.status = "uploading"
             job.progress = 55
+
+            try:
+                pub = _find_linked_publication(db, job)
+                _set_publication_status(db, pub, "ai_metadata")
+            except Exception:
+                logger.exception("Failed to set publication ai_metadata %s", job_id)
             
         with SessionLocal.begin() as db:
             job = db.get(
@@ -406,6 +515,46 @@ def process_job(
                 job.title = title
                 job.description = description
 
+            try:
+                pub = _find_linked_publication(db, job)
+                _set_publication_status(db, pub, "uploading")
+            except Exception:
+                logger.exception("Failed to set publication uploading %s", job_id)
+
+            # Destination OAuth isolation: always upload with the job's own
+            # destination credentials, never pipeline/global fallback.
+            destination_id = job.destination_id
+            if not destination_id:
+                # Legacy jobs created before multi-destination: resolve only
+                # when the pipeline has exactly one connected YouTube
+                # destination; otherwise refuse to guess between channels.
+                from app.models import Destination as _Destination
+
+                candidates = db.execute(
+                    select(_Destination)
+                    .where(_Destination.pipeline_id == job.pipeline_id)
+                    .where(_Destination.platform == "youtube")
+                    .where(_Destination.enabled == True)  # noqa: E712
+                    .where(_Destination.connected == True)  # noqa: E712
+                ).scalars().all()
+                candidates = [
+                    c for c in candidates if c.credentials
+                ]
+                if len(candidates) == 1:
+                    destination_id = candidates[0].id
+                    try:
+                        job.destination_id = destination_id
+                        pub0 = _find_linked_publication(db, job)
+                        if pub0 is not None:
+                            job.publication_id = pub0.id
+                    except Exception:
+                        pass
+                else:
+                    raise RuntimeError(
+                        "VideoJob thiếu destination_id; "
+                        "từ chối upload để tránh sai credential đa kênh"
+                    )
+
             video_id = upload_video(
                 db=db,
                 file_path=(
@@ -417,6 +566,7 @@ def process_job(
                     job.privacy_status
                 ),
                 pipeline_id=job.pipeline_id,
+                destination_id=destination_id,
             )
 
         with SessionLocal.begin() as db:
@@ -440,6 +590,23 @@ def process_job(
             job.status = "published"
             job.progress = 100
             job.error = None
+
+            try:
+                pub = _find_linked_publication(db, job)
+                _set_publication_status(
+                    db,
+                    pub,
+                    "published",
+                    external_post_id=video_id,
+                    external_url=f"https://youtu.be/{video_id}",
+                )
+                if pub is not None:
+                    pub.title = job.title
+                    pub.description = job.description
+            except Exception:
+                logger.exception(
+                    "Failed to set publication published %s", job_id
+                )
 
             video = db.execute(
                 select(DouyinVideo)
