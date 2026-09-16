@@ -115,3 +115,24 @@ def test_scheduler_pick_video_guardrail(db_session=None):
     # v2 must be picked
     assert picked is not None
     assert picked.video_id == "222"
+
+
+def test_joybeat_authentic_prompt_and_hashtags():
+    from pathlib import Path
+    prompt_path = Path(__file__).resolve().parent.parent / "prompts" / "joybeat_dance.txt"
+    assert prompt_path.exists()
+    content = prompt_path.read_text(encoding="utf-8")
+    assert "POSITIVE, JOYFUL & RADIANT ENERGY" in content
+    assert "#streetdance" in content
+    assert "#dancetrend" in content
+
+    # Test hashtag validation with authentic JoyBeat tags
+    dest = Destination(
+        id="dest-joybeat-authentic",
+        name="JoyBeat Dance",
+        fixed_hashtags=["#streetdance", "#dancetrend", "#dance"],
+        adaptive_hashtags=["#viraldance", "#dancecover", "#dancer"],
+    )
+    valid_desc = "Positive energy for today! ☀️\n\n#streetdance #dancetrend #dance #viraldance #dancer"
+    assert validate_hashtags(valid_desc, destination=dest) is True
+
