@@ -9,6 +9,7 @@ from datetime import (
 from typing import Any
 
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     HTTPException,
@@ -40,8 +41,10 @@ from app.models import (
     VideoJob,
 )
 from app.schemas import (
+    ChannelAddSourceRequest,
     ChannelDetailResponse,
     ChannelItem,
+    ChannelUpdateRequest,
     DestinationCreate,
     DestinationOut,
     DestinationUpdate,
@@ -3394,6 +3397,20 @@ def manual_publish_endpoint(
         if pipeline is None:
             raise HTTPException(status_code=500, detail="Không tìm thấy pipeline phù hợp")
 
+        # Strict Cross-Workspace Validation (Requirement 15):
+        if payload.video_id:
+            existing_other = db.execute(
+                select(DouyinVideo)
+                .where(DouyinVideo.video_id == payload.video_id)
+                .where(DouyinVideo.pipeline_id != pipeline.id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if existing_other is not None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Cross-workspace mismatch: video {payload.video_id} belongs to pipeline {existing_other.pipeline_id}, not destination workspace {pipeline.id}",
+                )
+
         video_id_val = payload.video_id or str(uuid.uuid4())[:12]
         video = db.execute(
             select(DouyinVideo)
@@ -3909,6 +3926,47 @@ def get_channel_detail_endpoint(
         "upload_slots": pipeline.upload_slots if pipeline else [],
     }
 
+    inventory_videos = []
+    inventory_count = 0
+    if pipeline:
+        inventory_videos = db.execute(
+            select(DouyinVideo)
+            .where(DouyinVideo.pipeline_id == pipeline.id)
+            .order_by(DouyinVideo.created_at.desc())
+            .limit(100)
+        ).scalars().all()
+        inventory_count = db.execute(
+            select(func.count(DouyinVideo.id))
+            .where(DouyinVideo.pipeline_id == pipeline.id)
+        ).scalar() or 0
+
+    inventory_data = [
+        {
+            "id": v.id,
+            "video_id": v.video_id,
+            "title": v.title,
+            "description": v.description,
+            "thumbnail_url": v.thumbnail_url,
+            "url": v.url,
+            "status": v.status,
+            "is_backlog": v.is_backlog,
+            "douyin_created_at": v.douyin_created_at.isoformat() if v.douyin_created_at else None,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in inventory_videos
+    ]
+
+    failed_count = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == d.id)
+        .where(Publication.status == "failed")
+    ).scalar() or 0
+
+    from app.scheduler import get_next_upload_slot
+    slots = d.upload_slots or (pipeline.upload_slots if pipeline else []) or ["08:00", "12:00", "16:00"]
+    nxt = get_next_upload_slot(slots, d.timezone or "UTC", now_utc)
+    next_slot_str = nxt.isoformat() if nxt else None
+
     return ChannelDetailResponse(
         channel=channel_item,
         daily_upload_limit=d.daily_upload_limit,
@@ -3922,5 +3980,255 @@ def get_channel_detail_endpoint(
         sources=sources_data,
         queue=queue_list,
         published=published_list,
+        inventory=inventory_data,
+        inventory_count=inventory_count,
+        failed_count=failed_count,
+        next_slot=next_slot_str,
     )
+
+
+@app.patch(
+    "/api/channels/{destination_id}",
+    response_model=ChannelDetailResponse,
+    dependencies=[Depends(require_admin)],
+)
+def update_channel_endpoint(
+    destination_id: str,
+    payload: ChannelUpdateRequest,
+    db: Session = Depends(get_db),
+) -> ChannelDetailResponse:
+    d = db.get(Destination, destination_id)
+    if d is None or d.platform != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel này")
+
+    pipeline = db.get(Pipeline, d.pipeline_id) if d.pipeline_id else None
+
+    if payload.name is not None:
+        d.name = payload.name
+        if pipeline:
+            pipeline.name = payload.name
+    if payload.daily_upload_limit is not None:
+        d.daily_upload_limit = payload.daily_upload_limit
+        if pipeline:
+            pipeline.daily_upload_limit = payload.daily_upload_limit
+    if payload.metadata_profile is not None:
+        d.metadata_profile = payload.metadata_profile
+        if pipeline:
+            pipeline.niche = payload.metadata_profile
+    if payload.metadata_language is not None:
+        d.metadata_language = payload.metadata_language
+        if pipeline:
+            pipeline.language = payload.metadata_language
+    if payload.fixed_hashtags is not None:
+        d.fixed_hashtags = payload.fixed_hashtags
+        if pipeline:
+            pipeline.fixed_hashtags = payload.fixed_hashtags
+    if payload.adaptive_hashtags is not None:
+        d.adaptive_hashtags = payload.adaptive_hashtags
+        if pipeline:
+            pipeline.adaptive_hashtags = payload.adaptive_hashtags
+    if payload.prompt_override is not None:
+        d.prompt_override = payload.prompt_override
+        if pipeline:
+            pipeline.prompt_profile = payload.prompt_override
+    if payload.timezone is not None:
+        d.timezone = payload.timezone
+        if pipeline:
+            pipeline.timezone = payload.timezone
+    if payload.upload_slots is not None:
+        d.upload_slots = payload.upload_slots
+        if pipeline:
+            pipeline.upload_slots = payload.upload_slots
+    if payload.enabled is not None:
+        d.enabled = payload.enabled
+    if payload.default_privacy is not None and pipeline:
+        pipeline.default_privacy = payload.default_privacy
+
+    db.commit()
+    return get_channel_detail_endpoint(destination_id=destination_id, db=db)
+
+
+@app.post(
+    "/api/channels/{destination_id}/sources",
+    status_code=201,
+    dependencies=[Depends(require_admin)],
+)
+def add_channel_source_endpoint(
+    destination_id: str,
+    payload: ChannelAddSourceRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    d = db.get(Destination, destination_id)
+    if d is None or d.platform != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel này")
+    if not d.pipeline_id:
+        raise HTTPException(status_code=400, detail="Channel workspace lacks linked pipeline")
+
+    name = payload.name.strip()
+    url = payload.url.strip()
+    if not name or not url:
+        raise HTTPException(status_code=400, detail="Vui lòng nhập tên và link tác giả Douyin")
+
+    from app.douyin import parse_profile_url
+    parsed = parse_profile_url(url)
+    sec_uid = parsed.get("sec_uid")
+    clean_url = parsed.get("clean_url") or url
+
+    source = DouyinSource(
+        pipeline_id=d.pipeline_id,
+        destination_id=d.id,
+        name=name,
+        profile_url=clean_url,
+        original_profile_url=url,
+        douyin_sec_uid=sec_uid,
+        enabled=True,
+        inventory_sync_status="idle",
+    )
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+
+    try:
+        from app.main import trigger_inventory_sync_job
+        background_tasks.add_task(trigger_inventory_sync_job, source.id)
+    except Exception:
+        pass
+
+    return {
+        "id": source.id,
+        "name": source.name,
+        "profile_url": source.profile_url,
+        "status": source.inventory_sync_status,
+        "video_count": 0,
+    }
+
+
+@app.delete(
+    "/api/channels/{destination_id}/sources/{source_id}",
+    dependencies=[Depends(require_admin)],
+)
+def delete_channel_source_endpoint(
+    destination_id: str,
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+
+    # Strict isolation check (Requirement 15):
+    if s.pipeline_id != d.pipeline_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cross-workspace mismatch: source does not belong to this channel workspace",
+        )
+
+    db.delete(s)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post(
+    "/api/channels/{destination_id}/sources/{source_id}/sync",
+    dependencies=[Depends(require_admin)],
+)
+def sync_channel_source_endpoint(
+    destination_id: str,
+    source_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+
+    # Strict isolation check (Requirement 15):
+    if s.pipeline_id != d.pipeline_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cross-workspace mismatch: source does not belong to this channel workspace",
+        )
+
+    from app.main import trigger_inventory_sync_job
+    background_tasks.add_task(trigger_inventory_sync_job, s.id)
+    return {"ok": True, "source_id": s.id}
+
+
+@app.get(
+    "/api/channels/{destination_id}/inventory",
+    dependencies=[Depends(require_admin)],
+)
+def get_channel_inventory_endpoint(
+    destination_id: str,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+
+    if not d.pipeline_id:
+        return {"items": [], "total": 0}
+
+    query = select(DouyinVideo).where(DouyinVideo.pipeline_id == d.pipeline_id)
+    total_query = select(func.count(DouyinVideo.id)).where(DouyinVideo.pipeline_id == d.pipeline_id)
+
+    if status and status != "all":
+        query = query.where(DouyinVideo.status == status)
+        total_query = total_query.where(DouyinVideo.status == status)
+
+    total = db.execute(total_query).scalar() or 0
+    videos = db.execute(
+        query.order_by(DouyinVideo.created_at.desc()).offset(offset).limit(limit)
+    ).scalars().all()
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": v.id,
+                "video_id": v.video_id,
+                "title": v.title,
+                "description": v.description,
+                "thumbnail_url": v.thumbnail_url,
+                "url": v.url,
+                "status": v.status,
+                "is_backlog": v.is_backlog,
+                "douyin_created_at": v.douyin_created_at.isoformat() if v.douyin_created_at else None,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+            }
+            for v in videos
+        ],
+    }
+
+
+@app.post(
+    "/api/channels/{destination_id}/publish",
+    response_model=ManualPublishResponse,
+    status_code=202,
+    dependencies=[Depends(require_admin)],
+)
+def channel_workspace_publish_endpoint(
+    destination_id: str,
+    payload: ManualPublishRequest,
+    db: Session = Depends(get_db),
+) -> ManualPublishResponse:
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+
+    # Force destination to this channel workspace only
+    payload.destination_ids = [d.id]
+    return manual_publish_endpoint(payload=payload, db=db)
 

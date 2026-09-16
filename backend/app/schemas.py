@@ -629,7 +629,30 @@ class ChannelDetailResponse(BaseModel):
     prompt_override: str | None = None
     timezone: str = "UTC"
     pipeline: dict[str, Any]
-    sources: list[dict[str, Any]]
-    queue: list[ManualPublicationItem]
-    published: list[ManualPublicationItem]
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    queue: list[ManualPublicationItem] = Field(default_factory=list)
+    published: list[ManualPublicationItem] = Field(default_factory=list)
+    inventory: list[dict[str, Any]] = Field(default_factory=list)
+    inventory_count: int = 0
+    failed_count: int = 0
+    next_slot: str | None = None
+
+
+class ChannelUpdateRequest(BaseModel):
+    name: str | None = None
+    daily_upload_limit: int | None = None
+    metadata_profile: str | None = None
+    metadata_language: str | None = None
+    fixed_hashtags: list[str] | None = None
+    adaptive_hashtags: list[str] | None = None
+    prompt_override: str | None = None
+    timezone: str | None = None
+    upload_slots: list[str] | None = None
+    enabled: bool | None = None
+    default_privacy: str | None = None
+
+
+class ChannelAddSourceRequest(BaseModel):
+    name: str
+    url: str
 

@@ -3,6 +3,7 @@ import { Shell } from "@/components/Shell";
 import { Badge, Card, EmptyState, PageHeader, ProgressBar, StatCard } from "@/components/ui";
 import {
   IconAlert,
+  IconChannels,
   IconChevronRight,
   IconClock,
   IconDestinations,
@@ -58,11 +59,11 @@ export default async function DashboardPage() {
         actions={
           <div className="flex items-center gap-2">
             <Link
-              href="/manual"
+              href="/channels"
               className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/70 px-4 py-2 text-sm font-bold text-indigo-700 shadow-sm transition hover:bg-indigo-100"
             >
-              <IconUpload size={16} />
-              Manual Publish
+              <IconChannels size={16} />
+              Channel Workspaces
             </Link>
             <Link
               href="/pipelines/new"
@@ -74,22 +75,6 @@ export default async function DashboardPage() {
           </div>
         }
       />
-
-      <div className="mt-4 flex items-center gap-2">
-        <div className="inline-flex rounded-xl bg-slate-100 p-1">
-          <span className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3.5 py-1.5 text-xs font-extrabold text-indigo-700 shadow-sm">
-            <span className="h-2 w-2 rounded-full bg-indigo-600" />
-            Auto Mode
-          </span>
-          <Link
-            href="/manual"
-            className="inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold text-slate-600 transition hover:text-slate-900"
-          >
-            <IconUpload size={14} />
-            Manual Publish
-          </Link>
-        </div>
-      </div>
 
       {loadError ? (
         <Card className="mt-5 border-rose-200 p-5">

@@ -199,13 +199,18 @@ export function ChannelsClient({ initialChannels, pipelines }: ChannelsClientPro
                           ) : (
                             <Badge tone="slate" dot>Not Connected</Badge>
                           )}
+                          {ch.enabled ? (
+                            <Badge tone="green">Auto ON</Badge>
+                          ) : (
+                            <Badge tone="amber">Auto OFF</Badge>
+                          )}
                         </div>
                       </div>
                     </div>
 
                     {/* Pipeline Info */}
                     <div className="mt-4 rounded-xl bg-slate-50 p-3 text-xs">
-                      <p className="text-slate-400 font-medium">Pipeline:</p>
+                      <p className="text-slate-400 font-medium">Workspace Pipeline:</p>
                       <p className="mt-0.5 font-bold text-slate-800 truncate">
                         {ch.pipeline_name}
                       </p>
@@ -235,7 +240,7 @@ export function ChannelsClient({ initialChannels, pipelines }: ChannelsClientPro
                         href={`/channels/${ch.destination_id}`}
                         className="inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-xl bg-indigo-50 px-4 py-2 text-xs font-bold text-indigo-700 transition hover:bg-indigo-100"
                       >
-                        Open Channel →
+                        Open Workspace →
                       </Link>
                     ) : (
                       <div className="flex w-full items-center gap-2">

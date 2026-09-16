@@ -289,6 +289,7 @@ export interface ManualResolveResult {
   source_url: string;
   video_id?: string | null;
   author?: string | null;
+  author_name?: string | null;
   caption?: string | null;
   thumbnail?: string | null;
   duration?: number | null;
@@ -303,6 +304,8 @@ export interface ManualMetadataItem {
   description: string;
   hashtags: string[];
   final_description: string;
+  content_match?: boolean | null;
+  content_match_reason?: string | null;
 }
 
 export interface ManualMetadataResult {
@@ -381,18 +384,35 @@ export interface ChannelPipelineInfo {
   upload_slots: string[];
 }
 
+export interface ChannelInventoryItem {
+  id: string;
+  video_id: string;
+  title: string;
+  description: string;
+  thumbnail_url?: string | null;
+  url: string;
+  status: string;
+  is_backlog: boolean;
+  douyin_created_at?: string | null;
+  created_at?: string | null;
+}
+
 export interface ChannelDetail {
   channel: ChannelItem;
   daily_upload_limit: number;
   metadata_profile?: string | null;
   metadata_language?: string | null;
-  fixed_hashtags?: string | null;
-  adaptive_hashtags?: boolean | null;
+  fixed_hashtags?: string[] | string | null;
+  adaptive_hashtags?: string[] | boolean | null;
   prompt_override?: string | null;
   timezone: string;
   pipeline: ChannelPipelineInfo;
   sources: ChannelSourceItem[];
   queue: ManualPublicationItem[];
   published: ManualPublicationItem[];
+  inventory?: ChannelInventoryItem[];
+  inventory_count?: number;
+  failed_count?: number;
+  next_slot?: string | null;
 }
 
