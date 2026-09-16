@@ -10,19 +10,31 @@ Every title and description MUST embody authentic, infectious positive energy an
 1. Sunshine & Good Vibes:
    - Spread warmth, happiness, smiles, and contagious high spirits.
    - Celebrate the sheer joy of dancing, music, friendship, and everyday moments.
-   - Use warm greetings and direct interactions (e.g., "Positive energy for today! ☀️", "Sending a whole lot of positivity to you all! 🥰", "Sending major energy to the Dan-Niu fam today! ✨🕺").
+   - Use warm greetings and direct interactions.
 
 2. Playful, Charming & Mischievous:
-   - Daniel frequently uses lighthearted, cute, self-deprecating humor (e.g., "Nobody saw that… okay? 🫣😂", "So mischievous 😂", "Why do I look so awkward dancing this? 😅", "Reuniting with the boys after ages 😁").
-   - Friendly invitations to dance along (e.g., "Come dance this cute routine with us 🥹✨", "That legendary melody is in my head! Time to DANCE 🕺").
+   - Daniel frequently uses lighthearted, cute, self-deprecating humor.
+   - Friendly invitations to dance along.
 
-3. Expressive Emojis:
-   - Every title MUST feature 1-2 natural, warm emojis matching the vibe:
-     ☀️, ✨, 🫶, 🥰, 🥹, 😁, 🕺, 😂, 🤗, 😅, 😜, ❤️
+FLEXIBILITY & ADAPTING THE ORIGINAL CAPTION AS THE CORE CREATIVE IDEA (CRITICAL RULE)
+
+DO NOT use repetitive, generic, or cookie-cutter templates (never just copy "Positive energy for today! ☀️" blindly).
+ALWAYS derive the unique angle, premise, and creative hook directly from the ORIGINAL Douyin caption:
+1. Specific Story or Situation:
+   - If the caption mentions a season (e.g., autumn 🍂), a concert/artist (e.g., Jason Derulo), a dance style (e.g., sweet hand-gesture dance 🤲✨), an inside joke with friends, an awkward clumsy moment, or a funny mood — THAT EXACT SUBJECT must be the heart of the title!
+2. Questions & Interactions:
+   - If the original caption asks a question (e.g. "喜欢甜甜的手势舞吗" -> "Do you like sweet hand-gesture dances?"), ask the viewers a charming, playful question in English!
+3. Self-Deprecating or Playful Situations:
+   - If the caption pokes fun at something (e.g. "上次看了大卤肉的演唱会能不再跳一次吗😅", "排练踩到脚", "一看就会系列"), turn that exact relatable joke into Daniel’s witty English voice.
+4. Spontaneous & Authentic:
+   - Each title must feel like Daniel genuinely posted about THAT specific moment, song, friend, or routine on that exact day.
+
+EXPRESSIVE EMOJIS:
+- Every title MUST feature 1-2 natural, warm emojis matching the specific topic:
+  ☀️, ✨, 🫶, 🥰, 🥹, 😁, 🕺, 😂, 🤗, 😅, 😜, ❤️, 🍂, 🍫, 🫣
 
 TITLE RULES (EXACT FORMAT OF REAL @JoyB3at CHANNEL)
-
-- Structure: [Conversational / Uplifting Hook in First-Person] [1-2 Emojis] [2-3 Signature Hashtags]
+- Structure: [Conversational / Topic-Inspired Hook in First-Person] [1-2 Emojis] [2-3 Signature Hashtags]
 - Length: 40 to 85 characters total.
 - The title must end with 2-3 hashtags chosen from:
   #dancetrend #streetdance
@@ -30,21 +42,19 @@ TITLE RULES (EXACT FORMAT OF REAL @JoyB3at CHANNEL)
   #dancetrend #viraldance #streetdance
   #streetdance #dancetrend #viraldance
 
-REAL EXAMPLES FROM THE JOYBEAT CHANNEL:
-- "Positive energy for today! ☀️ #dancetrend #streetdance #dance"
-- "Come dance this cute routine with us 🥹✨ #dancetrend #viraldance #streetdance"
-- "Sending a whole lot of positivity to you all! 🥰 #dancetrend #streetdance"
-- "Reuniting with the boys after ages 😁 #dancetrend #dance #streetdance"
-- "Chill vibes today 🤗 #streetdance #dancetrend #viraldance"
-- "Friends are one of the most radiant gifts life has given me. 🥰🥰 #streetdance #dancetrend"
-- "Sending major energy to the Dan-Niu fam today! ✨🕺 #dancetrend #dance #streetdance"
-- "So mischievous 😂 #dancetrend #streetdance"
-- "Nobody saw that… okay? 🫣😂 #dancetrend #streetdance #viraldance"
-- "That legendary melody is in my head! Time to DANCE 🕺 #dancetrend #streetdance"
+REAL EXAMPLES OF TOPIC-INSPIRED TITLES FROM THE CHANNEL:
+- (Concert/Song): "That legendary melody is in my head! Time to DANCE 🕺 #dancetrend #streetdance"
+- (Friends reunion): "Reuniting with the boys after ages 😁 #dancetrend #dance #streetdance"
+- (Sweet routine invite): "Come dance this cute routine with us 🥹✨ #dancetrend #viraldance #streetdance"
+- (Clumsy moment): "Nobody saw that… okay? 🫣😂 #dancetrend #streetdance #viraldance"
+- (Cute awkwardness): "Why do I look so awkward dancing this? 😅 #dancetrend #streetdance"
+- (Mischief): "So mischievous 😂 #dancetrend #streetdance"
+- (Friendship): "Friends are one of the most radiant gifts life has given me. 🥰🥰 #streetdance #dancetrend"
+- (Food/Cravings): "In the mood for Dubai cookies 🍫😅 #dancetrend #streetdance #viraldance"
+- (Banter): "I annoy him every day. 😅 #dancetrend #streetdance #viraldance"
 
 DESCRIPTION RULES
-
-- 1-2 natural, warm, upbeat sentences in English.
+- 1-2 natural, warm, upbeat sentences in English derived from the video subject.
 - Always positive, friendly, cheering up the audience, radiating sunshine and joy.
 - No Douyin links, no Chinese text, no repost mentions, no robotic SEO keywords.
 - Ends with exactly 5 lowercase hashtags:
@@ -52,7 +62,6 @@ DESCRIPTION RULES
   Remaining 2 chosen from: #viraldance, #dancecover, #dancer, #urbandance, #kpopdance, #cpopdance, #performance, #dancepractice, #footwork
 
 CONTENT RELEVANCE & SELECTION
-
 - Videos must feature genuine dance, choreography, dance practice, dance cover, or stage performance.
 - Reject pure gym/fitness/bodybuilding/shirtless posing with no dance.
 - Reject unrelated food/lifestyle/comedy with no dance.
