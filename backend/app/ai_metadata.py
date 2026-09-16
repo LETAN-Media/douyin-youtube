@@ -301,10 +301,40 @@ def generate_metadata_structured(
             "then add video-specific topic hashtags if needed."
         )
 
+    # Pre-evaluate content match if channel has strict criteria
+    niche_val = (
+        (destination.metadata_profile if destination else None)
+        or (pipeline.niche if pipeline else "")
+    )
+    prompt_val = (
+        (destination.prompt_override if destination else None)
+        or ""
+    )
+    is_match, match_reason = evaluate_content_match(
+        context_text=context_text,
+        niche=niche_val,
+        prompt_override=prompt_val,
+    )
+    if not is_match:
+        logger.warning("AI flagged CONTENT_MISMATCH: %s", match_reason)
+        return {
+            "title": "",
+            "description": "",
+            "hashtags": [],
+            "final_description": "",
+            "content_match": False,
+            "content_match_reason": match_reason,
+        }
+
     user_content = (
         "ORIGINAL DOUYIN CONTEXT/SHARE TEXT:\n\n"
         + context_text
         + profile_section
+        + (
+            f"\n\nCONTENT RELEVANCE VERIFIED: {match_reason}. Proceed to generate YouTube title, description, and hashtags in valid JSON format."
+            if (niche_val or prompt_val) and is_match
+            else ""
+        )
     )
 
     payload = {
