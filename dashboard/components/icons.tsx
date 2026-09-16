@@ -60,6 +60,13 @@ export const IconDestinations = (p: P) => (
   </Svg>
 );
 
+export const IconChannels = (p: P) => (
+  <Svg {...p}>
+    <rect width="20" height="15" x="2" y="7" rx="2" />
+    <polyline points="17 2 12 7 7 2" />
+  </Svg>
+);
+
 export const IconPublications = (p: P) => (
   <Svg {...p}>
     <rect x="3" y="4" width="18" height="17" rx="2" />

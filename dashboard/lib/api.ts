@@ -3,6 +3,8 @@
 
 import { getServerEnv } from "./env";
 import type {
+  ChannelDetail,
+  ChannelItem,
   DashboardPipelineRow,
   Destination,
   DestinationStatus,
@@ -597,3 +599,18 @@ export async function retryManualPublication(
     { method: "POST" },
   );
 }
+
+// ---------- Channels ----------
+
+export async function listChannels(): Promise<ChannelItem[]> {
+  return apiFetch<ChannelItem[]>("/api/channels");
+}
+
+export async function getChannelDetail(
+  destinationId: string,
+): Promise<ChannelDetail> {
+  return apiFetch<ChannelDetail>(
+    `/api/channels/${encodeURIComponent(destinationId)}`,
+  );
+}
+

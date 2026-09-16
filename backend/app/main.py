@@ -40,6 +40,8 @@ from app.models import (
     VideoJob,
 )
 from app.schemas import (
+    ChannelDetailResponse,
+    ChannelItem,
     DestinationCreate,
     DestinationOut,
     DestinationUpdate,
@@ -82,6 +84,7 @@ from app.scheduler import scheduler_loop
 from app.douyin_url import parse_douyin_profile_url
 from app.ai_metadata import generate_metadata_structured
 from app.douyin import call_rcuts_parser
+import json
 import re
 import subprocess
 import urllib.request
@@ -3658,3 +3661,262 @@ def retry_manual_publication_endpoint(
         created_at=p.created_at,
         published_at=p.published_at,
     )
+
+
+@app.get(
+    "/api/channels",
+    response_model=list[ChannelItem],
+    dependencies=[Depends(require_admin)],
+)
+def list_channels_endpoint(
+    db: Session = Depends(get_db),
+) -> list[ChannelItem]:
+    dests = (
+        db.execute(
+            select(Destination)
+            .where(Destination.platform == "youtube")
+            .order_by(Destination.name.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    if not dests:
+        return []
+
+    dest_ids = [d.id for d in dests]
+    pipeline_ids = list({d.pipeline_id for d in dests if d.pipeline_id})
+
+    pipelines_map = {}
+    if pipeline_ids:
+        pipes = (
+            db.execute(select(Pipeline).where(Pipeline.id.in_(pipeline_ids)))
+            .scalars()
+            .all()
+        )
+        pipelines_map = {p.id: p for p in pipes}
+
+    now_utc = datetime.now(timezone.utc)
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    agg_rows = db.execute(
+        select(
+            Publication.destination_id,
+            func.count(Publication.id)
+            .filter(
+                Publication.status == "published",
+                Publication.published_at >= today_start,
+            )
+            .label("published_today"),
+            func.count(Publication.id)
+            .filter(
+                Publication.status.in_(
+                    [
+                        "queued",
+                        "pending",
+                        "downloading",
+                        "ai_metadata",
+                        "uploading",
+                    ]
+                )
+            )
+            .label("queue_count"),
+            func.max(Publication.published_at)
+            .filter(Publication.status == "published")
+            .label("last_published_at"),
+        )
+        .where(Publication.destination_id.in_(dest_ids))
+        .group_by(Publication.destination_id)
+    ).all()
+
+    stats_map = {
+        row.destination_id: {
+            "published_today": row.published_today or 0,
+            "queue_count": row.queue_count or 0,
+            "last_published_at": row.last_published_at,
+        }
+        for row in agg_rows
+    }
+
+    result: list[ChannelItem] = []
+    for d in dests:
+        pipe = pipelines_map.get(d.pipeline_id)
+        stat = stats_map.get(
+            d.id,
+            {
+                "published_today": 0,
+                "queue_count": 0,
+                "last_published_at": None,
+            },
+        )
+
+        avatar_url = None
+        if d.credentials:
+            try:
+                c = json.loads(d.credentials)
+                avatar_url = c.get("avatar_url")
+            except Exception:
+                pass
+
+        channel_title = d.external_account_name or d.name
+        channel_id = d.external_account_id
+
+        result.append(
+            ChannelItem(
+                id=d.id,
+                destination_id=d.id,
+                pipeline_id=d.pipeline_id,
+                pipeline_name=pipe.name if pipe else d.pipeline_id,
+                channel_id=channel_id,
+                channel_title=channel_title,
+                avatar_url=avatar_url,
+                connected=d.connected,
+                enabled=d.enabled,
+                published_today=stat["published_today"],
+                queue_count=stat["queue_count"],
+                last_published_at=stat["last_published_at"],
+            )
+        )
+
+    return result
+
+
+@app.get(
+    "/api/channels/{destination_id}",
+    response_model=ChannelDetailResponse,
+    dependencies=[Depends(require_admin)],
+)
+def get_channel_detail_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+) -> ChannelDetailResponse:
+    d = db.get(Destination, destination_id)
+    if d is None or d.platform != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel này")
+
+    pipeline = db.get(Pipeline, d.pipeline_id) if d.pipeline_id else None
+
+    sources_data = []
+    if pipeline:
+        from app.models import DouyinSource
+        sources = db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == pipeline.id)
+            .order_by(DouyinSource.created_at.desc())
+        ).scalars().all()
+        for s in sources:
+            sources_data.append({
+                "id": s.id,
+                "name": s.name,
+                "profile_url": s.profile_url or s.original_profile_url,
+                "status": s.inventory_sync_status,
+                "video_count": s.inventory_count,
+                "last_synced_at": s.last_checked_at.isoformat() if s.last_checked_at else None,
+            })
+
+    avatar_url = None
+    if d.credentials:
+        try:
+            c = json.loads(d.credentials)
+            avatar_url = c.get("avatar_url")
+        except Exception:
+            pass
+
+    now_utc = datetime.now(timezone.utc)
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    published_today = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == d.id)
+        .where(Publication.status == "published")
+        .where(Publication.published_at >= today_start)
+    ).scalar() or 0
+
+    queue_count = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == d.id)
+        .where(Publication.status.in_(["queued", "pending", "downloading", "ai_metadata", "uploading"]))
+    ).scalar() or 0
+
+    last_published_at = db.execute(
+        select(func.max(Publication.published_at))
+        .where(Publication.destination_id == d.id)
+        .where(Publication.status == "published")
+    ).scalar()
+
+    channel_item = ChannelItem(
+        id=d.id,
+        destination_id=d.id,
+        pipeline_id=d.pipeline_id,
+        pipeline_name=pipeline.name if pipeline else d.pipeline_id,
+        channel_id=d.external_account_id,
+        channel_title=d.external_account_name or d.name,
+        avatar_url=avatar_url,
+        connected=d.connected,
+        enabled=d.enabled,
+        published_today=published_today,
+        queue_count=queue_count,
+        last_published_at=last_published_at,
+    )
+
+    pubs = (
+        db.execute(
+            select(Publication, DouyinVideo, VideoJob)
+            .outerjoin(DouyinVideo, Publication.douyin_video_id == DouyinVideo.id)
+            .outerjoin(VideoJob, VideoJob.publication_id == Publication.id)
+            .where(Publication.destination_id == d.id)
+            .order_by(Publication.created_at.desc())
+            .limit(100)
+        )
+        .all()
+    )
+
+    queue_list: list[ManualPublicationItem] = []
+    published_list: list[ManualPublicationItem] = []
+
+    for pub, video, job in pubs:
+        item = ManualPublicationItem(
+            id=pub.id,
+            destination_id=pub.destination_id,
+            destination_name=d.name,
+            platform=pub.platform,
+            status=pub.status,
+            progress=job.progress if job else (100 if pub.status == "published" else 0),
+            video_title=pub.title or (video.title if video else None),
+            source_url=video.url if video else None,
+            thumbnail=video.thumbnail_url if video else None,
+            external_url=pub.external_url,
+            error=pub.error or (job.error if job else None),
+            created_at=pub.created_at,
+            published_at=pub.published_at,
+        )
+        if pub.status == "published":
+            published_list.append(item)
+        else:
+            queue_list.append(item)
+
+    pipeline_info = {
+        "id": pipeline.id if pipeline else "",
+        "name": pipeline.name if pipeline else "",
+        "slug": pipeline.slug if pipeline else "",
+        "enabled": pipeline.enabled if pipeline else False,
+        "default_privacy": pipeline.default_privacy if pipeline else "public",
+        "daily_upload_limit": pipeline.daily_upload_limit if pipeline else 6,
+        "upload_slots": pipeline.upload_slots if pipeline else [],
+    }
+
+    return ChannelDetailResponse(
+        channel=channel_item,
+        daily_upload_limit=d.daily_upload_limit,
+        metadata_profile=d.metadata_profile,
+        metadata_language=d.metadata_language,
+        fixed_hashtags=d.fixed_hashtags,
+        adaptive_hashtags=d.adaptive_hashtags,
+        prompt_override=d.prompt_override,
+        timezone=d.timezone or "UTC",
+        pipeline=pipeline_info,
+        sources=sources_data,
+        queue=queue_list,
+        published=published_list,
+    )
+

@@ -346,3 +346,53 @@ export interface ManualPublishResponse {
   accepted: boolean;
   publications: ManualPublicationItem[];
 }
+
+export interface ChannelItem {
+  id: string;
+  destination_id: string;
+  pipeline_id: string;
+  pipeline_name: string;
+  channel_id?: string | null;
+  channel_title: string;
+  avatar_url?: string | null;
+  connected: boolean;
+  enabled: boolean;
+  published_today: number;
+  queue_count: number;
+  last_published_at?: string | null;
+}
+
+export interface ChannelSourceItem {
+  id: string;
+  name: string;
+  profile_url?: string | null;
+  status: string;
+  video_count: number;
+  last_synced_at?: string | null;
+}
+
+export interface ChannelPipelineInfo {
+  id: string;
+  name: string;
+  slug: string;
+  enabled: boolean;
+  default_privacy: string;
+  daily_upload_limit: number;
+  upload_slots: string[];
+}
+
+export interface ChannelDetail {
+  channel: ChannelItem;
+  daily_upload_limit: number;
+  metadata_profile?: string | null;
+  metadata_language?: string | null;
+  fixed_hashtags?: string | null;
+  adaptive_hashtags?: boolean | null;
+  prompt_override?: string | null;
+  timezone: string;
+  pipeline: ChannelPipelineInfo;
+  sources: ChannelSourceItem[];
+  queue: ManualPublicationItem[];
+  published: ManualPublicationItem[];
+}
+

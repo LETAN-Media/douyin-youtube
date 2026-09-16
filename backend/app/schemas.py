@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 import re
 
@@ -600,3 +600,34 @@ class SourceSyncResponse(BaseModel):
     status: str
     new: int = 0
     updated: int = 0
+
+
+class ChannelItem(BaseModel):
+    id: str
+    destination_id: str
+    pipeline_id: str
+    pipeline_name: str
+    channel_id: str | None = None
+    channel_title: str
+    avatar_url: str | None = None
+    connected: bool
+    enabled: bool
+    published_today: int = 0
+    queue_count: int = 0
+    last_published_at: datetime | None = None
+
+
+class ChannelDetailResponse(BaseModel):
+    channel: ChannelItem
+    daily_upload_limit: int = 6
+    metadata_profile: str | None = None
+    metadata_language: str | None = None
+    fixed_hashtags: str | None = None
+    adaptive_hashtags: bool | None = True
+    prompt_override: str | None = None
+    timezone: str = "UTC"
+    pipeline: dict[str, Any]
+    sources: list[dict[str, Any]]
+    queue: list[ManualPublicationItem]
+    published: list[ManualPublicationItem]
+

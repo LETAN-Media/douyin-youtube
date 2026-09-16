@@ -308,6 +308,15 @@ def complete_oauth(
     channel = channels[0]
     channel_id = channel["id"]
     channel_title = channel["snippet"]["title"]
+    thumbnails = channel["snippet"].get("thumbnails", {})
+    avatar_url = (
+        thumbnails.get("default", {}).get("url")
+        or thumbnails.get("medium", {}).get("url")
+        or thumbnails.get("high", {}).get("url")
+    )
+    if avatar_url:
+        data["avatar_url"] = avatar_url
+    token_json = json.dumps(data)
 
     if resolved_destination_id:
         if destination is None:
