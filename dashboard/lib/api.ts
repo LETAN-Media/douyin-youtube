@@ -10,6 +10,11 @@ import type {
   FlowState,
   InventoryList,
   Job,
+  ManualMetadataResult,
+  ManualPublicationItem,
+  ManualPublishPayload,
+  ManualPublishResponse,
+  ManualResolveResult,
   Pipeline,
   PipelineStats,
   Publication,
@@ -530,4 +535,65 @@ export async function validateDouyinSession(): Promise<{
 
 export async function disconnectDouyinSession(): Promise<{ removed: number }> {
   return apiFetch("/api/douyin/session/disconnect", { method: "POST" });
+}
+
+// ---------- Manual Publishing ----------
+
+export async function listAllDestinations(): Promise<Destination[]> {
+  return apiFetch<Destination[]>("/api/destinations");
+}
+
+export async function resolveManualUrl(
+  input: string,
+): Promise<ManualResolveResult> {
+  return apiFetch<ManualResolveResult>("/api/manual/resolve", {
+    method: "POST",
+    body: JSON.stringify({ input }),
+  });
+}
+
+export async function generateManualMetadata(payload: {
+  source_url: string;
+  caption?: string | null;
+  destination_ids?: string[];
+  metadata_mode?: "same" | "separate";
+}): Promise<ManualMetadataResult> {
+  return apiFetch<ManualMetadataResult>("/api/manual/metadata", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function publishManual(
+  payload: ManualPublishPayload,
+): Promise<ManualPublishResponse> {
+  return apiFetch<ManualPublishResponse>("/api/manual/publish", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getManualPublications(
+  limit = 50,
+): Promise<ManualPublicationItem[]> {
+  return apiFetch<ManualPublicationItem[]>(
+    `/api/manual/publications?limit=${encodeURIComponent(limit)}`,
+  );
+}
+
+export async function getManualPublication(
+  id: string,
+): Promise<ManualPublicationItem> {
+  return apiFetch<ManualPublicationItem>(
+    `/api/manual/publications/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function retryManualPublication(
+  id: string,
+): Promise<ManualPublicationItem> {
+  return apiFetch<ManualPublicationItem>(
+    `/api/manual/publications/${encodeURIComponent(id)}/retry`,
+    { method: "POST" },
+  );
 }

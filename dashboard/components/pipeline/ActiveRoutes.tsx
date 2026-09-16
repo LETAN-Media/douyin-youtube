@@ -71,6 +71,11 @@ export function ActiveRoutes({
                 {selected.video_title}
               </p>
               <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+                {selected.mode === "manual" ? (
+                  <span className="inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-amber-700 ring-1 ring-inset ring-amber-300">
+                    MANUAL
+                  </span>
+                ) : null}
                 <span className="font-bold text-slate-700">{selected.source_name}</span>
                 <span aria-hidden>→</span>
                 <StageChip stage={selected.failed ? "failed" : selected.stage} />
@@ -153,6 +158,11 @@ export function ActiveRoutes({
                 >
                   <span className={`h-2 w-2 shrink-0 rounded-full ${r.failed ? "bg-rose-500" : "bg-gradient-to-br from-violet-500 to-cyan-400"}`} />
                   <span className="min-w-0 flex-1 truncate text-[13px]">
+                    {r.mode === "manual" ? (
+                      <span className="mr-1.5 inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-amber-700 ring-1 ring-inset ring-amber-300">
+                        MANUAL
+                      </span>
+                    ) : null}
                     <span className="font-bold text-slate-800">{r.source_name}</span>
                     <span className="mx-1.5 text-slate-300">→</span>
                     <span className="font-medium text-slate-500">{r.destination_name}</span>

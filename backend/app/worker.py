@@ -420,6 +420,18 @@ def process_job(
                         job.pipeline_id,
                     )
 
+            destination = None
+            if job.destination_id:
+                from app.models import Destination as _Dest
+                with SessionLocal() as dest_db:
+                    destination = dest_db.get(
+                        _Dest,
+                        job.destination_id,
+                    )
+
+            pub = _find_linked_publication(db, job)
+            is_manual = pub is not None and getattr(pub, "publication_mode", "auto") == "manual"
+
             if needs_ai:
                 if description:
                     source_context = (
@@ -435,6 +447,7 @@ def process_job(
                 ai_result = generate_youtube_metadata(
                     source_context,
                     pipeline=pipeline,
+                    destination=destination,
                 )
                 if not ai_result:
                     raise RuntimeError(
@@ -473,6 +486,7 @@ def process_job(
                 ai_result = generate_youtube_metadata(
                     source_context,
                     pipeline=pipeline,
+                    destination=destination,
                 )
                 if not ai_result:
                     raise RuntimeError(
@@ -490,7 +504,9 @@ def process_job(
                 job.title = title
                 job.description = description
 
-            if not validate_hashtags(description, pipeline=pipeline):
+            # For manual mode, allow user-edited hashtags without strict pipeline whitelist check
+            target_pipeline_for_tags = None if is_manual else pipeline
+            if not validate_hashtags(description, pipeline=target_pipeline_for_tags):
                 logger.warning(
                     "First-pass hashtag validation failed for job %s, retrying AI once",
                     job_id,
@@ -498,6 +514,7 @@ def process_job(
                 ai_result = generate_youtube_metadata(
                     source_context,
                     pipeline=pipeline,
+                    destination=destination,
                 )
                 if not ai_result:
                     raise RuntimeError(
@@ -505,7 +522,7 @@ def process_job(
                     )
 
                 retry_title, retry_desc = ai_result
-                if not validate_hashtags(retry_desc, pipeline=pipeline):
+                if not validate_hashtags(retry_desc, pipeline=target_pipeline_for_tags):
                     raise RuntimeError(
                         "AI hashtags validation failed after retry; upload blocked"
                     )
@@ -516,7 +533,6 @@ def process_job(
                 job.description = description
 
             try:
-                pub = _find_linked_publication(db, job)
                 _set_publication_status(db, pub, "uploading")
             except Exception:
                 logger.exception("Failed to set publication uploading %s", job_id)

@@ -276,6 +276,31 @@ def run_migrations() -> None:
                 )
             )
 
+        if not column_exists(connection, "douyin_videos", "thumbnail_url"):
+            logger.info("Adding thumbnail_url to douyin_videos")
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_videos "
+                    "ADD COLUMN IF NOT EXISTS thumbnail_url TEXT"
+                )
+            )
+
+        try:
+            connection.execute(
+                text("ALTER TABLE douyin_videos ALTER COLUMN source_id DROP NOT NULL")
+            )
+        except Exception:
+            pass
+
+        if not column_exists(connection, "publications", "publication_mode"):
+            logger.info("Adding publication_mode to publications")
+            connection.execute(
+                text(
+                    "ALTER TABLE publications "
+                    "ADD COLUMN IF NOT EXISTS publication_mode VARCHAR(20) DEFAULT 'auto'"
+                )
+            )
+
         pipeline_columns = [
             ("daily_upload_limit", "INTEGER DEFAULT 6"),
             ("upload_slots", "JSON"),

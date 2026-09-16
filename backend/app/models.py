@@ -307,10 +307,10 @@ class DouyinVideo(Base):
         default=lambda: str(uuid.uuid4()),
     )
 
-    source_id: Mapped[str] = mapped_column(
+    source_id: Mapped[str | None] = mapped_column(
         String(36),
-        ForeignKey("douyin_sources.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("douyin_sources.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     pipeline_id: Mapped[str] = mapped_column(
@@ -339,6 +339,11 @@ class DouyinVideo(Base):
     url: Mapped[str] = mapped_column(
         Text,
         nullable=False,
+    )
+
+    thumbnail_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
     )
 
     douyin_created_at: Mapped[datetime | None] = mapped_column(
@@ -402,7 +407,7 @@ class DouyinVideo(Base):
         back_populates="videos",
     )
 
-    source: Mapped["DouyinSource"] = relationship(
+    source: Mapped["DouyinSource | None"] = relationship(
         back_populates="videos",
     )
 
@@ -610,6 +615,13 @@ class Publication(Base):
     platform: Mapped[str] = mapped_column(
         String(30),
         nullable=False,
+    )
+
+    publication_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="auto",
+        server_default="auto",
     )
 
     status: Mapped[str] = mapped_column(

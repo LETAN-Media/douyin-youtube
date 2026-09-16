@@ -11,6 +11,7 @@ import {
   IconPlus,
   IconPublications,
   IconSources,
+  IconUpload,
 } from "@/components/icons";
 import { getDashboard } from "@/lib/api";
 import { formatTime } from "@/lib/format";
@@ -55,15 +56,40 @@ export default async function DashboardPage() {
         title="Dashboard"
         description="Theo dõi toàn bộ pipelines Douyin → đa nền tảng tại một nơi."
         actions={
-          <Link
-            href="/pipelines/new"
-            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_12px_-4px_rgba(79,70,229,0.6)] transition hover:bg-indigo-500"
-          >
-            <IconPlus size={16} />
-            New Pipeline
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/manual"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/70 px-4 py-2 text-sm font-bold text-indigo-700 shadow-sm transition hover:bg-indigo-100"
+            >
+              <IconUpload size={16} />
+              Manual Publish
+            </Link>
+            <Link
+              href="/pipelines/new"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_12px_-4px_rgba(79,70,229,0.6)] transition hover:bg-indigo-500"
+            >
+              <IconPlus size={16} />
+              New Pipeline
+            </Link>
+          </div>
         }
       />
+
+      <div className="mt-4 flex items-center gap-2">
+        <div className="inline-flex rounded-xl bg-slate-100 p-1">
+          <span className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3.5 py-1.5 text-xs font-extrabold text-indigo-700 shadow-sm">
+            <span className="h-2 w-2 rounded-full bg-indigo-600" />
+            Auto Mode
+          </span>
+          <Link
+            href="/manual"
+            className="inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold text-slate-600 transition hover:text-slate-900"
+          >
+            <IconUpload size={14} />
+            Manual Publish
+          </Link>
+        </div>
+      </div>
 
       {loadError ? (
         <Card className="mt-5 border-rose-200 p-5">

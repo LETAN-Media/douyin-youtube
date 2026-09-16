@@ -458,6 +458,7 @@ class PublicationOut(BaseModel):
     douyin_video_id: str
     destination_id: str
     platform: str
+    publication_mode: str = "auto"
     status: str
     scheduled_at: datetime | None
     started_at: datetime | None
@@ -476,12 +477,13 @@ class DouyinVideoOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    source_id: str
+    source_id: str | None = None
     pipeline_id: str
     video_id: str
     title: str
     description: str
     url: str
+    thumbnail_url: str | None = None
     douyin_created_at: datetime | None
     status: str
     is_backlog: bool
@@ -492,6 +494,85 @@ class DouyinVideoOut(BaseModel):
     youtube_url: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ManualResolveRequest(BaseModel):
+    input: str = Field(min_length=1)
+
+
+class ManualResolveResponse(BaseModel):
+    type: Literal["video", "profile"]
+    source_url: str
+    video_id: str | None = None
+    author: str | None = None
+    caption: str | None = None
+    thumbnail: str | None = None
+    duration: int | None = None
+    status: str = "Video detected"
+    message: str | None = None
+    profile_url: str | None = None
+    sec_uid: str | None = None
+
+
+class ManualMetadataItem(BaseModel):
+    title: str
+    description: str
+    hashtags: list[str] = Field(default_factory=list)
+    final_description: str
+
+
+class ManualMetadataRequest(BaseModel):
+    source_url: str
+    caption: str | None = None
+    destination_ids: list[str] = Field(default_factory=list)
+    metadata_mode: Literal["same", "separate"] = "same"
+
+
+class ManualMetadataResponse(BaseModel):
+    metadata_mode: str = "same"
+    same: ManualMetadataItem | None = None
+    by_destination: dict[str, ManualMetadataItem] = Field(default_factory=dict)
+
+
+class ManualDestinationMetadataInput(BaseModel):
+    title: str
+    description: str
+
+
+class ManualPublishRequest(BaseModel):
+    source_url: str
+    source_title: str | None = None
+    video_id: str | None = None
+    thumbnail: str | None = None
+    duration: int | None = None
+    destination_ids: list[str] = Field(min_length=1)
+    metadata_mode: Literal["same", "separate"] = "same"
+    title: str | None = None
+    description: str | None = None
+    destinations_metadata: dict[str, ManualDestinationMetadataInput] = Field(default_factory=dict)
+    privacy_status: Literal["public", "unlisted", "private"] = "public"
+    force_duplicate: bool = False
+
+
+class ManualPublicationItem(BaseModel):
+    id: str
+    destination_id: str
+    destination_name: str
+    platform: str
+    status: str
+    progress: int = 0
+    video_title: str | None = None
+    source_url: str | None = None
+    thumbnail: str | None = None
+    external_url: str | None = None
+    error: str | None = None
+    created_at: datetime
+    published_at: datetime | None = None
+
+
+class ManualPublishResponse(BaseModel):
+    accepted: bool = True
+    publications: list[ManualPublicationItem]
 
 
 class DouyinVideoWithPublications(DouyinVideoOut):

@@ -120,6 +120,7 @@ export interface Publication {
   douyin_video_id: string;
   destination_id: string;
   platform: string;
+  publication_mode?: string | null;
   status: string;
   scheduled_at?: string | null;
   started_at?: string | null;
@@ -222,6 +223,7 @@ export interface FlowRoute {
   scheduled_at?: string | null;
   error?: string | null;
   failed: boolean;
+  mode?: "auto" | "manual" | string | null;
 }
 
 export interface FlowState {
@@ -280,4 +282,67 @@ export interface DouyinSessionStatus {
   last_validation?: string | null;
   valid: boolean;
   error?: string | null;
+}
+
+export interface ManualResolveResult {
+  type: "video" | "profile";
+  source_url: string;
+  video_id?: string | null;
+  author?: string | null;
+  caption?: string | null;
+  thumbnail?: string | null;
+  duration?: number | null;
+  status: string;
+  message?: string | null;
+  profile_url?: string | null;
+  sec_uid?: string | null;
+}
+
+export interface ManualMetadataItem {
+  title: string;
+  description: string;
+  hashtags: string[];
+  final_description: string;
+}
+
+export interface ManualMetadataResult {
+  metadata_mode: "same" | "separate";
+  same?: ManualMetadataItem | null;
+  by_destination: Record<string, ManualMetadataItem>;
+}
+
+export interface ManualPublishPayload {
+  source_url: string;
+  source_title?: string | null;
+  video_id?: string | null;
+  thumbnail?: string | null;
+  duration?: number | null;
+  destination_ids: string[];
+  metadata_mode: "same" | "separate";
+  title?: string | null;
+  description?: string | null;
+  destinations_metadata?: Record<string, { title: string; description: string }>;
+  privacy_status: "public" | "unlisted" | "private";
+  force_duplicate?: boolean;
+}
+
+export interface ManualPublicationItem {
+  id: string;
+  destination_id: string;
+  destination_name: string;
+  platform: string;
+  status: string;
+  progress: number;
+  video_title?: string | null;
+  source_url?: string | null;
+  thumbnail?: string | null;
+  external_url?: string | null;
+  error?: string | null;
+  created_at: string;
+  published_at?: string | null;
+}
+
+export interface ManualPublishResponse {
+  accepted: boolean;
+  publications: ManualPublicationItem[];
 }

@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
-import { IconDashboard, IconLogout, IconMenu, IconPlus, IconX } from "./icons";
+import { IconDashboard, IconLogout, IconMenu, IconPlus, IconUpload, IconX } from "./icons";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: <IconDashboard size={17} /> },
+  { href: "/manual", label: "Manual Publish", icon: <IconUpload size={17} /> },
   { href: "/pipelines/new", label: "New Pipeline", icon: <IconPlus size={17} /> },
 ];
 

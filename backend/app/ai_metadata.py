@@ -3,10 +3,12 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import httpx
 
-from app.models import Pipeline
+from app.config import settings
+from app.models import Destination, Pipeline
 
 
 logger = logging.getLogger("ai-metadata")
@@ -83,49 +85,91 @@ def clean_hashtag(value: str) -> str:
     return tag[:60]
 
 
-def generate_youtube_metadata(
+def generate_metadata_structured(
     context_text: str,
     pipeline: Pipeline | None = None,
-) -> tuple[str, str] | None:
+    destination: Destination | None = None,
+) -> dict[str, Any] | None:
+    """Generate structured YouTube metadata using AI.
+
+    Returns dict with keys:
+    - title: str
+    - description: str (clean caption text without trailing hashtags)
+    - hashtags: list[str] (exactly 5 clean hashtags)
+    - final_description: str (description + \\n\\n + hashtags)
     """
-    Generate YouTube metadata using AI.
-    Returns (title, final_description_with_hashtags)
-    """
-    if not os.getenv("AI_ENABLED", "false").lower() in ("true", "1", "yes"):
+    ai_enabled = (
+        bool(settings.ai_enabled)
+        or os.getenv("AI_ENABLED", "false").lower() in ("true", "1", "yes")
+    )
+    if not ai_enabled:
         logger.warning("AI_ENABLED is false")
         return None
 
-    api_key = os.getenv(
-        "AI_API_KEY",
-        "",
+    api_key = (
+        settings.ai_api_key
+        or os.getenv("AI_API_KEY", "")
     ).strip()
 
     if not api_key:
-        logger.warning(
-            "AI_API_KEY missing"
-        )
+        logger.warning("AI_API_KEY missing")
         return None
 
-    base_url = os.getenv(
-        "AI_BASE_URL",
-        "https://api.toolnet.tech/v1",
+    base_url = (
+        settings.ai_base_url
+        or os.getenv("AI_BASE_URL", "https://api.toolnet.tech/v1")
     ).rstrip("/")
 
-    model = os.getenv(
-        "AI_MODEL",
-        "tn/claude-3.5-sonnet-20241022",
+    model = (
+        settings.ai_model
+        or os.getenv("AI_MODEL", "youtube-douyin")
     )
 
     prompt = PROMPT_FILE.read_text(
         encoding="utf-8",
     )
 
-    pipeline_profile = ""
-    if pipeline is not None:
+    if destination is not None and destination.prompt_override and destination.prompt_override.strip():
+        prompt = destination.prompt_override.strip()
+
+    profile_section = ""
+    if destination is not None:
+        fixed_hashtags = (
+            destination.fixed_hashtags
+            if destination.fixed_hashtags is not None
+            else (pipeline.fixed_hashtags if pipeline else [])
+        ) or []
+        adaptive_hashtags = (
+            destination.adaptive_hashtags
+            if destination.adaptive_hashtags is not None
+            else (pipeline.adaptive_hashtags if pipeline else [])
+        ) or []
+        niche = (
+            destination.metadata_profile
+            or (pipeline.niche if pipeline else "")
+        )
+        language = (
+            destination.metadata_language
+            or (pipeline.language if pipeline else "en")
+        )
+
+        profile_section = (
+            "\n\nDESTINATION AI PROFILE:\n"
+            f"Channel: {destination.name} ({destination.platform})\n"
+            f"Niche: {niche or ''}\n"
+            f"Language: {language or 'en'}\n"
+            f"Fixed hashtags: {', '.join(fixed_hashtags)}\n"
+            f"Adaptive hashtags: {', '.join(adaptive_hashtags)}\n"
+            "\n"
+            "Use this channel profile to tailor title, description, and hashtags.\n"
+            "You must include fixed hashtags if provided.\n"
+            "Total hashtags must be EXACTLY 5 hashtags."
+        )
+    elif pipeline is not None:
         fixed_hashtags = pipeline.fixed_hashtags or []
         adaptive_hashtags = pipeline.adaptive_hashtags or []
 
-        pipeline_profile = (
+        profile_section = (
             "\n\nPIPELINE PROFILE:\n"
             f"Name: {pipeline.name}\n"
             f"Niche: {pipeline.niche or ''}\n"
@@ -142,7 +186,7 @@ def generate_youtube_metadata(
     user_content = (
         "ORIGINAL DOUYIN CONTEXT/SHARE TEXT:\n\n"
         + context_text
-        + pipeline_profile
+        + profile_section
     )
 
     payload = {
@@ -185,8 +229,7 @@ def generate_youtube_metadata(
         raw_text = response.text
         if raw_text.endswith("data: [DONE]\n\n") or "\n" in raw_text:
             raw_text = raw_text.split("\n")[0]
-            
-        import json
+
         body = json.loads(raw_text)
 
         content = (
@@ -194,9 +237,7 @@ def generate_youtube_metadata(
             ["message"]["content"]
         )
 
-        data = extract_json(
-            content
-        )
+        data = extract_json(content)
 
         title = str(
             data.get("title")
@@ -225,7 +266,7 @@ def generate_youtube_metadata(
         ):
             raw_tags = []
 
-        hashtags = []
+        hashtags: list[str] = []
 
         for item in raw_tags:
             tag = clean_hashtag(
@@ -243,9 +284,22 @@ def generate_youtube_metadata(
             if len(hashtags) == 5:
                 break
 
-        hashtag_text = " ".join(
-            hashtags
-        )
+        # If fewer than 5 hashtags, fallback to fixed or generic tags
+        if len(hashtags) < 5:
+            fallback_candidates = []
+            if destination and destination.fixed_hashtags:
+                fallback_candidates.extend(destination.fixed_hashtags)
+            elif pipeline and pipeline.fixed_hashtags:
+                fallback_candidates.extend(pipeline.fixed_hashtags)
+            fallback_candidates.extend(["#shorts", "#trending", "#viral", "#video"])
+            for cand in fallback_candidates:
+                cleaned = clean_hashtag(str(cand))
+                if cleaned and cleaned not in hashtags:
+                    hashtags.append(cleaned)
+                    if len(hashtags) == 5:
+                        break
+
+        hashtag_text = " ".join(hashtags)
 
         final_description = (
             description
@@ -259,13 +313,34 @@ def generate_youtube_metadata(
             hashtag_text,
         )
 
-        return (
-            title,
-            final_description,
-        )
+        return {
+            "title": title,
+            "description": description,
+            "hashtags": hashtags,
+            "final_description": final_description,
+        }
 
     except Exception:
         logger.exception(
             "AI metadata generation failed"
         )
         return None
+
+
+def generate_youtube_metadata(
+    context_text: str,
+    pipeline: Pipeline | None = None,
+    destination: Destination | None = None,
+) -> tuple[str, str] | None:
+    """Generate YouTube metadata using AI.
+
+    Returns (title, final_description_with_hashtags)
+    """
+    res = generate_metadata_structured(
+        context_text,
+        pipeline=pipeline,
+        destination=destination,
+    )
+    if not res:
+        return None
+    return (res["title"], res["final_description"])

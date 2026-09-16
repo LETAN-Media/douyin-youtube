@@ -51,6 +51,14 @@ from app.schemas import (
     InventoryListResponse,
     JobCreate,
     JobOut,
+    ManualMetadataItem,
+    ManualMetadataRequest,
+    ManualMetadataResponse,
+    ManualPublicationItem,
+    ManualPublishRequest,
+    ManualPublishResponse,
+    ManualResolveRequest,
+    ManualResolveResponse,
     PipelineCreate,
     PipelineOut,
     PipelineUpdate,
@@ -72,6 +80,11 @@ from app.youtube import (
 from app.monitor import monitor_loop
 from app.scheduler import scheduler_loop
 from app.douyin_url import parse_douyin_profile_url
+from app.ai_metadata import generate_metadata_structured
+from app.douyin import call_rcuts_parser
+import re
+import subprocess
+import urllib.request
 
 
 logging.basicConfig(
@@ -1210,6 +1223,27 @@ def delete_source(
 
 
 @app.get(
+    "/api/destinations",
+    response_model=list[DestinationOut],
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def list_all_destinations(
+    db: Session = Depends(
+        get_db
+    ),
+) -> list[Destination]:
+    return list(
+        db.execute(
+            select(Destination).order_by(Destination.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+@app.get(
     "/api/pipelines/{pipeline_id}/destinations",
     response_model=list[DestinationOut],
     dependencies=[
@@ -1751,6 +1785,7 @@ def pipeline_flow_state(
             if failed
             else None,
             "failed": failed,
+            "mode": str(getattr(pub, "publication_mode", "auto") or "auto"),
         }
 
     for pub, video in active_pub_rows:
@@ -1796,6 +1831,7 @@ def pipeline_flow_state(
             "scheduled_at": None,
             "error": job.error,
             "failed": False,
+            "mode": "auto",
         })
 
     # Sort: failed first, then by stage order, then oldest started.
@@ -3067,3 +3103,558 @@ def pipeline_scheduler_status(
         "destinations_total": len(destinations),
         "today": today_rows,
     }
+
+
+def resolve_douyin_input(raw_input: str) -> dict[str, Any]:
+    """Resolve Douyin input (URL or full share text).
+
+    Returns video info or profile detection response.
+    """
+    clean_text = raw_input.strip()
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Vui lòng nhập link hoặc nội dung chia sẻ Douyin")
+
+    # Extract URL from share text
+    url_match = re.search(r"https?://[^\s<>'\"\)\]]+", clean_text)
+    if not url_match:
+        url_match = re.search(r"(?:v\.douyin\.com|[a-zA-Z0-9-]+\.douyin\.com)/[^\s<>'\"\)\]]+", clean_text)
+        if url_match:
+            source_url = "https://" + url_match.group(0)
+        else:
+            raise HTTPException(status_code=400, detail="Không tìm thấy link Douyin hợp lệ trong nội dung")
+    else:
+        source_url = url_match.group(0)
+
+    # 1. Direct profile check
+    prof = parse_douyin_profile_url(source_url)
+    if prof is not None:
+        return {
+            "type": "profile",
+            "source_url": source_url,
+            "message": "This is a Douyin profile, not a single video.",
+            "profile_url": prof.canonical,
+            "sec_uid": prof.sec_uid,
+            "status": "Profile detected",
+        }
+
+    # 2. Follow redirect with mobile UA
+    final_url = source_url
+    try:
+        req = urllib.request.Request(
+            source_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 "
+                    "Mobile/15E148 Safari/604.1"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            final_url = resp.geturl()
+    except Exception as exc:
+        logger.warning("Failed to follow redirect for %s: %s", source_url, exc)
+
+    # 3. Check redirected URL for profile
+    prof_redirect = parse_douyin_profile_url(final_url)
+    if prof_redirect is not None or "/user/" in final_url or "/share/user/" in final_url:
+        sec_uid = prof_redirect.sec_uid if prof_redirect else None
+        if not sec_uid:
+            sm = re.search(r"/user/([A-Za-z0-9_-]+)", final_url) or re.search(r"/share/user/([A-Za-z0-9_-]+)", final_url)
+            sec_uid = sm.group(1) if sm else None
+        canonical = prof_redirect.canonical if prof_redirect else f"https://www.douyin.com/user/{sec_uid or ''}"
+        return {
+            "type": "profile",
+            "source_url": source_url,
+            "message": "This is a Douyin profile, not a single video.",
+            "profile_url": canonical,
+            "sec_uid": sec_uid,
+            "status": "Profile detected",
+        }
+
+    # 4. Extract video ID
+    vid_match = re.search(r"/(?:video|note)/(\d+)", final_url)
+    video_id = vid_match.group(1) if vid_match else None
+    if not video_id:
+        im = re.search(r"item_ids?=(\d+)", final_url)
+        video_id = im.group(1) if im else None
+
+    # 5. Extract author from share text if available
+    author_match = (
+        re.search(r"看看【([^】]+)的作品】", clean_text)
+        or re.search(r"【([^】]+)的作品】", clean_text)
+    )
+    author = author_match.group(1).strip() if author_match else None
+
+    # 6. Call Rcuts parser (primary first, fallback second)
+    caption = None
+    thumbnail = None
+    video_url = None
+    primary_api = settings.rcuts_primary_api_url or settings.rcuts_api_url
+    fallback_api = settings.rcuts_fallback_api_url or settings.rcuts_api_url
+
+    for api_url in [primary_api, fallback_api]:
+        if not api_url:
+            continue
+        try:
+            data = call_rcuts_parser(api_url, source_url, share_text=clean_text)
+            if data and isinstance(data, dict):
+                caption = data.get("video_name") or data.get("title") or data.get("desc")
+                thumbnail = data.get("cover") or data.get("sound_cover")
+                video_url = data.get("video_url")
+                if not author:
+                    author = data.get("nickname") or data.get("author")
+                if caption or thumbnail or video_url:
+                    break
+        except Exception as exc:
+            logger.warning("Rcuts parser %s failed for %s: %s", api_url, source_url, exc)
+
+    # 7. Fallback caption from share text if Rcuts returned empty
+    if not caption:
+        cleaned_caption = re.sub(r"https?://[^\s]+", "", clean_text)
+        cleaned_caption = cleaned_caption.replace("复制打开抖音", "")
+        cleaned_caption = re.sub(r"看看【.*?的作品】", "", cleaned_caption).strip()
+        if cleaned_caption:
+            caption = cleaned_caption
+
+    # 8. Extract duration via quick ffprobe if video_url available
+    duration = None
+    if video_url:
+        try:
+            cmd = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_url,
+            ]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            dur_text = p.stdout.strip()
+            if dur_text:
+                duration = int(round(float(dur_text)))
+        except Exception:
+            pass
+
+    return {
+        "type": "video",
+        "source_url": source_url,
+        "video_id": video_id,
+        "author": author or "Douyin Creator",
+        "caption": caption or "",
+        "thumbnail": thumbnail,
+        "duration": duration,
+        "status": "Video detected",
+    }
+
+
+@app.post(
+    "/api/manual/resolve",
+    response_model=ManualResolveResponse,
+    dependencies=[Depends(require_admin)],
+)
+def manual_resolve_endpoint(
+    payload: ManualResolveRequest,
+) -> ManualResolveResponse:
+    res = resolve_douyin_input(payload.input)
+    return ManualResolveResponse(**res)
+
+
+@app.post(
+    "/api/manual/metadata",
+    response_model=ManualMetadataResponse,
+    dependencies=[Depends(require_admin)],
+)
+def manual_metadata_endpoint(
+    payload: ManualMetadataRequest,
+    db: Session = Depends(get_db),
+) -> ManualMetadataResponse:
+    destinations: list[Destination] = []
+    if payload.destination_ids:
+        for did in payload.destination_ids:
+            d = db.get(Destination, did)
+            if d is not None:
+                destinations.append(d)
+
+    context_text = (payload.caption or "").strip() or payload.source_url
+
+    if payload.metadata_mode == "separate" and len(destinations) > 1:
+        by_destination: dict[str, ManualMetadataItem] = {}
+        for dest in destinations:
+            pipeline = db.get(Pipeline, dest.pipeline_id) if dest.pipeline_id else None
+            gen = generate_metadata_structured(
+                context_text=context_text,
+                pipeline=pipeline,
+                destination=dest,
+            )
+            if gen:
+                by_destination[dest.id] = ManualMetadataItem(
+                    title=gen["title"],
+                    description=gen["description"],
+                    hashtags=gen["hashtags"],
+                    final_description=gen["final_description"],
+                )
+        return ManualMetadataResponse(
+            metadata_mode="separate",
+            by_destination=by_destination,
+        )
+
+    # Mode: same (generate once using first destination or default pipeline)
+    first_dest = destinations[0] if destinations else None
+    pipeline = db.get(Pipeline, first_dest.pipeline_id) if (first_dest and first_dest.pipeline_id) else None
+    if pipeline is None:
+        pipeline = db.execute(select(Pipeline).order_by(Pipeline.created_at.asc()).limit(1)).scalar_one_or_none()
+
+    gen = generate_metadata_structured(
+        context_text=context_text,
+        pipeline=pipeline,
+        destination=first_dest,
+    )
+    same_item = None
+    if gen:
+        same_item = ManualMetadataItem(
+            title=gen["title"],
+            description=gen["description"],
+            hashtags=gen["hashtags"],
+            final_description=gen["final_description"],
+        )
+
+    return ManualMetadataResponse(
+        metadata_mode="same",
+        same=same_item,
+    )
+
+
+@app.post(
+    "/api/manual/publish",
+    response_model=ManualPublishResponse,
+    status_code=202,
+    dependencies=[Depends(require_admin)],
+)
+def manual_publish_endpoint(
+    payload: ManualPublishRequest,
+    db: Session = Depends(get_db),
+) -> ManualPublishResponse:
+    if not payload.destination_ids:
+        raise HTTPException(status_code=400, detail="Vui lòng chọn ít nhất một destination")
+
+    destinations: list[Destination] = []
+    for did in payload.destination_ids:
+        dest = db.get(Destination, did)
+        if dest is None:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy destination id={did}")
+        if not dest.enabled:
+            raise HTTPException(status_code=409, detail=f"Destination '{dest.name}' đang bị tạm dừng (paused)")
+        if dest.platform == "facebook":
+            raise HTTPException(status_code=400, detail=f"Destination '{dest.name}' (Facebook): publishing adapter chưa được cấu hình")
+        if dest.platform == "youtube":
+            if not dest.connected or not dest.credentials:
+                raise HTTPException(status_code=400, detail=f"Destination '{dest.name}' (YouTube) chưa kết nối OAuth")
+        destinations.append(dest)
+
+    # Duplicate protection check (Requirement 16)
+    if not payload.force_duplicate and payload.video_id:
+        for dest in destinations:
+            existing = db.execute(
+                select(Publication)
+                .join(DouyinVideo, Publication.douyin_video_id == DouyinVideo.id)
+                .where(Publication.destination_id == dest.id)
+                .where(Publication.status == "published")
+                .where(
+                    (DouyinVideo.video_id == payload.video_id)
+                    | (DouyinVideo.url == payload.source_url)
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "DUPLICATE_VIDEO",
+                        "message": f"This video was already published to {dest.name}.",
+                        "destination_id": dest.id,
+                        "destination_name": dest.name,
+                        "external_url": existing.external_url,
+                        "published_at": existing.published_at.isoformat() if existing.published_at else None,
+                    },
+                )
+
+    created_publications: list[ManualPublicationItem] = []
+    now = _utcnow()
+
+    for dest in destinations:
+        pipeline = db.get(Pipeline, dest.pipeline_id) if dest.pipeline_id else None
+        if pipeline is None:
+            pipeline = db.execute(select(Pipeline).order_by(Pipeline.created_at.asc()).limit(1)).scalar_one_or_none()
+        if pipeline is None:
+            raise HTTPException(status_code=500, detail="Không tìm thấy pipeline phù hợp")
+
+        video_id_val = payload.video_id or str(uuid.uuid4())[:12]
+        video = db.execute(
+            select(DouyinVideo)
+            .where(DouyinVideo.pipeline_id == pipeline.id)
+            .where(DouyinVideo.video_id == video_id_val)
+            .limit(1)
+        ).scalar_one_or_none()
+
+        dest_meta = payload.destinations_metadata.get(dest.id) if payload.metadata_mode == "separate" else None
+        title = (dest_meta.title if dest_meta else payload.title) or payload.source_title or ""
+        description = (dest_meta.description if dest_meta else payload.description) or ""
+
+        if video is None:
+            video = DouyinVideo(
+                pipeline_id=pipeline.id,
+                source_id=None,
+                video_id=video_id_val,
+                title=title or payload.source_title or "",
+                description=description or "",
+                url=payload.source_url,
+                thumbnail_url=payload.thumbnail,
+                status="inventory",
+            )
+            db.add(video)
+            db.flush()
+        else:
+            if payload.thumbnail and not video.thumbnail_url:
+                video.thumbnail_url = payload.thumbnail
+                db.flush()
+
+        # Find or create Publication
+        pub = db.execute(
+            select(Publication)
+            .where(Publication.douyin_video_id == video.id)
+            .where(Publication.destination_id == dest.id)
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if pub is None:
+            pub = Publication(
+                pipeline_id=pipeline.id,
+                douyin_video_id=video.id,
+                destination_id=dest.id,
+                platform=dest.platform,
+                publication_mode="manual",
+                status="queued",
+                scheduled_at=now,
+                title=title,
+                description=description,
+            )
+            db.add(pub)
+            db.flush()
+        else:
+            pub.publication_mode = "manual"
+            pub.status = "queued"
+            pub.error = None
+            pub.attempts = 0
+            pub.scheduled_at = now
+            pub.title = title
+            pub.description = description
+            db.flush()
+
+        privacy = payload.privacy_status or pipeline.default_privacy
+
+        job = VideoJob(
+            source_url=payload.source_url,
+            source_title=payload.source_title or video.title,
+            title=title,
+            description=description,
+            privacy_status=privacy,
+            status="pending",
+            pipeline_id=pipeline.id,
+            destination_id=dest.id,
+            publication_id=pub.id,
+            source_video_id=video.video_id,
+        )
+        db.add(job)
+        db.flush()
+
+        created_publications.append(
+            ManualPublicationItem(
+                id=pub.id,
+                destination_id=dest.id,
+                destination_name=dest.name,
+                platform=dest.platform,
+                status="queued",
+                progress=0,
+                video_title=title or video.title,
+                source_url=payload.source_url,
+                thumbnail=video.thumbnail_url or payload.thumbnail,
+                external_url=pub.external_url,
+                error=None,
+                created_at=pub.created_at,
+                published_at=pub.published_at,
+            )
+        )
+
+    db.commit()
+
+    return ManualPublishResponse(
+        accepted=True,
+        publications=created_publications,
+    )
+
+
+@app.get(
+    "/api/manual/publications",
+    response_model=list[ManualPublicationItem],
+    dependencies=[Depends(require_admin)],
+)
+def list_manual_publications_endpoint(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> list[ManualPublicationItem]:
+    pubs = list(
+        db.execute(
+            select(Publication)
+            .where(Publication.publication_mode == "manual")
+            .order_by(Publication.created_at.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+
+    items: list[ManualPublicationItem] = []
+    for p in pubs:
+        dest = db.get(Destination, p.destination_id)
+        video = db.get(DouyinVideo, p.douyin_video_id)
+        job = db.execute(
+            select(VideoJob)
+            .where(VideoJob.publication_id == p.id)
+            .order_by(VideoJob.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+        status = p.status
+        progress = 0
+        if job is not None:
+            progress = job.progress or 0
+            if status in ("queued", "downloading", "uploading", "ai_metadata") and job.status != "pending":
+                status = job.status
+
+        items.append(
+            ManualPublicationItem(
+                id=p.id,
+                destination_id=p.destination_id,
+                destination_name=dest.name if dest else "—",
+                platform=p.platform,
+                status=status,
+                progress=progress,
+                video_title=p.title or (video.title if video else None),
+                source_url=video.url if video else None,
+                thumbnail=video.thumbnail_url if video else None,
+                external_url=p.external_url,
+                error=p.error or (job.error if job else None),
+                created_at=p.created_at,
+                published_at=p.published_at,
+            )
+        )
+
+    return items
+
+
+@app.get(
+    "/api/manual/publications/{publication_id}",
+    response_model=ManualPublicationItem,
+    dependencies=[Depends(require_admin)],
+)
+def get_manual_publication_endpoint(
+    publication_id: str,
+    db: Session = Depends(get_db),
+) -> ManualPublicationItem:
+    p = db.get(Publication, publication_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+
+    dest = db.get(Destination, p.destination_id)
+    video = db.get(DouyinVideo, p.douyin_video_id)
+    job = db.execute(
+        select(VideoJob)
+        .where(VideoJob.publication_id == p.id)
+        .order_by(VideoJob.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    status = p.status
+    progress = 0
+    if job is not None:
+        progress = job.progress or 0
+        if status in ("queued", "downloading", "uploading", "ai_metadata") and job.status != "pending":
+            status = job.status
+
+    return ManualPublicationItem(
+        id=p.id,
+        destination_id=p.destination_id,
+        destination_name=dest.name if dest else "—",
+        platform=p.platform,
+        status=status,
+        progress=progress,
+        video_title=p.title or (video.title if video else None),
+        source_url=video.url if video else None,
+        thumbnail=video.thumbnail_url if video else None,
+        external_url=p.external_url,
+        error=p.error or (job.error if job else None),
+        created_at=p.created_at,
+        published_at=p.published_at,
+    )
+
+
+@app.post(
+    "/api/manual/publications/{publication_id}/retry",
+    response_model=ManualPublicationItem,
+    dependencies=[Depends(require_admin)],
+)
+def retry_manual_publication_endpoint(
+    publication_id: str,
+    db: Session = Depends(get_db),
+) -> ManualPublicationItem:
+    p = db.get(Publication, publication_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+
+    if p.status == "published":
+        raise HTTPException(status_code=409, detail="Publication đã published")
+
+    dest = db.get(Destination, p.destination_id)
+    if dest is not None and dest.platform == "facebook":
+        raise HTTPException(status_code=400, detail="Facebook publishing adapter not configured")
+
+    p.status = "queued"
+    p.error = None
+    p.attempts = 0
+    p.scheduled_at = _utcnow()
+    p.publication_mode = "manual"
+
+    video = db.get(DouyinVideo, p.douyin_video_id)
+    pipeline = db.get(Pipeline, p.pipeline_id)
+    if video is not None and pipeline is not None and dest is not None:
+        job = VideoJob(
+            source_url=video.url,
+            source_title=video.title,
+            title=p.title,
+            description=p.description or video.description,
+            privacy_status=pipeline.default_privacy,
+            status="pending",
+            pipeline_id=pipeline.id,
+            source_video_id=video.video_id,
+            destination_id=dest.id,
+            publication_id=p.id,
+        )
+        db.add(job)
+
+    db.commit()
+    db.refresh(p)
+
+    return ManualPublicationItem(
+        id=p.id,
+        destination_id=p.destination_id,
+        destination_name=dest.name if dest else "—",
+        platform=p.platform,
+        status="queued",
+        progress=0,
+        video_title=p.title or (video.title if video else None),
+        source_url=video.url if video else None,
+        thumbnail=video.thumbnail_url if video else None,
+        external_url=p.external_url,
+        error=None,
+        created_at=p.created_at,
+        published_at=p.published_at,
+    )
