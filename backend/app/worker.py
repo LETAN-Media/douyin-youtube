@@ -13,7 +13,7 @@ from app.douyin import (
     cleanup_job_files,
     download_video,
 )
-from app.models import DouyinVideo, Pipeline, Publication, VideoJob
+from app.models import Destination, DouyinVideo, Pipeline, Publication, VideoJob
 from app.youtube import upload_video
 
 
@@ -54,13 +54,13 @@ def validate_final_description(text: str) -> bool:
 def validate_hashtags(
     text: str,
     pipeline: Pipeline | None = None,
+    destination: Destination | None = None,
 ) -> bool:
     tags = re.findall(r"#\w+", text)
     if len(tags) != 5:
         return False
     if len(set(tags)) != 5:
         return False
-    lowered_text = text.lower()
     for tag in tags:
         tag_lower = tag.lower()
         if "http" in tag_lower:
@@ -69,18 +69,25 @@ def validate_hashtags(
             return False
         if "tiktok" in tag_lower:
             return False
+        if tag_lower in {"#joybeat", "#danielxu", "#danniu"}:
+            return False
 
-    if pipeline is None:
+    if destination is None and pipeline is None:
         return True
 
-    fixed_hashtags = [
-        tag.lower()
-        for tag in (pipeline.fixed_hashtags or [])
-    ]
-    adaptive_hashtags = [
-        tag.lower()
-        for tag in (pipeline.adaptive_hashtags or [])
-    ]
+    fixed_src = (
+        destination.fixed_hashtags
+        if (destination and destination.fixed_hashtags is not None)
+        else (pipeline.fixed_hashtags if pipeline else [])
+    ) or []
+    adaptive_src = (
+        destination.adaptive_hashtags
+        if (destination and destination.adaptive_hashtags is not None)
+        else (pipeline.adaptive_hashtags if pipeline else [])
+    ) or []
+
+    fixed_hashtags = [tag.lower() for tag in fixed_src]
+    adaptive_hashtags = [tag.lower() for tag in adaptive_src]
     allowed_hashtags = set(fixed_hashtags) | set(adaptive_hashtags)
 
     if not allowed_hashtags:
@@ -506,7 +513,8 @@ def process_job(
 
             # For manual mode, allow user-edited hashtags without strict pipeline whitelist check
             target_pipeline_for_tags = None if is_manual else pipeline
-            if not validate_hashtags(description, pipeline=target_pipeline_for_tags):
+            target_dest_for_tags = None if is_manual else destination
+            if not validate_hashtags(description, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags):
                 logger.warning(
                     "First-pass hashtag validation failed for job %s, retrying AI once",
                     job_id,
@@ -522,7 +530,7 @@ def process_job(
                     )
 
                 retry_title, retry_desc = ai_result
-                if not validate_hashtags(retry_desc, pipeline=target_pipeline_for_tags):
+                if not validate_hashtags(retry_desc, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags):
                     raise RuntimeError(
                         "AI hashtags validation failed after retry; upload blocked"
                     )

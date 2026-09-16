@@ -519,6 +519,8 @@ class ManualMetadataItem(BaseModel):
     description: str
     hashtags: list[str] = Field(default_factory=list)
     final_description: str
+    content_match: bool | None = None
+    content_match_reason: str | None = None
 
 
 class ManualMetadataRequest(BaseModel):
@@ -622,8 +624,8 @@ class ChannelDetailResponse(BaseModel):
     daily_upload_limit: int = 6
     metadata_profile: str | None = None
     metadata_language: str | None = None
-    fixed_hashtags: str | None = None
-    adaptive_hashtags: bool | None = True
+    fixed_hashtags: list[str] | None = None
+    adaptive_hashtags: list[str] | None = None
     prompt_override: str | None = None
     timezone: str = "UTC"
     pipeline: dict[str, Any]

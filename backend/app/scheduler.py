@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Destination, DouyinSource, DouyinVideo, Pipeline, Publication, VideoJob
+from app.ai_metadata import evaluate_content_match
 
 
 logger = logging.getLogger("douyin-youtube-scheduler")
@@ -104,6 +105,7 @@ def _try_pick_video(
     db: Session,
     pipeline: Pipeline,
     slot_type: str,
+    destination: Destination | None = None,
 ) -> DouyinVideo | None:
     sources = db.execute(
         select(DouyinSource)
@@ -138,10 +140,35 @@ def _try_pick_video(
         else:
             query = query.order_by(DouyinVideo.douyin_created_at.asc())
 
-        video = db.execute(query.limit(1)).scalar_one_or_none()
-        if video is not None:
+        candidates = db.execute(query.limit(50)).scalars().all()
+        for cand in candidates:
+            # Check content_match if destination or pipeline requires it
+            niche = destination.metadata_profile if destination else pipeline.niche
+            prompt_override = destination.prompt_override if destination else None
+
+            is_match, match_reason = evaluate_content_match(
+                f"{cand.title} {cand.description}",
+                niche=niche,
+                prompt_override=prompt_override,
+            )
+
+            if not is_match:
+                logger.warning(
+                    "Video %s (%s) rejected by AI content match for destination %s: %s",
+                    cand.video_id,
+                    cand.title,
+                    destination.id if destination else None,
+                    match_reason,
+                )
+                cand.status = "content_mismatch"
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                continue
+
             pipeline.source_selection_cursor = (idx + 1) % len(sources)
-            return video
+            return cand
 
     return None
 
@@ -150,13 +177,14 @@ def pick_video(
     db: Session,
     pipeline: Pipeline,
     slot_type: str,
+    destination: Destination | None = None,
 ) -> DouyinVideo | None:
-    video = _try_pick_video(db, pipeline, slot_type)
+    video = _try_pick_video(db, pipeline, slot_type, destination=destination)
     if video is not None:
         return video
 
     other_type = "new" if slot_type == "backlog" else "backlog"
-    return _try_pick_video(db, pipeline, other_type)
+    return _try_pick_video(db, pipeline, other_type, destination=destination)
 
 
 def count_todays_released_jobs(
@@ -457,7 +485,7 @@ def schedule_for_destination(
             destination.new_slots_per_day or 2,
         )
 
-        video = pick_video(db, pipeline, slot_type)
+        video = pick_video(db, pipeline, slot_type, destination=destination)
         if video is None:
             logger.warning(
                 "NO_AVAILABLE_INVENTORY destination=%s slot=%s type=%s",

@@ -82,7 +82,125 @@ def clean_hashtag(value: str) -> str:
     if not tag.startswith("#"):
         tag = "#" + tag
 
+    # Block disallowed channel name hashtags or attributions
+    disallowed = {"#joybeat", "#danielxu", "#danniu", "#daniel"}
+    if tag in disallowed:
+        return ""
+
     return tag[:60]
+
+
+DANCE_POSITIVE_KEYWORDS = [
+    "舞蹈", "编舞", "翻跳", "街舞", "练舞", "舞者", "男舞者", "舞蹈教学", "跳舞",
+    "极速翻跳", "齐舞", "爵士", "urban", "dance", "choreography", "dancer", "choreo",
+    "dancecover", "kpopdance", "cpopdance", "dancepractice", "performance", "freestyle",
+    "footwork", "asiandancer", "dancevideo", "popping", "locking", "hiphop", "krump",
+    "waacking", "breaking", "c-pop dance", "k-pop dance"
+]
+
+NON_DANCE_DISQUALIFY_KEYWORDS = [
+    "腹肌", "胸肌", "脱衣", "身材", "肌肉", "健身", "举铁", "健美", "健身房",
+    "gym", "workout", "shirtless", "abs", "muscle", "fitness", "bodybuilding",
+    "自拍", "男模", "美食", "吃播", "探店", "做饭", "车", "跑车", "搞笑", "段子"
+]
+
+
+def evaluate_content_match(
+    context_text: str,
+    niche: str | None = None,
+    prompt_override: str | None = None,
+) -> tuple[bool, str]:
+    """Evaluate whether video content matches channel niche / criteria.
+
+    Returns (is_match: bool, reason: str).
+    """
+    context_lower = (context_text or "").lower()
+    niche_text = (niche or "").lower()
+    prompt_text = (prompt_override or "").lower()
+
+    is_dance_channel = (
+        "dance" in niche_text
+        or "dance" in prompt_text
+        or "choreography" in niche_text
+        or "choreography" in prompt_text
+    )
+    has_strict_match = (
+        "content_mismatch" in prompt_text
+        or "content selection" in prompt_text
+        or is_dance_channel
+    )
+
+    if not has_strict_match:
+        return True, "Channel does not enforce strict content match"
+
+    has_dance_kw = any(kw.lower() in context_lower for kw in DANCE_POSITIVE_KEYWORDS)
+    has_disqualify_kw = any(kw.lower() in context_lower for kw in NON_DANCE_DISQUALIFY_KEYWORDS)
+
+    # Disqualify immediately if non-dance/fitness keywords present and no dance keywords
+    if has_disqualify_kw and not has_dance_kw:
+        return False, "CONTENT_MISMATCH: Contains non-dance/fitness/lifestyle keywords without dance context"
+
+    ai_enabled = (
+        bool(settings.ai_enabled)
+        or os.getenv("AI_ENABLED", "false").lower() in ("true", "1", "yes")
+    )
+    api_key = (settings.ai_api_key or os.getenv("AI_API_KEY", "")).strip()
+
+    if not ai_enabled or not api_key:
+        if has_dance_kw:
+            return True, "Matched dance keywords via heuristic"
+        return False, "CONTENT_MISMATCH: No dance keywords found in caption or hashtags"
+
+    base_url = (
+        settings.ai_base_url
+        or os.getenv("AI_BASE_URL", "https://api.toolnet.tech/v1")
+    ).rstrip("/")
+    model = settings.ai_model or os.getenv("AI_MODEL", "youtube-douyin")
+
+    system_prompt = (
+        "You are a strict content match evaluator for a YouTube dance channel.\n"
+        "Your role: verify if the video is primarily dance, choreography, dance covers, or dance practice.\n\n"
+        "STRICT REJECTION CRITERIA:\n"
+        "- Reject pure gym/body showcases, shirtless posing with no dance, fitness, physique showcases.\n"
+        "- Reject random lifestyle clips, food, cars, comedy, thirst-traps with no meaningful dance.\n\n"
+        "Return ONLY a JSON object with this format:\n"
+        '{\n  "match": true,\n  "reason": "explanation in English"\n}\n'
+        "or\n"
+        '{\n  "match": false,\n  "reason": "CONTENT_MISMATCH: reason in English"\n}'
+    )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Douyin context:\n{context_text}"},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 150,
+    }
+
+    try:
+        resp = httpx.post(
+            base_url + "/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        raw_text = resp.text
+        if raw_text.endswith("data: [DONE]\n\n") or "\n" in raw_text:
+            raw_text = raw_text.split("\n")[0]
+        data = extract_json(json.loads(raw_text)["choices"][0]["message"]["content"])
+        is_match = bool(data.get("match", False))
+        reason = str(data.get("reason", "Evaluated by AI"))
+        if not is_match and not reason.startswith("CONTENT_MISMATCH"):
+            reason = f"CONTENT_MISMATCH: {reason}"
+        return is_match, reason
+    except Exception as e:
+        logger.warning("AI content match evaluation failed (%s), falling back to heuristic", e)
+        if has_dance_kw:
+            return True, "Matched dance keywords via heuristic fallback"
+        return False, "CONTENT_MISMATCH: No dance keywords detected (heuristic fallback)"
 
 
 def generate_metadata_structured(
@@ -239,6 +357,18 @@ def generate_metadata_structured(
 
         data = extract_json(content)
 
+        if data.get("status") == "CONTENT_MISMATCH" or data.get("content_match") is False:
+            reason = str(data.get("reason", "Content does not match channel niche"))
+            logger.warning("AI flagged CONTENT_MISMATCH: %s", reason)
+            return {
+                "title": "",
+                "description": "",
+                "hashtags": [],
+                "final_description": "",
+                "content_match": False,
+                "content_match_reason": f"CONTENT_MISMATCH: {reason}",
+            }
+
         title = str(
             data.get("title")
             or ""
@@ -249,12 +379,32 @@ def generate_metadata_structured(
                 "AI returned empty title"
             )
 
+        if "CONTENT_MISMATCH" in title.upper():
+            logger.warning("AI title indicates CONTENT_MISMATCH: %s", title)
+            return {
+                "title": "",
+                "description": "",
+                "hashtags": [],
+                "final_description": "",
+                "content_match": False,
+                "content_match_reason": title,
+            }
+
         title = title[:100]
 
         description = str(
             data.get("description")
             or ""
         ).strip()
+
+        # Sanitize against hallucinated creator attributions unless present in original context
+        ctx_lower = context_text.lower()
+        if "daniel xu" not in ctx_lower and "daniel" not in ctx_lower:
+            title = re.sub(r"(?i)\bdaniel\s+xu\b", "", title).strip()
+            description = re.sub(r"(?i)\bdaniel\s+xu\b", "", description).strip()
+        if "joybeat" not in ctx_lower:
+            title = re.sub(r"(?i)\bjoybeat\b", "", title).strip()
+            description = re.sub(r"(?i)\bjoybeat\b", "", description).strip()
 
         raw_tags = data.get(
             "hashtags"
@@ -284,14 +434,20 @@ def generate_metadata_structured(
             if len(hashtags) == 5:
                 break
 
-        # If fewer than 5 hashtags, fallback to fixed or generic tags
+        # If fewer than 5 hashtags, fallback to fixed or adaptive tags
         if len(hashtags) < 5:
             fallback_candidates = []
             if destination and destination.fixed_hashtags:
                 fallback_candidates.extend(destination.fixed_hashtags)
             elif pipeline and pipeline.fixed_hashtags:
                 fallback_candidates.extend(pipeline.fixed_hashtags)
-            fallback_candidates.extend(["#shorts", "#trending", "#viral", "#video"])
+
+            if destination and destination.adaptive_hashtags:
+                fallback_candidates.extend(destination.adaptive_hashtags)
+            elif pipeline and pipeline.adaptive_hashtags:
+                fallback_candidates.extend(pipeline.adaptive_hashtags)
+
+            fallback_candidates.extend(["#shorts", "#dance", "#choreography", "#video"])
             for cand in fallback_candidates:
                 cleaned = clean_hashtag(str(cand))
                 if cleaned and cleaned not in hashtags:
@@ -318,6 +474,8 @@ def generate_metadata_structured(
             "description": description,
             "hashtags": hashtags,
             "final_description": final_description,
+            "content_match": True,
+            "content_match_reason": "Matched channel criteria",
         }
 
     except Exception:
@@ -341,6 +499,6 @@ def generate_youtube_metadata(
         pipeline=pipeline,
         destination=destination,
     )
-    if not res:
+    if not res or not res.get("title") or res.get("content_match") is False:
         return None
     return (res["title"], res["final_description"])

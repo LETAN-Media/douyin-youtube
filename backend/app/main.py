@@ -3294,6 +3294,8 @@ def manual_metadata_endpoint(
                     description=gen["description"],
                     hashtags=gen["hashtags"],
                     final_description=gen["final_description"],
+                    content_match=gen.get("content_match"),
+                    content_match_reason=gen.get("content_match_reason"),
                 )
         return ManualMetadataResponse(
             metadata_mode="separate",
@@ -3318,6 +3320,8 @@ def manual_metadata_endpoint(
             description=gen["description"],
             hashtags=gen["hashtags"],
             final_description=gen["final_description"],
+            content_match=gen.get("content_match"),
+            content_match_reason=gen.get("content_match_reason"),
         )
 
     return ManualMetadataResponse(
