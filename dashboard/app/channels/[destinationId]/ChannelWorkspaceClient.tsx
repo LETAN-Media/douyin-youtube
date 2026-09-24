@@ -237,7 +237,26 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json();
+      // Defensive parse: the server must return JSON, but if it ever returns
+      // HTML/text (404 page, proxy outage), Safari throws the cryptic
+      // "The string did not match the expected pattern." — surface a real
+      // HTTP error instead.
+      let data: {
+        accepted?: boolean;
+        code?: string;
+        message?: string;
+        external_url?: string;
+        error?: string;
+        detail?: string;
+        publications?: ManualPublishResponse["publications"];
+      } = {};
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(
+          `Publish thất bại (HTTP ${res.status}). Server không trả JSON — thử lại.`,
+        );
+      }
 
       if (res.status === 409 && data.code === "DUPLICATE_VIDEO") {
         setDuplicateWarning({
@@ -251,7 +270,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         throw new Error(data.error || data.detail || "Đăng video thất bại");
       }
 
-      const result: ManualPublishResponse = data;
+      const result = data as ManualPublishResponse;
       if (result.publications && result.publications.length > 0) {
         setActivePublications((prev) => [...result.publications, ...prev]);
         reloadDetail();
