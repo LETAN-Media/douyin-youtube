@@ -116,11 +116,15 @@ class Settings(BaseSettings):
     revid_credits_per_request: int = 35
 
     # RapidAPI Douyin creator feed (primary, free/freemium, no cookie)
+    # Provider: "Douyin/China Tiktok All API" by justoneapi.
+    # Host/path live-verified 2026-09-24 (endpoint get-user-video-list/v3).
     rapidapi_key: str = ""
     douyin_rapidapi_host: str = ""
     douyin_rapidapi_base_url: str = ""
-    douyin_rapidapi_user_posts_path: str = "/api/douyin/web/fetch_user_post"
+    douyin_rapidapi_user_posts_path: str = "/api/douyin/get-user-video-list/v3"
     douyin_rapidapi_enabled: bool = True
+    douyin_creator_provider: str = "rapidapi_justone"
+    douyin_max_pages_per_scan: int = 3
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

@@ -373,6 +373,191 @@ class YtDlpDouyinInventoryProvider(DouyinInventoryProvider):
         return legacy_fetch(profile_url, source_id)
 
 
+class HttpDouyinFeedProvider(DouyinInventoryProvider):
+    """Primary creator feed via direct Douyin web API (no browser).
+
+    Tries ``/aweme/v1/web/aweme/post/`` with PlatformAccount cookies.
+    No Playwright, no a_bogus JS needed for basic cases; falls back to
+    browser only on challenge/timeout. Respects cookie optional flow.
+    """
+
+    name = "http_feed"
+
+    def fetch_all(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._fetch(sec_uid or profile_url, cookie_jar, full=True)
+
+    def fetch_latest(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
+        vids = self._fetch(sec_uid or profile_url, cookie_jar, full=False)
+        return vids[:limit]
+
+    def _fetch(
+        self,
+        sec_uid_or_url: str,
+        cookie_jar: list[dict[str, Any]] | None,
+        full: bool,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
+        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
+        if not sec_uid:
+            raise DouyinInventoryError("Missing sec_uid for creator feed")
+        # Build Cookie header from jar (if any)
+        cookie_header = ""
+        if cookie_jar:
+            parts = []
+            for c in cookie_jar:
+                n = str(c.get("name") or "").strip()
+                v = str(c.get("value") or "")
+                if n:
+                    parts.append(f"{n}={v}")
+            cookie_header = "; ".join(parts)
+
+        import httpx
+
+        base_headers = {
+            "User-Agent": DOUYIN_USER_AGENT,
+            "Referer": f"https://www.douyin.com/user/{sec_uid}",
+            "Accept": "application/json, text/plain, */*",
+        }
+
+        # Helper to try fetch with given headers
+        def _try_with_headers(hdrs: dict[str, str]) -> tuple[dict[str, dict[str, Any]], bool]:
+            collected: dict[str, dict[str, Any]] = {}
+            max_cursor = "0"
+            has_more = 1
+            pages = 0
+            max_pages = int(getattr(settings, "max_inventory_pages", 200) or 200)
+            if not full:
+                max_pages = min(max_pages, 3)
+            endpoints = [
+                "https://www.douyin.com/aweme/v1/web/aweme/post/",
+                "https://www.iesdouyin.com/web/api/v2/aweme/post/",
+            ]
+            for endpoint in endpoints:
+                try:
+                    with httpx.Client(timeout=20, follow_redirects=True, headers=hdrs) as client:
+                        for _ in range(max_pages):
+                            if "douyin.com/aweme" in endpoint:
+                                params = {
+                                    "device_platform": "webapp",
+                                    "aid": "6383",
+                                    "channel": "channel_pc_web",
+                                    "sec_user_id": sec_uid,
+                                    "max_cursor": max_cursor,
+                                    "count": "18",
+                                    "locate_query": "false",
+                                    "show_live_replay_strategy": "1",
+                                    "need_time_list": "1",
+                                    "time_list_query": "0",
+                                    "whale_cut_token": "",
+                                    "cut_version": "1",
+                                }
+                            else:
+                                params = {"sec_uid": sec_uid, "count": "35", "max_cursor": max_cursor}
+                            resp = client.get(endpoint, params=params)
+                            if resp.status_code in (401, 403):
+                                raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
+                            if resp.status_code != 200:
+                                raise DouyinInventoryError(f"Douyin feed HTTP {resp.status_code}")
+                            try:
+                                data = resp.json()
+                            except Exception as exc:
+                                raise DouyinInventoryError(f"Feed JSON parse failed: {exc}") from exc
+                            if isinstance(data, dict) and data.get("status_code") in (401, 403):
+                                raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
+                            videos, has_more, max_cursor = parse_aweme_post_response(data)
+                            for v in videos:
+                                collected.setdefault(v["video_id"], v)
+                            pages += 1
+                            if has_more == 0 or not max_cursor or max_cursor == "0":
+                                break
+                            if not full and len(collected) >= 35:
+                                break
+                        if collected:
+                            break
+                    if collected:
+                        break
+                except DouyinAuthRequiredError:
+                    raise
+                except DouyinInventoryError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Http feed %s failed: %s", endpoint, exc)
+                    continue
+            return collected, bool(collected)
+
+        # Try anonymous first unless only_cookies
+        if not only_cookies:
+            try:
+                collected, ok = _try_with_headers(base_headers)
+                if ok:
+                    logger.info("Http feed anonymous collected %s videos for sec_uid=%s", len(collected), sec_uid[:12])
+                    ordered = list(collected.values())
+                    try:
+                        ordered.sort(key=lambda v: int(v.get("create_time") or 0), reverse=True)
+                    except Exception:
+                        pass
+                    return ordered
+            except DouyinAuthRequiredError:
+                pass
+            except DouyinInventoryError as exc:
+                # If anonymous fails with non-auth error, try with cookie if available
+                if not cookie_header:
+                    raise
+
+        # Fallback to cookie if available
+        if cookie_header:
+            hdrs = dict(base_headers)
+            hdrs["Cookie"] = cookie_header
+            collected, ok = _try_with_headers(hdrs)
+            if ok:
+                logger.info("Http feed with cookie collected %s videos for sec_uid=%s", len(collected), sec_uid[:12])
+                ordered = list(collected.values())
+                try:
+                    ordered.sort(key=lambda v: int(v.get("create_time") or 0), reverse=True)
+                except Exception:
+                    pass
+                return ordered
+            # If cookie still fails, raise auth required
+            raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
+
+        # No cookie and anonymous returned empty -> try next provider (Playwright) instead of returning empty
+        # For public creators, Http without a_bogus often returns 0, so fallback is needed
+        raise DouyinInventoryError("Http feed returned 0 videos (try next provider)")
+
+
+    @staticmethod
+    def _resolve_sec_uid(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("http"):
+            try:
+                from app.douyin_url import parse_douyin_profile_url
+
+                parsed = parse_douyin_profile_url(text)
+                if parsed is not None:
+                    return parsed.sec_uid
+            except Exception:
+                pass
+            cleaned = text.rstrip("/").split("?")[0]
+            return cleaned.rsplit("/", 1)[-1]
+        return text
+
+
 DOUYIN_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -775,7 +960,265 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
         return text
 
 
+class RevidDouyinFeedProvider(DouyinInventoryProvider):
+    """Primary creator feed via RevidAPI (no Douyin cookie, no browser)."""
+
+    name = "revid"
+
+    def fetch_all(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._fetch(sec_uid or profile_url, full=True)
+
+    def fetch_latest(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
+        vids = self._fetch(sec_uid or profile_url, full=False)
+        return vids[:limit]
+
+    def _fetch(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
+        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
+        if not sec_uid:
+            raise DouyinInventoryError("Missing sec_uid for Revid feed")
+        if not settings.revid_scan_enabled:
+            raise DouyinInventoryError("REVID_SCAN_ENABLED=false")
+        if not (settings.revid_api_key or "").strip():
+            raise DouyinInventoryError("REVID_AUTH_ERROR: REVID_API_KEY not configured (fallback to next provider)")
+
+        from app.integrations.revid.client import RevidDouyinClient
+
+        client = RevidDouyinClient()
+        collected: dict[str, dict[str, Any]] = {}
+        max_cursor: str | None = "0"
+        pages = 0
+        max_pages = int(getattr(settings, "revid_max_pages_per_scan", 3) or 3)
+        if not full:
+            max_pages = min(max_pages, 3)
+
+        for _ in range(max_pages):
+            result = client.fetch_user_videos(sec_uid, max_cursor=max_cursor)
+            for item in result.get("items", []):
+                aweme_id = str(item.get("aweme_id") or "").strip()
+                if not aweme_id:
+                    continue
+                # Normalize to inventory video shape
+                share_url = str(item.get("share_url") or f"https://www.douyin.com/video/{aweme_id}")
+                caption = str(item.get("caption") or "")
+                create_time = item.get("create_time")
+                douyin_created_at = None
+                try:
+                    ts = int(create_time) if create_time is not None else 0
+                    if ts > 0:
+                        douyin_created_at = datetime.fromtimestamp(ts, tz=timezone.utc)
+                except (TypeError, ValueError):
+                    douyin_created_at = None
+                cover = str(item.get("cover_url") or "")
+                collected.setdefault(
+                    aweme_id,
+                    {
+                        "video_id": aweme_id,
+                        "aweme_id": aweme_id,
+                        "title": caption[:200] if caption else aweme_id,
+                        "description": caption[:1000],
+                        "url": share_url,
+                        "douyin_created_at": douyin_created_at,
+                        "author": "",
+                        "cover": cover,
+                        "share_url": share_url,
+                        "create_time": create_time,
+                    },
+                )
+            has_more = bool(result.get("has_more"))
+            max_cursor = str(result.get("next_cursor") or "")
+            pages += 1
+            if not has_more or not max_cursor or max_cursor == "0":
+                break
+            # Credit optimization: stop early if we already have enough for latest
+            if not full and len(collected) >= 20:
+                break
+
+        ordered = list(collected.values())
+        try:
+            ordered.sort(key=lambda v: int(v.get("create_time") or 0), reverse=True)
+        except Exception:
+            pass
+        logger.info("Revid feed collected %s videos for sec_uid=%s", len(ordered), sec_uid[:12])
+        return ordered
+
+    @staticmethod
+    def _resolve_sec_uid(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("http"):
+            try:
+                from app.douyin_url import parse_douyin_profile_url
+
+                parsed = parse_douyin_profile_url(text)
+                if parsed is not None:
+                    return parsed.sec_uid
+            except Exception:
+                pass
+            cleaned = text.rstrip("/").split("?")[0]
+            return cleaned.rsplit("/", 1)[-1]
+        return text
+
+
+class JustOneRapidApiProvider(DouyinInventoryProvider):
+    """Primary creator feed via JustOneAPI (RapidAPI gateway, no cookie)."""
+
+    name = "rapidapi_justone"
+
+    def fetch_all(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._fetch(sec_uid or profile_url, full=True)
+
+    def fetch_latest(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
+        vids = self._fetch(sec_uid or profile_url, full=False)
+        return vids[:limit]
+
+    def _fetch(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
+        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
+        if not sec_uid:
+            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
+        if not getattr(settings, "douyin_rapidapi_enabled", True):
+            raise DouyinInventoryError("rapidapi_justone disabled")
+
+        from app.integrations.rapidapi.justone import fetch_user_posts
+
+        collected: dict[str, dict[str, Any]] = {}
+        max_cursor: str | None = None
+        # Spec: normal scans fetch page 1 and stop on first known video;
+        # full/first scans cap at DOUYIN_MAX_PAGES_PER_SCAN (default 3).
+        max_pages = max(
+            1,
+            min(int(getattr(settings, "douyin_max_pages_per_scan", 3) or 3), 3),
+        )
+
+        for _ in range(max_pages):
+            try:
+                result = fetch_user_posts(sec_uid, cursor=max_cursor)
+            except Exception as exc:
+                # Auth/quota/invalid surface immediately; nothing to fall back to here
+                raise DouyinInventoryError(str(exc)) from exc
+            for item in result.get("items", []):
+                aweme_id = str(item.get("aweme_id") or "").strip()
+                if not aweme_id:
+                    continue
+                share_url = str(item.get("share_url") or f"https://www.douyin.com/video/{aweme_id}")
+                caption = str(item.get("caption") or "")
+                create_time = item.get("create_time") or 0
+                try:
+                    ts = int(create_time)
+                except (TypeError, ValueError):
+                    ts = 0
+                douyin_created_at = None
+                if ts > 0:
+                    douyin_created_at = datetime.fromtimestamp(ts, tz=timezone.utc)
+                collected.setdefault(
+                    aweme_id,
+                    {
+                        "video_id": aweme_id,
+                        "aweme_id": aweme_id,
+                        "title": caption[:200] if caption else aweme_id,
+                        "description": caption[:1000],
+                        "url": share_url,
+                        "douyin_created_at": douyin_created_at,
+                        "author": "",
+                        "cover": str(item.get("cover_url") or ""),
+                        "share_url": share_url,
+                        "create_time": ts,
+                    },
+                )
+            has_more = bool(result.get("has_more"))
+            next_cursor = str(result.get("next_cursor") or "")
+            # Response max_cursor is an ms-epoch; "0" means no further page.
+            max_cursor = next_cursor if next_cursor not in ("", "0") else None
+            if not has_more or not max_cursor:
+                break
+
+        ordered = list(collected.values())
+        try:
+            ordered.sort(key=lambda v: int(v.get("create_time") or 0), reverse=True)
+        except Exception:
+            pass
+        try:
+            from app.integrations.rapidapi.justone import get_last_rate_limit
+
+            logger.info(
+                "rapidapi_justone collected %s videos for secUid=%s ratelimit=%s",
+                len(ordered),
+                sec_uid[:12],
+                get_last_rate_limit(),
+            )
+        except Exception:
+            logger.info(
+                "rapidapi_justone collected %s videos for secUid=%s",
+                len(ordered),
+                sec_uid[:12],
+            )
+        return ordered
+
+    @staticmethod
+    def _resolve_sec_uid(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("http"):
+            try:
+                from app.douyin_url import parse_douyin_profile_url
+
+                parsed = parse_douyin_profile_url(text)
+                if parsed is not None:
+                    return parsed.sec_uid
+            except Exception:
+                pass
+            cleaned = text.rstrip("/").split("?")[0]
+            return cleaned.rsplit("/", 1)[-1]
+        return text
+
+
 def get_primary_provider() -> DouyinInventoryProvider:
+    # rapidapi_justone is primary when selected + key/host configured
+    if (getattr(settings, "douyin_creator_provider", "") or "") == "rapidapi_justone":
+        if (settings.rapidapi_key or "").strip() and (
+            (settings.douyin_rapidapi_host or "").strip()
+            or (settings.douyin_rapidapi_base_url or "").strip()
+        ):
+            return JustOneRapidApiProvider()
+    # Revid is next if enabled and key exists, else Http (anonymous) then Playwright
+    if getattr(settings, "revid_scan_enabled", True) and (settings.revid_api_key or "").strip():
+        return RevidDouyinFeedProvider()
+    return HttpDouyinFeedProvider()
+
+
+def get_secondary_provider() -> DouyinInventoryProvider:
+    # Http is secondary if Revid/RapidAPI is primary, else Playwright
+    if isinstance(get_primary_provider(), (RevidDouyinFeedProvider, JustOneRapidApiProvider)):
+        return HttpDouyinFeedProvider()
     return PlaywrightDouyinInventoryProvider()
 
 
@@ -791,35 +1234,45 @@ def discover_profile_videos(
     cookie_jar: list[dict[str, Any]] | None = None,
     only_cookies: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Run primary provider, then LAST fallback.
+    """Run http_feed (anonymous) -> playwright (fallback) -> yt-dlp (last).
 
     Returns (videos, provider_name). Auth-required is never silently
     converted to an empty completed result by the caller.
     """
-    primary = get_primary_provider()
-    try:
-        if full:
-            videos = primary.fetch_all(profile_url, sec_uid, source_id, cookie_jar)
-        else:
-            videos = primary.fetch_latest(
-                profile_url, sec_uid, source_id,
-                cookie_jar=cookie_jar, only_cookies=only_cookies,
-            )
-        return videos, primary.name
-    except DouyinAuthRequiredError:
-        raise
-    except DouyinInventoryError as exc:
-        logger.warning("Primary inventory provider failed: %s", exc)
-    except Exception:
-        logger.exception("Primary inventory provider crashed")
+    last_auth_exc: Exception | None = None
+    for provider in (get_primary_provider(), get_secondary_provider(), get_fallback_provider()):
+        try:
+            if full:
+                videos = provider.fetch_all(profile_url, sec_uid, source_id, cookie_jar)
+            else:
+                if provider.name in ("http_feed", "playwright", "revid", "rapidapi_justone"):
+                    videos = provider.fetch_latest(
+                        profile_url, sec_uid, source_id,
+                        cookie_jar=cookie_jar, only_cookies=only_cookies,
+                    )
+                else:
+                    videos = provider.fetch_latest(profile_url, sec_uid, source_id)
+            return videos, provider.name
+        except DouyinAuthRequiredError as exc:
+            logger.warning("%s auth required: %s", provider.name, exc)
+            last_auth_exc = exc
+            continue
+        except DouyinInventoryError as exc:
+            # Revid with no key or other inventory error -> try next
+            logger.warning("%s provider failed: %s", provider.name, exc)
+            # If Revid says no key, don't treat as auth wall for Douyin cookie
+            if "REVID" in str(exc):
+                continue
+            continue
+        except Exception as exc:
+            # RevidError (RuntimeError) also lands here
+            if "REVID" in str(exc):
+                logger.warning("%s provider failed: %s", provider.name, exc)
+                continue
+            logger.exception("%s provider crashed", provider.name)
+            continue
 
-    fallback = get_fallback_provider()
-    try:
-        if full:
-            videos = fallback.fetch_all(profile_url, sec_uid, source_id)
-        else:
-            videos = fallback.fetch_latest(profile_url, sec_uid, source_id)
-        return videos, fallback.name
-    except Exception:
-        logger.exception("Fallback inventory provider crashed")
-        return [], fallback.name
+    # If all providers failed due to auth, surface it
+    if last_auth_exc is not None:
+        raise last_auth_exc
+    return [], "none"
