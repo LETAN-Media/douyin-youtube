@@ -107,6 +107,21 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: int = 60
     scheduler_startup_delay_seconds: int = 10
 
+    # RevidAPI Douyin creator feed (no Douyin cookie required)
+    revid_api_key: str = ""
+    revid_api_base_url: str = "https://revidapi.com"
+    revid_scan_enabled: bool = True
+    revid_scan_interval_minutes: int = 60
+    revid_max_pages_per_scan: int = 3
+    revid_credits_per_request: int = 35
+
+    # RapidAPI Douyin creator feed (primary, free/freemium, no cookie)
+    rapidapi_key: str = ""
+    douyin_rapidapi_host: str = ""
+    douyin_rapidapi_base_url: str = ""
+    douyin_rapidapi_user_posts_path: str = "/api/douyin/web/fetch_user_post"
+    douyin_rapidapi_enabled: bool = True
+
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
