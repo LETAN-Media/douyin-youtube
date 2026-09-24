@@ -1,5 +1,7 @@
+import os
 from functools import lru_cache
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,16 +45,49 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = "alims-intl.llm"
 
-    # Optional Rcuts configuration
-    rcuts_api_url: str = "http://api.rcuts.com/Video/DouYin.php"
+    # Optional Rcuts configuration (centralized in /root/douyin-youtube/.env)
+    # New canonical env names: RCUTS_API, RCUTS_PRIMARY_API, RCUTS_FALLBACK_API
+    # Keep legacy rcuts_*_url fields for backward compat.
+    rcuts_api_url: str = Field(
+        default="http://api.rcuts.com/Video/DouYin.php",
+        validation_alias="RCUTS_API_URL",
+    )
+    rcuts_api: str = Field(default="", validation_alias="RCUTS_API")
     rcuts_token: str = ""
     rcuts_update_url: str = "http://i.rcuts.com/update/247"
 
-    # Optional Rcuts primary/fallback configuration
-    rcuts_primary_api_url: str = "http://api.rcuts.com/Video/DouYin_All.php"
+    rcuts_primary_api_url: str = Field(
+        default="http://api.rcuts.com/Video/DouYin_All.php",
+        validation_alias="RCUTS_PRIMARY_API_URL",
+    )
+    rcuts_primary_api: str = Field(default="", validation_alias="RCUTS_PRIMARY_API")
     rcuts_primary_update_url: str = "http://i.rcuts.com/update/249"
-    rcuts_fallback_api_url: str = "http://api.rcuts.com/Video/DouYin.php"
+    rcuts_fallback_api_url: str = Field(
+        default="http://api.rcuts.com/Video/DouYin.php",
+        validation_alias="RCUTS_FALLBACK_API_URL",
+    )
+    rcuts_fallback_api: str = Field(default="", validation_alias="RCUTS_FALLBACK_API")
     rcuts_fallback_update_url: str = "http://i.rcuts.com/update/247"
+
+    @model_validator(mode="after")
+    def _apply_rcuts_aliases(self) -> "Settings":
+        # Prefer new canonical RCUTS_* vars if set; fall back to legacy.
+        # Also allow RCUTS_API to feed rcuts_api_url for minimal config.
+        if self.rcuts_api and self.rcuts_api.strip():
+            self.rcuts_api_url = self.rcuts_api.strip()
+        # RCUTS_API env without suffix should also be readable via os.environ
+        # (pydantic alias already handles RCUTS_API), but also check direct env
+        # for cases where .env is at project root.
+        env_rcuts = os.getenv("RCUTS_API", "").strip()
+        if env_rcuts:
+            self.rcuts_api_url = env_rcuts
+        env_primary = os.getenv("RCUTS_PRIMARY_API", "").strip() or self.rcuts_primary_api.strip()
+        if env_primary:
+            self.rcuts_primary_api_url = env_primary
+        env_fallback = os.getenv("RCUTS_FALLBACK_API", "").strip() or self.rcuts_fallback_api.strip()
+        if env_fallback:
+            self.rcuts_fallback_api_url = env_fallback
+        return self
 
     # Monitor configuration
     monitor_enabled: bool = True
@@ -73,7 +108,7 @@ class Settings(BaseSettings):
     scheduler_startup_delay_seconds: int = 10
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
