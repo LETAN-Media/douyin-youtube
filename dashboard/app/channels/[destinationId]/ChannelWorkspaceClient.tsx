@@ -368,7 +368,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   // ==========================================
   const [sourceName, setSourceName] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
-  const [sourceCookie, setSourceCookie] = useState("");
+  const [sourcePlatform, setSourcePlatform] = useState<"douyin" | "facebook">("douyin");
   const [sourceScanInterval, setSourceScanInterval] = useState("15");
   const [sourceMaxPerDay, setSourceMaxPerDay] = useState("5");
   const [sourceStartMode, setSourceStartMode] = useState<"new_only" | "last_n">("new_only");
@@ -380,12 +380,9 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [syncingSourceId, setSyncingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [workspaceSources, setWorkspaceSources] = useState<WorkspaceSourceItem[]>([]);
-  const [cookieEditorId, setCookieEditorId] = useState<string | null>(null);
-  const [cookieDraft, setCookieDraft] = useState("");
-  const [cookieBusyId, setCookieBusyId] = useState<string | null>(null);
-  const [cookieMsg, setCookieMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null);
   const [autoStatus, setAutoStatus] = useState<ChannelAutoStatus | null>(null);
   const [autoStatusLoading, setAutoStatusLoading] = useState(false);
+  const [globalAccounts, setGlobalAccounts] = useState<{ platform: string; status: string; connected: boolean; used_by_sources?: number; last_verified_at?: string | null }[]>([]);
 
   const splitKw = (v: string) => v.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
 
@@ -401,6 +398,13 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
     }
   }, [channel.destination_id]);
 
+  const fetchGlobalAccounts = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/platform-accounts`);
+      if (res.ok) setGlobalAccounts(await res.json());
+    } catch {}
+  }, []);
+
   const fetchAutoStatus = useCallback(async () => {
     setAutoStatusLoading(true);
     try {
@@ -415,7 +419,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
 
   useEffect(() => {
     fetchWorkspaceSources();
-  }, [fetchWorkspaceSources]);
+    fetchGlobalAccounts();
+  }, [fetchWorkspaceSources, fetchGlobalAccounts]);
 
   useEffect(() => {
     if (activeTab === "auto") fetchAutoStatus();
@@ -431,9 +436,9 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          platform: sourcePlatform,
           name: sourceName.trim(),
           url: sourceUrl.trim(),
-          cookie: sourceCookie.trim() || undefined,
           scan_interval_minutes: Number(sourceScanInterval) || 15,
           max_videos_per_day: Number(sourceMaxPerDay) || 0,
           start_mode: sourceStartMode,
@@ -446,7 +451,6 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       if (!res.ok) throw new Error(data.detail || data.error || "Thêm tác giả thất bại");
       setSourceName("");
       setSourceUrl("");
-      setSourceCookie("");
       reloadDetail();
       fetchWorkspaceSources();
     } catch (err: unknown) {
@@ -486,62 +490,68 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
     }
   };
 
-  const handleSaveCookie = async (sourceId: string) => {
-    if (!cookieDraft.trim() || cookieBusyId) return;
-    setCookieBusyId(sourceId);
-    setCookieMsg(null);
+  // Global PlatformAccount cookie handlers (shared login)
+  const [globalCookieDraft, setGlobalCookieDraft] = useState("");
+  const [globalCookieBusy, setGlobalCookieBusy] = useState(false);
+  const [globalCookieMsg, setGlobalCookieMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [showGlobalCookieEditor, setShowGlobalCookieEditor] = useState(false);
+
+  const handleSaveGlobalCookie = async () => {
+    if (!globalCookieDraft.trim() || globalCookieBusy) return;
+    setGlobalCookieBusy(true);
+    setGlobalCookieMsg(null);
     try {
-      const res = await fetch(`/api/sources/${sourceId}/cookie`, {
+      const res = await fetch(`/api/platform-accounts/douyin`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cookie: cookieDraft }),
+        body: JSON.stringify({ cookie: globalCookieDraft }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || data.error || "Lưu cookie thất bại");
-      setCookieMsg({ id: sourceId, ok: true, text: "Đã lưu cookie." });
-      setCookieEditorId(null);
-      setCookieDraft("");
-      fetchWorkspaceSources();
+      setGlobalCookieMsg({ ok: true, text: "Đã lưu Douyin cookie toàn hệ thống." });
+      setShowGlobalCookieEditor(false);
+      setGlobalCookieDraft("");
+      fetchGlobalAccounts();
     } catch (err: unknown) {
-      setCookieMsg({ id: sourceId, ok: false, text: err instanceof Error ? err.message : "Lưu cookie thất bại" });
+      setGlobalCookieMsg({ ok: false, text: err instanceof Error ? err.message : "Lưu cookie thất bại" });
     } finally {
-      setCookieBusyId(null);
+      setGlobalCookieBusy(false);
     }
   };
 
-  const handleTestCookie = async (sourceId: string) => {
-    setCookieBusyId(sourceId);
-    setCookieMsg(null);
+  const handleTestGlobalCookie = async () => {
+    setGlobalCookieBusy(true);
+    setGlobalCookieMsg(null);
     try {
-      const res = await fetch(`/api/sources/${sourceId}/test`, { method: "POST" });
+      const res = await fetch(`/api/platform-accounts/douyin/test`, { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || data.error || "Cookie không hợp lệ");
-      setCookieMsg({ id: sourceId, ok: true, text: `Cookie OK — ${data.nickname || data.sec_uid || "verified"} · latest ${data.latest_aweme_id || ""}` });
-      fetchWorkspaceSources();
+      setGlobalCookieMsg({ ok: true, text: `Douyin Connected ✅ · ${data.videos_probed ?? ""} videos probed` });
+      fetchGlobalAccounts();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Test cookie thất bại";
-      const isExpired = msg.includes("COOKIE_EXPIRED");
-      setCookieMsg({ id: sourceId, ok: false, text: isExpired ? "Douyin cookie hết hạn — cập nhật lại." : msg });
+      const msg = err instanceof Error ? err.message : "Test thất bại";
+      setGlobalCookieMsg({ ok: false, text: msg.includes("COOKIE_EXPIRED") ? "Douyin cookie hết hạn — cập nhật lại." : msg });
     } finally {
-      setCookieBusyId(null);
+      setGlobalCookieBusy(false);
     }
   };
 
-  const handleDeleteCookie = async (sourceId: string) => {
-    if (!confirm("Xóa cookie Douyin của source này?")) return;
-    setCookieBusyId(sourceId);
+  const handleDeleteGlobalCookie = async () => {
+    if (!confirm("Xóa Douyin PlatformAccount? Tất cả Douyin sources sẽ tạm pause.")) return;
+    setGlobalCookieBusy(true);
+    setGlobalCookieMsg(null);
     try {
-      const res = await fetch(`/api/sources/${sourceId}/cookie`, { method: "DELETE" });
+      const res = await fetch(`/api/platform-accounts/douyin`, { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || "Xóa cookie thất bại");
+        throw new Error(data.detail || "Xóa thất bại");
       }
-      setCookieMsg({ id: sourceId, ok: true, text: "Đã xóa cookie." });
-      fetchWorkspaceSources();
+      setGlobalCookieMsg({ ok: true, text: "Đã xóa Douyin account." });
+      fetchGlobalAccounts();
     } catch (err: unknown) {
-      setCookieMsg({ id: sourceId, ok: false, text: err instanceof Error ? err.message : "Xóa cookie thất bại" });
+      setGlobalCookieMsg({ ok: false, text: err instanceof Error ? err.message : "Xóa thất bại" });
     } finally {
-      setCookieBusyId(null);
+      setGlobalCookieBusy(false);
     }
   };
 
@@ -1494,6 +1504,54 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       {/* ============================================================ */}
       {activeTab === "sources" && (
         <div className="space-y-6">
+          {/* Global Platform Accounts (shared login) */}
+          <Card className="p-5 sm:p-6">
+            <h3 className="text-sm font-extrabold text-slate-900">Platform Accounts — Shared Login</h3>
+            <p className="text-xs text-slate-500">Một tài khoản Douyin/Facebook đăng nhập một lần, dùng chung cho tất cả pipeline.</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {globalAccounts.map((acct) => (
+                <div key={acct.platform} className={`rounded-xl border p-3 ${acct.connected ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-extrabold uppercase text-slate-700">{acct.platform}</span>
+                    <Badge tone={acct.connected ? "green" : "amber"}>{acct.connected ? "Connected ✅" : "Needs login"}</Badge>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500">Used by {acct.used_by_sources ?? 0} sources{acct.last_verified_at ? ` · Last verified: ${new Date(acct.last_verified_at).toLocaleString()}` : ""}</p>
+                  {acct.platform === "douyin" && (
+                    <div className="mt-3">
+                      {!acct.connected ? (
+                        <div className="space-y-2">
+                          <textarea value={globalCookieDraft} onChange={(e) => setGlobalCookieDraft(e.target.value)} rows={3} placeholder="Dán Douyin cookies.txt hoặc JSON export — không log, chỉ lưu mã hóa" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] text-slate-700" />
+                          <div className="flex gap-2">
+                            <button type="button" onClick={handleSaveGlobalCookie} disabled={globalCookieBusy || !globalCookieDraft.trim()} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50">Connect / Update Cookie</button>
+                            <button type="button" onClick={handleTestGlobalCookie} disabled={globalCookieBusy} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600">Test Login</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex gap-2">
+                          <button type="button" onClick={handleTestGlobalCookie} disabled={globalCookieBusy} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600">Test Login</button>
+                          <button type="button" onClick={() => setShowGlobalCookieEditor(!showGlobalCookieEditor)} className="rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-600">Update Cookie</button>
+                          <button type="button" onClick={handleDeleteGlobalCookie} disabled={globalCookieBusy} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700">Disconnect</button>
+                        </div>
+                      )}
+                      {showGlobalCookieEditor && acct.connected && (
+                        <div className="mt-3">
+                          <textarea value={globalCookieDraft} onChange={(e) => setGlobalCookieDraft(e.target.value)} rows={3} placeholder="Dán cookie mới…" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] text-slate-700" />
+                          <div className="mt-2 flex gap-2">
+                            <button type="button" onClick={handleSaveGlobalCookie} disabled={globalCookieBusy || !globalCookieDraft.trim()} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white">Lưu</button>
+                            <button type="button" onClick={() => setShowGlobalCookieEditor(false)} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600">Hủy</button>
+                          </div>
+                        </div>
+                      )}
+                      {globalCookieMsg && <p className={`mt-2 text-[11px] font-bold ${globalCookieMsg.ok ? "text-emerald-600" : "text-rose-600"}`}>{globalCookieMsg.text}</p>}
+                      {globalCookieBusy && <p className="mt-1 text-[11px] text-slate-500">Đang xử lý…</p>}
+                    </div>
+                  )}
+                  {acct.platform === "facebook" && !acct.connected && <p className="mt-2 text-[11px] text-slate-500">Facebook provider stub — architecture ready, chưa cần login thật.</p>}
+                </div>
+              ))}
+            </div>
+          </Card>
+
           {/* Add Source Form */}
           <Card className="p-5 sm:p-6">
             <h3 className="text-sm font-extrabold text-slate-900">Thêm tác giả Douyin vào kênh {channel.channel_title}</h3>
@@ -1502,14 +1560,13 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             </p>
 
             <form onSubmit={handleAddSource} className="mt-4 space-y-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <input type="text" value={sourceName} onChange={(e) => setSourceName(e.target.value)} placeholder="Tên tác giả / Nhãn nhận diện" className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
-                <input type="text" value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="Link trang cá nhân Douyin (https://v.douyin.com/...)" className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="text-[11px] font-bold text-slate-500">Douyin cookie (Netscape cookies.txt hoặc JSON export) — optional</label>
-                <textarea value={sourceCookie} onChange={(e) => setSourceCookie(e.target.value)} placeholder="Dán nội dung cookies.txt hoặc JSON list từ trình duyệt — không log, chỉ lưu mã hóa" rows={3} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 font-mono text-[11px] text-slate-700 shadow-sm focus:border-indigo-500 focus:outline-none" />
-                <p className="mt-1 text-[11px] text-slate-500">Cookie là secret — DB chỉ lưu dạng mã hóa, UI không bao giờ hiện lại đầy đủ.</p>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <select value={sourcePlatform} onChange={(e) => setSourcePlatform(e.target.value as "douyin" | "facebook")} className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700">
+                  <option value="douyin">Douyin</option>
+                  <option value="facebook">Facebook</option>
+                </select>
+                <input type="text" value={sourceName} onChange={(e) => setSourceName(e.target.value)} placeholder="Tên tác giả / Page" className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
+                <input type="text" value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder={sourcePlatform === "facebook" ? "Link Facebook Page/Profile" : "Link Douyin (https://v.douyin.com/...)"} className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
               </div>
               <div className="grid gap-3 sm:grid-cols-4">
                 <div><label className="text-[11px] font-bold text-slate-600">Scan interval (phút)</label><input type="number" min={5} max={1440} value={sourceScanInterval} onChange={(e) => setSourceScanInterval(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900" /></div>
@@ -1546,56 +1603,39 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               <div className="mt-4 divide-y divide-slate-100">
                 {(workspaceSources.length ? workspaceSources : (detail.sources as unknown as WorkspaceSourceItem[])).map((s) => {
                   const source = s as WorkspaceSourceItem;
-                  const cookieLabel = source.cookie_status === "verified" ? "Cookie verified ✅" : source.cookie_status === "configured" ? "Cookie configured ✅" : source.cookie_status === "expired" ? "Cookie hết hạn ⚠️" : "Chưa có cookie";
                   const isPaused = source.enabled === false;
-                  const needsAuth = source.needs_reauth === true;
+                  const platform = (source as unknown as { platform?: string }).platform || "douyin";
+                  const douyinAccount = globalAccounts.find((a) => a.platform === "douyin");
+                  const needsGlobalAuth = platform === "douyin" && douyinAccount && !douyinAccount.connected;
                   return (
                     <div key={source.id} className="flex flex-col gap-2 py-3.5 text-xs">
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0">
-                          <span className="font-extrabold text-slate-900 text-sm">{source.name}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-extrabold text-slate-900 text-sm">{source.name}</span>
+                            <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${platform === "facebook" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-700"}`}>{platform === "facebook" ? "Facebook" : "Douyin"}</span>
+                          </div>
                           <p className="mt-0.5 font-mono text-[11px] text-slate-400 truncate max-w-md">{source.profile_url}</p>
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
                             <span>Kho: <strong className="text-slate-800">{source.video_count ?? 0}</strong> video</span>
                             <span>· Trạng thái: <Badge tone={source.status === "syncing" || source.status === "running" ? "amber" : source.status === "auth_required" ? "rose" : "slate"}>{source.status}</Badge></span>
-                            <span className={needsAuth ? "font-bold text-rose-600" : source.cookie_status === "verified" || source.cookie_status === "configured" ? "font-bold text-emerald-600" : "text-slate-400"}>· {cookieLabel}{source.cookie_account_name ? ` · ${source.cookie_account_name}` : ""}</span>
-                            {source.cookie_verified_at && <span>· Last verified: {new Date(source.cookie_verified_at).toLocaleString()}</span>}
-                            {needsAuth && <span className="rounded-md bg-rose-50 px-1.5 py-0.5 font-bold text-rose-700">Cần cập nhật cookie</span>}
+                            {needsGlobalAuth && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-700">Douyin account needs login (global)</span>}
                             {isPaused && <Badge tone="amber">Paused</Badge>}
                           </div>
                           {source.inventory_sync_error && <p className="mt-1 text-[11px] font-semibold text-rose-600 line-clamp-2">{source.inventory_sync_error}</p>}
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <button type="button" onClick={() => handleSyncSource(source.id)} disabled={syncingSourceId === source.id || needsAuth} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                          <button type="button" onClick={() => handleSyncSource(source.id)} disabled={syncingSourceId === source.id || !!needsGlobalAuth} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
                             <IconRefresh size={13} /> {syncingSourceId === source.id ? "Đang đồng bộ…" : "Scan Now"}
                           </button>
-                          <button type="button" onClick={() => handlePauseSource(source.id, !isPaused)} className={`inline-flex min-h-[36px] items-center rounded-lg border px-3 py-1.5 text-xs font-bold ${isPaused ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`} disabled={!!(needsAuth && !isPaused)}>
+                          <button type="button" onClick={() => handlePauseSource(source.id, !isPaused)} className={`inline-flex min-h-[36px] items-center rounded-lg border px-3 py-1.5 text-xs font-bold ${isPaused ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
                             {isPaused ? "Resume" : "Pause"}
                           </button>
-                          <button type="button" onClick={() => setCookieEditorId(cookieEditorId === source.id ? null : source.id)} className="inline-flex min-h-[36px] items-center rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50">
-                            {cookieEditorId === source.id ? "Đóng" : source.cookie_configured ? "Update Cookie" : "Add Cookie"}
-                          </button>
-                          <button type="button" onClick={() => handleTestCookie(source.id)} disabled={!!cookieBusyId || !source.cookie_configured} className="inline-flex min-h-[36px] items-center rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 disabled:opacity-50">
-                            Test Cookie
-                          </button>
-                          {source.cookie_configured && <button type="button" onClick={() => handleDeleteCookie(source.id)} disabled={!!cookieBusyId} className="inline-flex min-h-[36px] items-center rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 disabled:opacity-50">Delete Cookie</button>}
                           <button type="button" onClick={() => handleDeleteSource(source.id)} disabled={deletingSourceId === source.id} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50">
                             <IconX size={13} /> Xóa
                           </button>
                         </div>
                       </div>
-                      {cookieEditorId === source.id && (
-                        <div className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-3">
-                          <p className="text-[11px] font-bold text-slate-600">Dán Netscape cookies.txt hoặc JSON export — không log, chỉ lưu mã hóa</p>
-                          <textarea value={cookieDraft} onChange={(e) => setCookieDraft(e.target.value)} rows={4} placeholder="Dán nội dung cookie vào đây…" className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] text-slate-700" />
-                          <div className="mt-2 flex gap-2">
-                            <button type="button" onClick={() => handleSaveCookie(source.id)} disabled={!!cookieBusyId || !cookieDraft.trim()} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50">Lưu cookie</button>
-                            <button type="button" onClick={() => { setCookieEditorId(null); setCookieDraft(""); }} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600">Hủy</button>
-                          </div>
-                        </div>
-                      )}
-                      {cookieMsg && cookieMsg.id === source.id && <p className={`text-[11px] font-bold ${cookieMsg.ok ? "text-emerald-600" : "text-rose-600"}`}>{cookieMsg.text}</p>}
-                      {cookieBusyId === source.id && <p className="text-[11px] text-slate-500">Đang xử lý…</p>}
                     </div>
                   );
                 })}

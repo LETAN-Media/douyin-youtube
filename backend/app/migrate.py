@@ -87,101 +87,153 @@ def run_migrations() -> None:
                 tables=[DouyinSession.__table__],
             )
 
+        # Shared PlatformAccount + generic PipelineSource (isolated transactions)
+        try:
+            from app.models import PlatformAccount, PipelineSource
+
+            if not table_exists(connection, "platform_accounts"):
+                logger.info("Creating platform_accounts table")
+                Base.metadata.create_all(bind=connection, tables=[PlatformAccount.__table__])
+            if not table_exists(connection, "pipeline_sources"):
+                logger.info("Creating pipeline_sources table")
+                Base.metadata.create_all(bind=connection, tables=[PipelineSource.__table__])
+        except Exception as exc:
+            logger.warning("Platform tables create skipped: %s", exc)
+        for _tbl, _col, _typ in [
+            ("douyin_sources", "platform", "VARCHAR(20) DEFAULT 'douyin'"),
+            ("douyin_sources", "avatar_url", "TEXT"),
+            ("douyin_sources", "priority", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                if not column_exists(connection, _tbl, _col):
+                    logger.info("Adding %s to %s", _col, _tbl)
+                    with connection.begin_nested():
+                        connection.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS {_col} {_typ}"))
+            except Exception as exc:
+                logger.warning("Add %s to %s skipped: %s", _col, _tbl, exc)
+        # One-time per-source cookie → global PlatformAccount
+        try:
+            has_cookie = connection.execute(text("SELECT cookie_encrypted FROM douyin_sources WHERE cookie_encrypted IS NOT NULL LIMIT 1")).fetchone()
+            if has_cookie is not None:
+                exists = connection.execute(text("SELECT 1 FROM platform_accounts WHERE platform='douyin' LIMIT 1")).fetchone()
+                if exists is None:
+                    logger.info("Migrating per-source Douyin cookie to global PlatformAccount")
+                    connection.execute(
+                        text(
+                            "INSERT INTO platform_accounts (id, platform, display_name, status, credentials_encrypted, created_at, updated_at) "
+                            "VALUES (:id, 'douyin', 'Douyin', 'connected', :creds, NOW(), NOW()) ON CONFLICT (platform) DO NOTHING"
+                        ),
+                        {"id": str(__import__("uuid").uuid4()), "creds": has_cookie[0]},
+                    )
+        except Exception as exc:
+            logger.warning("PlatformAccount cookie migration skipped: %s", exc)
+
         if not column_exists(connection, "video_jobs", "pipeline_id"):
             logger.info("Adding pipeline_id to video_jobs")
-            connection.execute(
-                text(
-                    "ALTER TABLE video_jobs "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE video_jobs "
                     "ADD COLUMN IF NOT EXISTS pipeline_id VARCHAR(36)"
                 )
             )
 
         if not column_exists(connection, "pipelines", "youtube_credentials"):
             logger.info("Adding youtube_credentials to pipelines")
-            connection.execute(
-                text(
-                    "ALTER TABLE pipelines "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE pipelines "
                     "ADD COLUMN IF NOT EXISTS youtube_credentials TEXT"
                 )
             )
 
         if not column_exists(connection, "pipelines", "youtube_connected"):
             logger.info("Adding youtube_connected to pipelines")
-            connection.execute(
-                text(
-                    "ALTER TABLE pipelines "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE pipelines "
                     "ADD COLUMN IF NOT EXISTS youtube_connected BOOLEAN DEFAULT FALSE"
                 )
             )
 
         if not column_exists(connection, "pipelines", "youtube_channel_id"):
             logger.info("Adding youtube_channel_id to pipelines")
-            connection.execute(
-                text(
-                    "ALTER TABLE pipelines "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE pipelines "
                     "ADD COLUMN IF NOT EXISTS youtube_channel_id VARCHAR(200)"
                 )
             )
 
         if not column_exists(connection, "pipelines", "youtube_channel_title"):
             logger.info("Adding youtube_channel_title to pipelines")
-            connection.execute(
-                text(
-                    "ALTER TABLE pipelines "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE pipelines "
                     "ADD COLUMN IF NOT EXISTS youtube_channel_title VARCHAR(300)"
                 )
             )
 
         if not column_exists(connection, "oauth_states", "pipeline_id"):
             logger.info("Adding pipeline_id to oauth_states")
-            connection.execute(
-                text(
-                    "ALTER TABLE oauth_states "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE oauth_states "
                     "ADD COLUMN IF NOT EXISTS pipeline_id VARCHAR(36)"
                 )
             )
 
         if not column_exists(connection, "oauth_states", "destination_id"):
             logger.info("Adding destination_id to oauth_states")
-            connection.execute(
-                text(
-                    "ALTER TABLE oauth_states "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE oauth_states "
                     "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
                 )
             )
 
         if not column_exists(connection, "video_jobs", "source_video_id"):
             logger.info("Adding source_video_id to video_jobs")
-            connection.execute(
-                text(
-                    "ALTER TABLE video_jobs "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE video_jobs "
                     "ADD COLUMN IF NOT EXISTS source_video_id VARCHAR(200)"
                 )
             )
 
         if not column_exists(connection, "video_jobs", "schedule_slot_key"):
             logger.info("Adding schedule_slot_key to video_jobs")
-            connection.execute(
-                text(
-                    "ALTER TABLE video_jobs "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE video_jobs "
                     "ADD COLUMN IF NOT EXISTS schedule_slot_key VARCHAR(100)"
                 )
             )
 
         if not column_exists(connection, "video_jobs", "destination_id"):
             logger.info("Adding destination_id to video_jobs")
-            connection.execute(
-                text(
-                    "ALTER TABLE video_jobs "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE video_jobs "
                     "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
                 )
             )
 
         if not column_exists(connection, "video_jobs", "publication_id"):
             logger.info("Adding publication_id to video_jobs")
-            connection.execute(
-                text(
-                    "ALTER TABLE video_jobs "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE video_jobs "
                     "ADD COLUMN IF NOT EXISTS publication_id VARCHAR(36)"
                 )
             )
@@ -215,54 +267,60 @@ def run_migrations() -> None:
 
         if not column_exists(connection, "douyin_sources", "original_profile_url"):
             logger.info("Adding original_profile_url to douyin_sources")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_sources "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
                     "ADD COLUMN IF NOT EXISTS original_profile_url TEXT"
                 )
             )
 
         if not column_exists(connection, "douyin_sources", "inventory_sync_status"):
             logger.info("Adding inventory_sync_status to douyin_sources")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_sources "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
                     "ADD COLUMN IF NOT EXISTS inventory_sync_status VARCHAR(20) DEFAULT 'idle'"
                 )
             )
 
         if not column_exists(connection, "douyin_sources", "destination_id"):
             logger.info("Adding destination_id to douyin_sources")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_sources "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
                     "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
                 )
             )
 
         if not column_exists(connection, "douyin_sources", "inventory_count"):
             logger.info("Adding inventory_count to douyin_sources")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_sources "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
                     "ADD COLUMN IF NOT EXISTS inventory_count INTEGER DEFAULT 0"
                 )
             )
 
         if not column_exists(connection, "douyin_sources", "inventory_synced_at"):
             logger.info("Adding inventory_synced_at to douyin_sources")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_sources "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
                     "ADD COLUMN IF NOT EXISTS inventory_synced_at TIMESTAMPTZ"
                 )
             )
 
         if not column_exists(connection, "douyin_sources", "inventory_sync_error"):
             logger.info("Adding inventory_sync_error to douyin_sources")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_sources "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
                     "ADD COLUMN IF NOT EXISTS inventory_sync_error TEXT"
                 )
             )
@@ -311,9 +369,10 @@ def run_migrations() -> None:
 
         if not column_exists(connection, "destinations", "min_upload_interval_minutes"):
             logger.info("Adding min_upload_interval_minutes to destinations")
-            connection.execute(
-                text(
-                    "ALTER TABLE destinations "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE destinations "
                     "ADD COLUMN IF NOT EXISTS min_upload_interval_minutes INTEGER DEFAULT 0"
                 )
             )
@@ -352,9 +411,10 @@ def run_migrations() -> None:
                     ),
                     {"sid": row[0], "vid": row[1]},
                 )
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_videos "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_videos "
                     "ADD CONSTRAINT uq_douyin_video_source_video "
                     "UNIQUE (source_id, video_id)"
                 )
@@ -364,18 +424,20 @@ def run_migrations() -> None:
 
         if not column_exists(connection, "douyin_videos", "is_backfill"):
             logger.info("Adding is_backfill to douyin_videos")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_videos "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_videos "
                     "ADD COLUMN IF NOT EXISTS is_backfill BOOLEAN DEFAULT FALSE"
                 )
             )
 
         if not column_exists(connection, "douyin_videos", "thumbnail_url"):
             logger.info("Adding thumbnail_url to douyin_videos")
-            connection.execute(
-                text(
-                    "ALTER TABLE douyin_videos "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_videos "
                     "ADD COLUMN IF NOT EXISTS thumbnail_url TEXT"
                 )
             )
@@ -389,9 +451,10 @@ def run_migrations() -> None:
 
         if not column_exists(connection, "publications", "publication_mode"):
             logger.info("Adding publication_mode to publications")
-            connection.execute(
-                text(
-                    "ALTER TABLE publications "
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "ALTER TABLE publications "
                     "ADD COLUMN IF NOT EXISTS publication_mode VARCHAR(20) DEFAULT 'auto'"
                 )
             )

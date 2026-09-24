@@ -1046,7 +1046,6 @@ def update_pipeline(
 
 @app.get(
     "/api/pipelines/{pipeline_id}/sources",
-    response_model=list[DouyinSourceOut],
     dependencies=[
         Depends(require_admin)
     ],
@@ -1056,7 +1055,7 @@ def list_pipeline_sources(
     db: Session = Depends(
         get_db
     ),
-) -> list[DouyinSource]:
+) -> list[dict]:
     pipeline = db.get(Pipeline, pipeline_id)
     if pipeline is None:
         raise HTTPException(
@@ -1064,7 +1063,10 @@ def list_pipeline_sources(
             detail="Không tìm thấy pipeline",
         )
 
-    return list(
+    # Return both legacy DouyinSource and new PipelineSource (generic)
+    from app.models import PipelineSource
+
+    douyin = list(
         db.execute(
             select(DouyinSource)
             .where(DouyinSource.pipeline_id == pipeline_id)
@@ -1073,11 +1075,47 @@ def list_pipeline_sources(
         .scalars()
         .all()
     )
+    generic = list(
+        db.execute(
+            select(PipelineSource)
+            .where(PipelineSource.pipeline_id == pipeline_id)
+            .order_by(PipelineSource.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+    out: list[dict] = []
+    for s in douyin:
+        out.append(
+            {
+                "id": s.id,
+                "pipeline_id": s.pipeline_id,
+                "platform": getattr(s, "platform", "douyin") or "douyin",
+                "source_external_id": getattr(s, "douyin_sec_uid", None),
+                "source_url": getattr(s, "profile_url", None),
+                "source_name": s.name,
+                "enabled": s.enabled,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+        )
+    for g in generic:
+        out.append(
+            {
+                "id": g.id,
+                "pipeline_id": g.pipeline_id,
+                "platform": g.platform,
+                "source_external_id": g.source_external_id,
+                "source_url": g.source_url,
+                "source_name": g.source_name,
+                "enabled": g.enabled,
+                "created_at": g.created_at.isoformat() if g.created_at else None,
+            }
+        )
+    return out
 
 
 @app.post(
     "/api/pipelines/{pipeline_id}/sources",
-    response_model=DouyinSourceOut,
     status_code=201,
     dependencies=[
         Depends(require_admin)
@@ -1085,11 +1123,11 @@ def list_pipeline_sources(
 )
 def create_pipeline_source(
     pipeline_id: str,
-    payload: DouyinSourceCreate,
+    payload: dict,
     db: Session = Depends(
         get_db
     ),
-) -> DouyinSource:
+):
     pipeline = db.get(Pipeline, pipeline_id)
     if pipeline is None:
         raise HTTPException(
@@ -1097,8 +1135,44 @@ def create_pipeline_source(
             detail="Không tìm thấy pipeline",
         )
 
-    profile_url = payload.profile_url
-    douyin_sec_uid = payload.douyin_sec_uid
+    # Generic platform handling (douyin/facebook). Douyin uses DouyinSource table for
+    # backwards compat with inventory; Facebook uses PipelineSource.
+    platform = (payload.get("platform") or "douyin").lower() if isinstance(payload, dict) else getattr(payload, "platform", "douyin") or "douyin"
+    # Normalize payload to dict for generic handling
+    if isinstance(payload, dict):
+        p_name = (payload.get("name") or payload.get("source_name") or "").strip()
+        p_profile_url = payload.get("profile_url") or payload.get("source_url") or payload.get("url") or ""
+        p_sec_uid = payload.get("douyin_sec_uid") or payload.get("source_external_id") or ""
+        p_user_id = payload.get("douyin_user_id") or ""
+        p_enabled = payload.get("enabled", True)
+    else:
+        p_name = payload.name
+        p_profile_url = payload.profile_url
+        p_sec_uid = payload.douyin_sec_uid
+        p_user_id = payload.douyin_user_id
+        p_enabled = payload.enabled
+    if not p_name:
+        p_name = f"{platform.capitalize()} Creator"
+    if platform == "facebook":
+        from app.models import PipelineSource as _PS
+        from app.source_providers import registry as _reg
+        prov = _reg.get("facebook")
+        resolved = prov.resolve_source(p_profile_url) if prov else {"source_external_id": p_profile_url, "source_url": p_profile_url}
+        ps = _PS(
+            pipeline_id=pipeline_id,
+            platform="facebook",
+            source_external_id=resolved.get("source_external_id") or p_profile_url,
+            source_url=resolved.get("source_url") or p_profile_url,
+            source_name=p_name,
+            enabled=bool(p_enabled),
+        )
+        db.add(ps)
+        db.commit()
+        db.refresh(ps)
+        return ps  # type: ignore
+
+    profile_url = p_profile_url
+    douyin_sec_uid = p_sec_uid
     original_profile_url = profile_url
 
     if profile_url and not douyin_sec_uid:
@@ -1109,12 +1183,13 @@ def create_pipeline_source(
 
     source = DouyinSource(
         pipeline_id=pipeline_id,
-        name=payload.name,
+        name=p_name,
         original_profile_url=original_profile_url,
         profile_url=profile_url,
-        douyin_sec_uid=douyin_sec_uid or payload.douyin_sec_uid,
-        douyin_user_id=payload.douyin_user_id,
-        enabled=payload.enabled,
+        douyin_sec_uid=douyin_sec_uid or p_sec_uid,
+        douyin_user_id=p_user_id,
+        enabled=bool(p_enabled),
+        platform="douyin",
         inventory_sync_status="queued",
         inventory_count=0,
         inventory_sync_error=None,
@@ -4469,6 +4544,223 @@ def channel_auto_status_endpoint(
         "held_count": int(held_count),
         "rejected_count": int(rejected_count),
     }
+
+
+# ── Global Platform Accounts (shared login) ──
+@app.get(
+    "/api/platform-accounts",
+    dependencies=[Depends(require_admin)],
+)
+def list_platform_accounts_endpoint(db: Session = Depends(get_db)):
+    from app.models import PlatformAccount
+
+    accounts = list(db.execute(select(PlatformAccount).order_by(PlatformAccount.platform.asc())).scalars().all())
+    # Ensure douyin/facebook rows exist for UI
+    for plat in ("douyin", "facebook"):
+        if not any(a.platform == plat for a in accounts):
+            accounts.append(
+                PlatformAccount(platform=plat, display_name=plat.capitalize(), status="needs_login")  # type: ignore
+            )
+    result = []
+    for acct in accounts:
+        # Count how many sources use this platform (across all pipelines)
+        used_by = 0
+        try:
+            used_by = db.execute(select(func.count(DouyinSource.id)).where(DouyinSource.platform == acct.platform)).scalar_one_or_none() or 0
+        except Exception:
+            used_by = 0
+        result.append(
+            {
+                "platform": acct.platform,
+                "display_name": acct.display_name,
+                "status": acct.status,
+                "connected": acct.status == "connected",
+                "last_verified_at": acct.last_verified_at.isoformat() if getattr(acct, "last_verified_at", None) else None,
+                "last_error": getattr(acct, "last_error", None),
+                "used_by_sources": int(used_by),
+            }
+        )
+    return result
+
+
+@app.post(
+    "/api/platform-accounts/douyin",
+    dependencies=[Depends(require_admin)],
+)
+def save_douyin_platform_account_endpoint(
+    payload: SourceCookieSave,
+    db: Session = Depends(get_db),
+):
+    from app.platform_accounts import save_platform_credentials
+
+    try:
+        acct = save_platform_credentials(db, "douyin", payload.cookie)
+        return {
+            "platform": acct.platform,
+            "status": acct.status,
+            "connected": acct.status == "connected",
+            "last_verified_at": acct.last_verified_at.isoformat() if acct.last_verified_at else None,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Cookie không hợp lệ: {exc}")
+
+
+@app.post(
+    "/api/platform-accounts/douyin/test",
+    dependencies=[Depends(require_admin)],
+)
+def test_douyin_platform_account_endpoint(db: Session = Depends(get_db)):
+    from app.platform_accounts import test_platform_account
+
+    try:
+        return test_platform_account(db, "douyin")
+    except RuntimeError as exc:
+        msg = str(exc)
+        code = 410 if "COOKIE_EXPIRED" in msg else 502
+        raise HTTPException(status_code=code, detail=msg)
+
+
+@app.delete(
+    "/api/platform-accounts/douyin",
+    dependencies=[Depends(require_admin)],
+)
+def delete_douyin_platform_account_endpoint(db: Session = Depends(get_db)):
+    from app.models import PlatformAccount
+
+    acct = db.execute(select(PlatformAccount).where(PlatformAccount.platform == "douyin").limit(1)).scalar_one_or_none()
+    if acct is None:
+        return {"ok": True}
+    acct.credentials_encrypted = None
+    acct.status = "needs_login"
+    acct.last_verified_at = None
+    acct.last_error = None
+    db.commit()
+    return {"ok": True, "platform": "douyin", "status": "needs_login"}
+
+
+@app.post(
+    "/api/platform-accounts/facebook",
+    dependencies=[Depends(require_admin)],
+)
+def save_facebook_platform_account_endpoint(
+    payload: SourceCookieSave,
+    db: Session = Depends(get_db),
+):
+    from app.platform_accounts import save_platform_credentials
+
+    try:
+        acct = save_platform_credentials(db, "facebook", payload.cookie, display_name="Facebook")
+        return {"platform": acct.platform, "status": acct.status, "connected": acct.status == "connected"}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete(
+    "/api/platform-accounts/facebook",
+    dependencies=[Depends(require_admin)],
+)
+def delete_facebook_platform_account_endpoint(db: Session = Depends(get_db)):
+    from app.models import PlatformAccount
+
+    acct = db.execute(select(PlatformAccount).where(PlatformAccount.platform == "facebook").limit(1)).scalar_one_or_none()
+    if acct is None:
+        return {"ok": True}
+    acct.credentials_encrypted = None
+    acct.status = "needs_login"
+    acct.last_verified_at = None
+    db.commit()
+    return {"ok": True}
+
+
+
+@app.patch(
+    "/api/pipeline-sources/{source_id}",
+    dependencies=[Depends(require_admin)],
+)
+def update_pipeline_source_endpoint(
+    source_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    from app.models import PipelineSource
+
+    src = db.get(PipelineSource, source_id)
+    if src is None:
+        # Fallback to DouyinSource for legacy
+        src2 = db.get(DouyinSource, source_id)
+        if src2 is None:
+            raise HTTPException(status_code=404, detail="Không tìm thấy source")
+        # Allow toggling enabled via legacy table
+        if "enabled" in payload:
+            src2.enabled = bool(payload["enabled"])
+            db.commit()
+        return {"ok": True, "id": src2.id, "enabled": src2.enabled}
+    if "enabled" in payload:
+        src.enabled = bool(payload["enabled"])
+    if "priority" in payload:
+        src.priority = int(payload["priority"])
+    db.commit()
+    return {"ok": True, "id": src.id, "enabled": src.enabled}
+
+
+@app.delete(
+    "/api/pipeline-sources/{source_id}",
+    dependencies=[Depends(require_admin)],
+)
+def delete_pipeline_source_endpoint(
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    from app.models import PipelineSource
+
+    src = db.get(PipelineSource, source_id)
+    if src is not None:
+        db.delete(src)
+        db.commit()
+        return {"ok": True}
+    # Fallback legacy
+    dsrc = db.get(DouyinSource, source_id)
+    if dsrc is not None:
+        db.delete(dsrc)
+        db.commit()
+        return {"ok": True}
+    raise HTTPException(status_code=404, detail="Không tìm thấy source")
+
+
+@app.post(
+    "/api/pipeline-sources/{source_id}/scan",
+    dependencies=[Depends(require_admin)],
+)
+def scan_pipeline_source_endpoint(
+    source_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    from app.models import PipelineSource
+
+    src = db.get(PipelineSource, source_id)
+    if src is not None:
+        # For Facebook stub, just return
+        if src.platform != "douyin":
+            return {"ok": True, "platform": src.platform, "note": "Facebook scan queued (stub)"}
+        # For pipeline_sources douyin, we need a DouyinSource-like sync
+        # For now, return ok (real Douyin pipeline_sources not yet scanned via Playwright)
+        return {"ok": True, "source_id": src.id}
+    # Legacy DouyinSource
+    ds = db.get(DouyinSource, source_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    if getattr(ds, "needs_reauth", False):
+        # Check global account instead
+        from app.models import PlatformAccount
+
+        acct = db.execute(select(PlatformAccount).where(PlatformAccount.platform == "douyin").limit(1)).scalar_one_or_none()
+        if acct is None or acct.status != "connected":
+            raise HTTPException(status_code=409, detail="Douyin PlatformAccount needs login (global)")
+    ds.next_scan_at = _utcnow()
+    db.commit()
+    background_tasks.add_task(trigger_inventory_sync_job, ds.id, "latest")
+    return {"ok": True, "source_id": ds.id}
 
 
 @app.get(

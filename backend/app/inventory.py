@@ -331,19 +331,24 @@ def sync_source_inventory(
         return {"new": 0, "updated": 0}
 
     try:
-        # Per-source cookie (decrypted server-side only) takes precedence;
-        # falls back to saved session / global env inside providers.
+        # Global PlatformAccount cookie is primary; per-source cookie is
+        # fallback for migration period. Providers also fallback to saved
+        # session / env.
         cookie_jar: list[dict[str, Any]] | None = None
         try:
-            with SessionLocal() as cookie_db:
-                cookie_source = cookie_db.get(DouyinSource, source_id)
-                if cookie_source is not None and cookie_source.cookie_encrypted:
-                    from app.source_cookies import load_source_cookie_jar
+            from app.platform_accounts import load_platform_cookie_jar
 
-                    cookie_jar = load_source_cookie_jar(cookie_source)
+            cookie_jar = load_platform_cookie_jar("douyin")
+            if not cookie_jar:
+                with SessionLocal() as cookie_db:
+                    cookie_source = cookie_db.get(DouyinSource, source_id)
+                    if cookie_source is not None and cookie_source.cookie_encrypted:
+                        from app.source_cookies import load_source_cookie_jar
+
+                        cookie_jar = load_source_cookie_jar(cookie_source)
         except Exception:
             logger.warning(
-                "Per-source cookie load failed for source=%s; continuing",
+                "Platform cookie load failed for source=%s; continuing",
                 source_id,
             )
             cookie_jar = None
@@ -358,11 +363,23 @@ def sync_source_inventory(
                     db, source_id, status="auth_required",
                     error=str(exc) or AUTH_REQUIRED_MESSAGE,
                 )
+                # Mark global account as expired, and per-source as needs_reauth
+                try:
+                    from app.models import PlatformAccount
+
+                    acct = db.execute(
+                        __import__("sqlalchemy").select(PlatformAccount).where(
+                            PlatformAccount.platform == "douyin"
+                        ).limit(1)
+                    ).scalar_one_or_none()
+                    if acct is not None:
+                        acct.status = "expired"
+                        acct.last_error = str(exc)[:500]
+                except Exception:
+                    pass
                 stalled = db.get(DouyinSource, source_id)
                 if stalled is not None:
                     stalled.needs_reauth = True
-                    if stalled.cookie_encrypted:
-                        stalled.cookie_status = "expired"
             logger.warning("Source %s inventory auth_required", source_id)
             return {"new": 0, "updated": 0}
 

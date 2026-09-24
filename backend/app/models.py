@@ -191,6 +191,148 @@ class Pipeline(Base):
     )
 
 
+class PlatformAccount(Base):
+    """Global platform login shared across all pipelines/sources."""
+
+    __tablename__ = "platform_accounts"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        unique=True,
+    )
+
+    display_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="needs_login",
+    )
+
+    credentials_encrypted: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
+# Generic pipeline source (Douyin, Facebook, ...). Implemented via
+# douyin_sources table for backwards compat; platform field makes it generic.
+# New code should use PipelineSource alias; old code using DouyinSource keeps working.
+class PipelineSource(Base):
+    __tablename__ = "pipeline_sources"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    pipeline_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("pipelines.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="douyin",
+    )
+
+    source_external_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    source_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    source_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    avatar_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    priority: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    last_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_seen_content_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    next_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
 class DouyinSource(Base):
     __tablename__ = "douyin_sources"
 
@@ -219,6 +361,13 @@ class DouyinSource(Base):
     videos: Mapped[list["DouyinVideo"]] = relationship(
         back_populates="source",
         lazy="selectin",
+    )
+
+    # Generic platform support (douyin/facebook). Default douyin for legacy rows.
+    platform: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="douyin",
     )
 
     name: Mapped[str] = mapped_column(
