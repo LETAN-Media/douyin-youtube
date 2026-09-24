@@ -54,7 +54,7 @@ def client_config() -> dict:
             "client_id": settings.google_client_id,
             "client_secret": settings.google_client_secret,
             "auth_uri": (
-                "https://accounts.google.com/o/oauth2/auth"
+                "https://accounts.google.com/o/oauth2/v2/auth"
             ),
             "token_uri": (
                 "https://oauth2.googleapis.com/token"
