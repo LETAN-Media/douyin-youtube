@@ -125,53 +125,99 @@ def _build_source_context(profile_url: str, videos: list[dict[str, Any]]) -> str
     return "\n".join(parts)[:6000]
 
 
+def _source_is_due(source: DouyinSource, now: datetime) -> bool:
+    if not source.enabled:
+        return False
+    if source.needs_reauth:
+        return False
+    nxt = source.next_scan_at
+    if nxt is not None:
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=timezone.utc)
+        if nxt > now:
+            return False
+    return True
+
+
+def _scan_one_source(source_id: str) -> None:
+    try:
+        with SessionLocal() as db:
+            source = db.get(DouyinSource, source_id)
+            if source is None or not source.enabled or source.needs_reauth:
+                return
+            pipeline_id = source.pipeline_id
+            profile_url = source.profile_url or ""
+            user_id = source.douyin_sec_uid or source.douyin_user_id or ""
+            if user_id and not profile_url:
+                profile_url = f"https://www.douyin.com/user/{user_id}"
+            if not profile_url:
+                logger.info("Source %s has no profile_url, skipping", source.id)
+                return
+            pipeline = (
+                db.get(Pipeline, pipeline_id) if pipeline_id else None
+            )
+            if pipeline is None or not pipeline.enabled:
+                return
+            logger.info(
+                "Checking source=%s pipeline=%s profile=%s",
+                source.id, pipeline.id, profile_url,
+            )
+    except Exception:
+        logger.exception("Failed to pre-check source=%s", source_id)
+        return
+    try:
+        # Continuous monitor: latest pages only with early stop.
+        # Initial full scans happen on source creation / manual Sync.
+        sync_source_inventory(source_id, mode="latest")
+    except Exception:
+        logger.exception("Failed to process source=%s", source_id)
+
+
 def run_monitor_once() -> None:
+    """Shared scheduler: every cycle scans sources where next_scan_at <= now.
+
+    Limited concurrency (DOUYIN_SCAN_CONCURRENCY, default 2). One failing
+    source never kills the cycle for the others.
+    """
+    now = utcnow()
     with SessionLocal() as db:
         sources = db.execute(
             select(DouyinSource)
             .where(DouyinSource.enabled == True)  # noqa: E712
             .order_by(DouyinSource.created_at.asc())
         ).scalars().all()
+        due_ids = [
+            s.id for s in sources
+            if _source_is_due(s, now) and not s.needs_reauth
+        ]
 
-    logger.info("Monitoring %s enabled sources", len(sources))
+    try:
+        concurrency = int(
+            getattr(settings, "douyin_scan_concurrency", 2) or 2
+        )
+    except (TypeError, ValueError):
+        concurrency = 2
+    concurrency = max(1, min(concurrency, 4))
 
-    for source in sources:
-        try:
-            if not source.enabled:
-                continue
+    logger.info(
+        "Monitoring %s enabled sources (%s due, concurrency=%s)",
+        len(sources), len(due_ids), concurrency,
+    )
 
-            pipeline_id = source.pipeline_id
-            profile_url = source.profile_url or ""
-            user_id = source.douyin_sec_uid or source.douyin_user_id or ""
+    if not due_ids:
+        return
 
-            if user_id and not profile_url:
-                profile_url = f"https://www.douyin.com/user/{user_id}"
+    import concurrent.futures
 
-            if not profile_url:
-                logger.info("Source %s has no profile_url, skipping", source.id)
-                continue
-
-            pipeline = None
-            if pipeline_id:
-                with SessionLocal() as pipeline_db:
-                    pipeline = pipeline_db.get(Pipeline, pipeline_id)
-
-            if pipeline is None:
-                logger.warning("Source %s has no pipeline, skipping", source.id)
-                continue
-
-            if not pipeline.enabled:
-                logger.info("Pipeline %s is disabled, skipping source %s", pipeline.id, source.id)
-                continue
-
-            logger.info("Checking source=%s pipeline=%s profile=%s", source.id, pipeline.id, profile_url)
-
-            # Continuous monitor: latest pages only with early stop.
-            # Initial full scans happen on source creation / manual Sync.
-            sync_source_inventory(source.id, mode="latest")
-
-        except Exception:
-            logger.exception("Failed to process source=%s", source.id)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=concurrency
+    ) as pool:
+        futures = [pool.submit(_scan_one_source, sid) for sid in due_ids]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                fut.result()
+            except Exception:
+                logger.exception("Monitor scan task failed")
 
 
 async def monitor_loop() -> None:

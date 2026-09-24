@@ -306,6 +306,7 @@ export interface ManualMetadataItem {
   final_description: string;
   content_match?: boolean | null;
   content_match_reason?: string | null;
+  match_level?: "match" | "borderline" | "mismatch" | null;
 }
 
 export interface ManualMetadataResult {
@@ -372,6 +373,50 @@ export interface ChannelSourceItem {
   status: string;
   video_count: number;
   last_synced_at?: string | null;
+}
+
+export interface WorkspaceSourceItem extends ChannelSourceItem {
+  enabled?: boolean;
+  cookie_configured?: boolean;
+  cookie_status?: string | null;
+  cookie_account_name?: string | null;
+  cookie_verified_at?: string | null;
+  needs_reauth?: boolean;
+  scan_interval_minutes?: number | null;
+  max_videos_per_day?: number | null;
+  next_scan_at?: string | null;
+  last_scan_at?: string | null;
+  inventory_sync_error?: string | null;
+}
+
+export interface SourceCookieStatus {
+  configured: boolean;
+  status: string;
+  account_name?: string | null;
+  verified_at?: string | null;
+  needs_reauth: boolean;
+}
+
+export interface SourceCookieTestResult {
+  ok: boolean;
+  nickname?: string | null;
+  sec_uid?: string | null;
+  latest_aweme_id?: string | null;
+}
+
+export interface ChannelAutoStatus {
+  auto_enabled: boolean;
+  sources_count: number;
+  enabled_sources: number;
+  needs_reauth_sources: number;
+  last_scan_at?: string | null;
+  next_scan_at?: string | null;
+  today_published: number;
+  today_limit: number;
+  queue_count: number;
+  failed_count: number;
+  held_count: number;
+  rejected_count: number;
 }
 
 export interface ChannelPipelineInfo {

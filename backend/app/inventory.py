@@ -170,6 +170,48 @@ def _set_source_state(
     if status in ("completed", "auth_required", "failed"):
         source.inventory_synced_at = utcnow()
         source.last_checked_at = utcnow()
+        source.last_scan_at = utcnow()
+        try:
+            interval = int(source.scan_interval_minutes or 15)
+        except (TypeError, ValueError):
+            interval = 15
+        source.next_scan_at = utcnow() + __import__("datetime").timedelta(
+            minutes=max(5, interval)
+        )
+    db.commit()
+
+
+def _apply_baseline_policy(
+    db: Session,
+    *,
+    source: DouyinSource,
+) -> None:
+    """First-sync policy: NEW_ONLY baselines everything (no historic uploads);
+    LAST_N keeps the newest N videos active, baselines the rest."""
+    if source.baseline_done:
+        return
+    candidates = db.execute(
+        select(DouyinVideo)
+        .where(DouyinVideo.source_id == source.id)
+        .where(DouyinVideo.status.in_(["new", "backlog"]))
+        .order_by(DouyinVideo.douyin_created_at.desc())
+    ).scalars().all()
+    mode = (source.start_mode or "new_only").lower()
+    keep_ids: set[str] = set()
+    if mode == "last_n":
+        try:
+            limit = max(1, int(source.initial_limit or 10))
+        except (TypeError, ValueError):
+            limit = 10
+        # videos without a timestamp sort last; keep discovery-fresh ones.
+        with_ts = [v for v in candidates if v.douyin_created_at]
+        without_ts = [v for v in candidates if not v.douyin_created_at]
+        ordered = with_ts + without_ts
+        keep_ids = {v.id for v in ordered[:limit]}
+    for video in candidates:
+        if video.id not in keep_ids:
+            video.status = "baseline"
+    source.baseline_done = True
     db.commit()
 
 
@@ -289,9 +331,26 @@ def sync_source_inventory(
         return {"new": 0, "updated": 0}
 
     try:
+        # Per-source cookie (decrypted server-side only) takes precedence;
+        # falls back to saved session / global env inside providers.
+        cookie_jar: list[dict[str, Any]] | None = None
+        try:
+            with SessionLocal() as cookie_db:
+                cookie_source = cookie_db.get(DouyinSource, source_id)
+                if cookie_source is not None and cookie_source.cookie_encrypted:
+                    from app.source_cookies import load_source_cookie_jar
+
+                    cookie_jar = load_source_cookie_jar(cookie_source)
+        except Exception:
+            logger.warning(
+                "Per-source cookie load failed for source=%s; continuing",
+                source_id,
+            )
+            cookie_jar = None
         try:
             videos, provider = discover_profile_videos(
                 profile_url, sec_uid, source_id, full=full,
+                cookie_jar=cookie_jar,
             )
         except DouyinAuthRequiredError as exc:
             with SessionLocal.begin() as db:
@@ -299,6 +358,11 @@ def sync_source_inventory(
                     db, source_id, status="auth_required",
                     error=str(exc) or AUTH_REQUIRED_MESSAGE,
                 )
+                stalled = db.get(DouyinSource, source_id)
+                if stalled is not None:
+                    stalled.needs_reauth = True
+                    if stalled.cookie_encrypted:
+                        stalled.cookie_status = "expired"
             logger.warning("Source %s inventory auth_required", source_id)
             return {"new": 0, "updated": 0}
 
@@ -332,6 +396,7 @@ def sync_source_inventory(
                 db, source=source, pipeline=pipeline,
                 videos=videos, backfill=full,
             )
+            _apply_baseline_policy(db, source=source)
             if videos:
                 source.last_video_id = str(videos[0].get("video_id") or "")
             total = db.execute(

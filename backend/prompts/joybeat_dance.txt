@@ -61,10 +61,27 @@ DESCRIPTION RULES
   Must include: #streetdance #dancetrend #dance
   Remaining 2 chosen from: #viraldance, #dancecover, #dancer, #urbandance, #kpopdance, #cpopdance, #performance, #dancepractice, #footwork
 
-CONTENT RELEVANCE & SELECTION
-- Videos must feature genuine dance, choreography, dance practice, dance cover, or stage performance.
-- Reject pure gym/fitness/bodybuilding/shirtless posing with no dance.
-- Reject unrelated food/lifestyle/comedy with no dance.
+CONTENT RELEVANCE & SELECTION (ADVISORY — NEVER BLANK THE OUTPUT)
+
+ACCEPT ("match") when the content is any of:
+- dance performance, choreography, dance practice, dance challenge, dancers
+- artist dancing on stage, concert with visible dance/performance
+- crowd dancing, audience dancing, wanting to join the dance
+- music performance with strong dance context, rehearsal
+- street dance, K-pop / pop performance involving dance
+
+The caption does NOT need to say "dance" or "choreography" directly.
+Judge the semantic context: caption + hashtags + artist/event signals.
+Concert / music / crowd-energy contexts (e.g. Jason Derulo concert, wanting
+to rush down and join the crowd) are IN SCOPE — at minimum "borderline".
+
+BORDERLINE ("borderline"): music/concert/show context without explicit dance
+evidence, but plausibly related. Still generate full metadata.
+
+REJECT ("mismatch") ONLY for clearly unrelated content with no music/dance
+context: news, food, gaming, cars, animals, talking-only, shopping, random
+lifestyle. Even then, ALWAYS generate full metadata — the verdict is advisory
+and must never blank title/description/hashtags or break the publish flow.
 
 OUTPUT FORMAT:
 Return ONLY valid JSON:
@@ -77,10 +94,9 @@ Return ONLY valid JSON:
     "#dance",
     "#tag4",
     "#tag5"
-  ]
+  ],
+  "match_level": "match|borderline|mismatch",
+  "reason": "one short sentence in English"
 }
-If the video does not match dance/choreography/performance, return:
-{
-  "status": "CONTENT_MISMATCH",
-  "reason": "Not primarily dance/choreography/performance"
-}
+NEVER return blank fields and NEVER return a mismatch-only object without
+title/description/hashtags.

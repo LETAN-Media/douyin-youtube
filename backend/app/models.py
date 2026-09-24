@@ -284,6 +284,106 @@ class DouyinSource(Base):
         nullable=True,
     )
 
+    # ---- AUTO mode: per-source cookie + scan policy ----
+    # Cookie is stored Fernet-encrypted, never plaintext, never logged.
+    cookie_encrypted: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    cookie_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="missing",
+    )
+
+    cookie_account_name: Mapped[str | None] = mapped_column(
+        String(300),
+        nullable=True,
+    )
+
+    cookie_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    needs_reauth: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    scan_interval_minutes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=15,
+    )
+
+    max_videos_per_day: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=50,
+    )
+
+    include_keywords: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    exclude_keywords: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    next_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # NEW_ONLY (default): first sync only establishes a baseline, uploads
+    # nothing historical. LAST_N: keep newest N videos as active inventory.
+    start_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="new_only",
+    )
+
+    initial_limit: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=10,
+    )
+
+    baseline_done: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    # AI verdict policies for AUTO inventory.
+    borderline_policy: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="hold",
+    )
+
+    mismatch_policy: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="reject",
+    )
+
+    order: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="oldest_first",
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -414,6 +514,14 @@ class DouyinVideo(Base):
     publications: Mapped[list["Publication"]] = relationship(
         back_populates="douyin_video",
         lazy="selectin",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "video_id",
+            name="uq_douyin_video_source_video",
+        ),
     )
 
 
@@ -565,6 +673,13 @@ class Destination(Base):
     last_skip_reason: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    # Minimum minutes between two YouTube uploads for this destination.
+    min_upload_interval_minutes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
     )
 
     publications: Mapped[list["Publication"]] = relationship(

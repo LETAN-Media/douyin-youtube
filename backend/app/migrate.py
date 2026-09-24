@@ -267,6 +267,101 @@ def run_migrations() -> None:
                 )
             )
 
+        # ---- AUTO mode: per-source cookie + scan policy ----
+        for column_name, column_type in [
+            ("cookie_encrypted", "TEXT"),
+            ("cookie_status", "VARCHAR(20) DEFAULT 'missing'"),
+            ("cookie_account_name", "VARCHAR(300)"),
+            ("cookie_verified_at", "TIMESTAMPTZ"),
+            ("needs_reauth", "BOOLEAN DEFAULT FALSE"),
+            ("scan_interval_minutes", "INTEGER DEFAULT 15"),
+            ("max_videos_per_day", "INTEGER DEFAULT 50"),
+            ("include_keywords", "JSON"),
+            ("exclude_keywords", "JSON"),
+            ("next_scan_at", "TIMESTAMPTZ"),
+            ("last_scan_at", "TIMESTAMPTZ"),
+            ("start_mode", "VARCHAR(20) DEFAULT 'new_only'"),
+            ("initial_limit", "INTEGER DEFAULT 10"),
+            ("baseline_done", "BOOLEAN DEFAULT FALSE"),
+            ("borderline_policy", "VARCHAR(20) DEFAULT 'hold'"),
+            ("mismatch_policy", "VARCHAR(20) DEFAULT 'reject'"),
+            ('"order"', "VARCHAR(20) DEFAULT 'oldest_first'"),
+        ]:
+            if not column_exists(connection, "douyin_sources", column_name.strip('"')):
+                logger.info("Adding %s to douyin_sources", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
+
+        for column_name, column_type in [
+            ("match_level", "VARCHAR(20)"),
+            ("hold_reason", "TEXT"),
+        ]:
+            if not column_exists(connection, "douyin_videos", column_name):
+                logger.info("Adding %s to douyin_videos", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_videos "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
+
+        if not column_exists(connection, "destinations", "min_upload_interval_minutes"):
+            logger.info("Adding min_upload_interval_minutes to destinations")
+            connection.execute(
+                text(
+                    "ALTER TABLE destinations "
+                    "ADD COLUMN IF NOT EXISTS min_upload_interval_minutes INTEGER DEFAULT 0"
+                )
+            )
+
+        # Existing sources with prior scans keep flowing: mark their baseline
+        # as done so the NEW_ONLY first-sync policy only affects new sources.
+        try:
+            connection.execute(
+                text(
+                    "UPDATE douyin_sources SET baseline_done = TRUE "
+                    "WHERE baseline_done = FALSE AND ("
+                    "inventory_count > 0 OR last_scan_at IS NOT NULL "
+                    "OR inventory_synced_at IS NOT NULL)"
+                )
+            )
+        except Exception:
+            logger.info("baseline_done backfill skipped")
+
+        # Dedupe (source_id, video_id) then enforce uniqueness so an aweme
+        # is never enqueued twice for the same source.
+        try:
+            dupes = connection.execute(
+                text(
+                    "SELECT source_id, video_id, COUNT(*) c FROM douyin_videos "
+                    "WHERE source_id IS NOT NULL "
+                    "GROUP BY source_id, video_id HAVING COUNT(*) > 1"
+                )
+            ).fetchall()
+            for row in dupes:
+                connection.execute(
+                    text(
+                        "DELETE FROM douyin_videos a USING douyin_videos b "
+                        "WHERE a.id > b.id "
+                        "AND a.source_id = :sid AND b.source_id = :sid "
+                        "AND a.video_id = :vid AND b.video_id = :vid"
+                    ),
+                    {"sid": row[0], "vid": row[1]},
+                )
+            connection.execute(
+                text(
+                    "ALTER TABLE douyin_videos "
+                    "ADD CONSTRAINT uq_douyin_video_source_video "
+                    "UNIQUE (source_id, video_id)"
+                )
+            )
+        except Exception:
+            logger.info("Unique (source_id, video_id) already exists or skipped")
+
         if not column_exists(connection, "douyin_videos", "is_backfill"):
             logger.info("Adding is_backfill to douyin_videos")
             connection.execute(

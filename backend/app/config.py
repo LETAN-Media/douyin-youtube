@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # Falls back to ADMIN_TOKEN-derived key when empty.
     session_encryption_key: str = ""
 
+    # Preferred key for per-source Douyin cookie encryption (Fernet via
+    # SHA-256 digest). Falls back to SESSION_ENCRYPTION_KEY then ADMIN_TOKEN.
+    app_encryption_key: str = ""
+
     # QR login flow budget (seconds the backend waits for a QR scan).
     douyin_login_timeout_seconds: int = 300
 
@@ -54,6 +58,10 @@ class Settings(BaseSettings):
     monitor_enabled: bool = True
     monitor_poll_seconds: int = 300
     monitor_startup_delay_seconds: int = 10
+
+    # AUTO source scan configuration
+    auto_scan_interval_minutes: int = 15
+    douyin_scan_concurrency: int = 2
 
     # Douyin browser inventory configuration
     max_inventory_pages: int = 200

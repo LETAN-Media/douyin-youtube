@@ -42,6 +42,7 @@ from app.models import (
 )
 from app.schemas import (
     ChannelAddSourceRequest,
+    ChannelAutoStatus,
     ChannelDetailResponse,
     ChannelItem,
     ChannelUpdateRequest,
@@ -70,6 +71,10 @@ from app.schemas import (
     PublicationOut,
     PublicationPublishRequest,
     PublicationRescheduleRequest,
+    SourceCookieSave,
+    SourceCookieStatus,
+    SourceCookieTestResponse,
+    SourceWithCookieOut,
     SourceSyncResponse,
 )
 from app.security import require_admin
@@ -3299,6 +3304,7 @@ def manual_metadata_endpoint(
                     final_description=gen["final_description"],
                     content_match=gen.get("content_match"),
                     content_match_reason=gen.get("content_match_reason"),
+                    match_level=gen.get("match_level"),
                 )
         return ManualMetadataResponse(
             metadata_mode="separate",
@@ -3325,6 +3331,7 @@ def manual_metadata_endpoint(
             final_description=gen["final_description"],
             content_match=gen.get("content_match"),
             content_match_reason=gen.get("content_match_reason"),
+            match_level=gen.get("match_level"),
         )
 
     return ManualMetadataResponse(
@@ -4048,6 +4055,19 @@ def update_channel_endpoint(
     return get_channel_detail_endpoint(destination_id=destination_id, db=db)
 
 
+def trigger_inventory_sync_job(source_id: str, mode: str = "full") -> None:
+    """Background inventory sync runner (also fixes the previously missing
+    helper referenced by the channel source endpoints)."""
+    try:
+        from app.inventory import sync_source_inventory
+
+        sync_source_inventory(source_id, mode=mode)
+    except Exception:
+        logger.exception(
+            "Background inventory sync failed for source %s", source_id
+        )
+
+
 @app.post(
     "/api/channels/{destination_id}/sources",
     status_code=201,
@@ -4084,16 +4104,34 @@ def add_channel_source_endpoint(
         douyin_sec_uid=sec_uid,
         enabled=True,
         inventory_sync_status="idle",
+        scan_interval_minutes=payload.scan_interval_minutes,
+        max_videos_per_day=payload.max_videos_per_day,
+        start_mode=payload.start_mode,
+        initial_limit=payload.initial_limit,
+        include_keywords=payload.include_keywords,
+        exclude_keywords=payload.exclude_keywords,
+        borderline_policy=payload.borderline_policy,
+        mismatch_policy=payload.mismatch_policy,
+        order=payload.order,
     )
     db.add(source)
     db.commit()
     db.refresh(source)
 
-    try:
-        from app.main import trigger_inventory_sync_job
-        background_tasks.add_task(trigger_inventory_sync_job, source.id)
-    except Exception:
-        pass
+    if payload.cookie and payload.cookie.strip():
+        from app.source_cookies import save_source_cookie
+
+        try:
+            save_source_cookie(db, source, payload.cookie)
+        except ValueError as exc:
+            db.delete(source)
+            db.commit()
+            raise HTTPException(status_code=400, detail=f"Cookie không hợp lệ: {exc}")
+
+    # NEW_ONLY establishes a cheap latest baseline first; LAST_N/full
+    # discovers history (kept newest N active, rest baselined).
+    initial_mode = "latest" if source.start_mode == "new_only" else "full"
+    background_tasks.add_task(trigger_inventory_sync_job, source.id, initial_mode)
 
     return {
         "id": source.id,
@@ -4158,9 +4196,279 @@ def sync_channel_source_endpoint(
             detail="Cross-workspace mismatch: source does not belong to this channel workspace",
         )
 
-    from app.main import trigger_inventory_sync_job
     background_tasks.add_task(trigger_inventory_sync_job, s.id)
     return {"ok": True, "source_id": s.id}
+
+
+def _require_workspace_source(
+    db: Session,
+    destination_id: str,
+    source_id: str,
+) -> tuple[Destination, DouyinSource]:
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    if s.pipeline_id != d.pipeline_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cross-workspace mismatch: source does not belong to this channel workspace",
+        )
+    return d, s
+
+
+def _source_with_cookie_out(s: DouyinSource) -> dict:
+    return {
+        "id": s.id,
+        "name": s.name,
+        "pipeline_id": s.pipeline_id,
+        "original_profile_url": s.original_profile_url,
+        "profile_url": s.profile_url,
+        "douyin_sec_uid": s.douyin_sec_uid,
+        "douyin_user_id": s.douyin_user_id,
+        "enabled": s.enabled,
+        "inventory_sync_status": s.inventory_sync_status,
+        "inventory_count": s.inventory_count,
+        "inventory_synced_at": s.inventory_synced_at,
+        "inventory_sync_error": s.inventory_sync_error,
+        "last_video_id": s.last_video_id,
+        "last_checked_at": s.last_checked_at,
+        "created_at": s.created_at,
+        "updated_at": s.updated_at,
+        "cookie_status": s.cookie_status or "missing",
+        "cookie_account_name": s.cookie_account_name,
+        "cookie_verified_at": s.cookie_verified_at,
+        "needs_reauth": bool(s.needs_reauth),
+        "scan_interval_minutes": s.scan_interval_minutes or 15,
+        "max_videos_per_day": s.max_videos_per_day
+        if s.max_videos_per_day is not None else 5,
+        "include_keywords": s.include_keywords,
+        "exclude_keywords": s.exclude_keywords,
+        "next_scan_at": s.next_scan_at,
+        "last_scan_at": s.last_scan_at,
+        "start_mode": s.start_mode or "new_only",
+        "initial_limit": s.initial_limit or 10,
+        "baseline_done": bool(s.baseline_done),
+        "borderline_policy": s.borderline_policy or "hold",
+        "mismatch_policy": s.mismatch_policy or "reject",
+        "order": s.order or "oldest_first",
+        "cookie_configured": bool(s.cookie_encrypted),
+    }
+
+
+@app.get(
+    "/api/channels/{destination_id}/sources",
+    dependencies=[Depends(require_admin)],
+)
+def list_channel_sources_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    sources = list(
+        db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == d.pipeline_id)
+            .order_by(DouyinSource.created_at.asc())
+        ).scalars().all()
+    )
+    return [_source_with_cookie_out(s) for s in sources]
+
+
+@app.post(
+    "/api/sources/{source_id}/cookie",
+    dependencies=[Depends(require_admin)],
+)
+def save_source_cookie_endpoint(
+    source_id: str,
+    payload: SourceCookieSave,
+    db: Session = Depends(get_db),
+):
+    from app.source_cookies import save_source_cookie
+
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    try:
+        return save_source_cookie(db, s, payload.cookie)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Cookie không hợp lệ: {exc}")
+
+
+@app.delete(
+    "/api/sources/{source_id}/cookie",
+    dependencies=[Depends(require_admin)],
+)
+def delete_source_cookie_endpoint(
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    from app.source_cookies import delete_source_cookie
+
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    return delete_source_cookie(db, s)
+
+
+@app.post(
+    "/api/sources/{source_id}/test",
+    dependencies=[Depends(require_admin)],
+)
+def test_source_cookie_endpoint(
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    from app.source_cookies import test_source_cookie
+
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    try:
+        return test_source_cookie(db, s)
+    except RuntimeError as exc:
+        msg = str(exc)
+        code = 410 if msg.startswith("COOKIE_EXPIRED") else 502
+        raise HTTPException(status_code=code, detail=msg)
+
+
+@app.post(
+    "/api/sources/{source_id}/scan",
+    dependencies=[Depends(require_admin)],
+)
+def scan_source_now_endpoint(
+    source_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    if s.needs_reauth:
+        raise HTTPException(
+            status_code=409,
+            detail="DOUYIN_COOKIE_EXPIRED: cập nhật cookie trước khi scan",
+        )
+    s.next_scan_at = _utcnow()
+    db.commit()
+    background_tasks.add_task(trigger_inventory_sync_job, s.id, "latest")
+    return {"ok": True, "source_id": s.id}
+
+
+@app.post(
+    "/api/sources/{source_id}/pause",
+    dependencies=[Depends(require_admin)],
+)
+def pause_source_endpoint(
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    s.enabled = False
+    db.commit()
+    return {"ok": True, "source_id": s.id, "enabled": False}
+
+
+@app.post(
+    "/api/sources/{source_id}/resume",
+    dependencies=[Depends(require_admin)],
+)
+def resume_source_endpoint(
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    s = db.get(DouyinSource, source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    if s.needs_reauth:
+        raise HTTPException(
+            status_code=409,
+            detail="DOUYIN_COOKIE_EXPIRED: cập nhật cookie trước khi resume",
+        )
+    s.enabled = True
+    s.next_scan_at = _utcnow()
+    db.commit()
+    return {"ok": True, "source_id": s.id, "enabled": True}
+
+
+@app.get(
+    "/api/channels/{destination_id}/auto/status",
+    dependencies=[Depends(require_admin)],
+)
+def channel_auto_status_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    from app.scheduler import count_todays_released_jobs, get_local_day_bounds
+
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+
+    sources = list(
+        db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == d.pipeline_id)
+        ).scalars().all()
+    )
+    now = _utcnow()
+    day_start, _ = get_local_day_bounds(d.timezone or "UTC", now)
+
+    today_published = count_todays_released_jobs(
+        db,
+        db.get(Pipeline, d.pipeline_id),
+        day_start,
+        d,
+    ) if d.pipeline_id else 0
+
+    queue_count = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == d.id)
+        .where(Publication.status.in_(
+            ["queued", "scheduled", "pending", "downloading", "uploading", "ai_metadata"]
+        ))
+    ).scalar_one_or_none() or 0
+    failed_count = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == d.id)
+        .where(Publication.status == "failed")
+    ).scalar_one_or_none() or 0
+
+    pipe_id = d.pipeline_id
+    held_count = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipe_id)
+        .where(DouyinVideo.status == "held")
+    ).scalar_one_or_none() or 0 if pipe_id else 0
+    rejected_count = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.pipeline_id == pipe_id)
+        .where(DouyinVideo.status == "rejected")
+    ).scalar_one_or_none() or 0 if pipe_id else 0
+
+    scans = [s.last_scan_at for s in sources if s.last_scan_at]
+    nexts = [s.next_scan_at for s in sources if s.next_scan_at and s.enabled and not s.needs_reauth]
+
+    return {
+        "auto_enabled": bool(d.enabled),
+        "sources_count": len(sources),
+        "enabled_sources": len([s for s in sources if s.enabled]),
+        "needs_reauth_sources": len([s for s in sources if s.needs_reauth]),
+        "last_scan_at": max(scans).isoformat() if scans else None,
+        "next_scan_at": min(nexts).isoformat() if nexts else None,
+        "today_published": int(today_published or 0),
+        "today_limit": int(d.daily_upload_limit or 0),
+        "queue_count": int(queue_count),
+        "failed_count": int(failed_count),
+        "held_count": int(held_count),
+        "rejected_count": int(rejected_count),
+    }
 
 
 @app.get(

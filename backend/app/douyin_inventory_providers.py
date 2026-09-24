@@ -316,6 +316,20 @@ def parse_aweme_post_response(data: Any) -> tuple[list[dict[str, Any]], int, str
 # ---------------------------------------------------------------------------
 
 
+def cookies_from_netscape_text(text: str) -> list[dict[str, Any]]:
+    """Parse Netscape cookies.txt text into Playwright cookie dicts.
+
+    Raises DouyinInventoryError when nothing usable is parsed.
+    Never logs cookie values.
+    """
+    parsed = parse_netscape_cookies(text or "")
+    if not parsed:
+        raise DouyinInventoryError(
+            "Douyin cookie is empty or invalid (no cookies parsed)"
+        )
+    return netscape_to_playwright_cookies(parsed)
+
+
 class DouyinInventoryProvider(ABC):
     name = "base"
 
@@ -325,6 +339,7 @@ class DouyinInventoryProvider(ABC):
         profile_url: str,
         sec_uid: str,
         source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -334,8 +349,10 @@ class DouyinInventoryProvider(ABC):
         sec_uid: str,
         source_id: str,
         limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
     ) -> list[dict[str, Any]]:
-        return self.fetch_all(profile_url, sec_uid, source_id)[:limit]
+        return self.fetch_all(profile_url, sec_uid, source_id, cookie_jar)[:limit]
 
 
 class YtDlpDouyinInventoryProvider(DouyinInventoryProvider):
@@ -349,6 +366,7 @@ class YtDlpDouyinInventoryProvider(DouyinInventoryProvider):
         profile_url: str,
         sec_uid: str,
         source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         from app.inventory import fetch_all_videos_from_source as legacy_fetch
 
@@ -376,8 +394,9 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
         profile_url: str,
         sec_uid: str,
         source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        return self._scan(sec_uid or profile_url, full=True)
+        return self._scan(sec_uid or profile_url, full=True, cookie_jar=cookie_jar)
 
     def fetch_latest(
         self,
@@ -385,8 +404,13 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
         sec_uid: str,
         source_id: str,
         limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
     ) -> list[dict[str, Any]]:
-        videos = self._scan(sec_uid or profile_url, full=False)
+        videos = self._scan(
+            sec_uid or profile_url, full=False,
+            cookie_jar=cookie_jar, only_cookies=only_cookies,
+        )
         return videos[:limit]
 
     # -- core scan (blocking; callers must run it in a thread) ------------
@@ -394,13 +418,39 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
     # anonymous attempt hits a login wall / captcha / challenge / auth
     # HTTP status / auth-caused empty response do we retry with cookies
     # (if configured) or raise DouyinAuthRequiredError (if not).
-    def _scan(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
+    def _scan(
+        self,
+        sec_uid_or_url: str,
+        full: bool,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
         sec_uid = self._resolve_sec_uid(sec_uid_or_url)
         target = f"https://www.douyin.com/user/{sec_uid}" if sec_uid else sec_uid_or_url
 
         max_pages = int(getattr(settings, "max_inventory_pages", 200) or 200)
         if not full:
             max_pages = min(max_pages, 5)
+
+        if only_cookies:
+            # Cookie verification mode: skip the anonymous attempt so the
+            # result proves THIS cookie jar works.
+            if not cookie_jar:
+                raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
+            videos, info = self._attempt(
+                target, cookies=cookie_jar, full=full, max_pages=max_pages
+            )
+            if videos:
+                _record_access_probe(anonymous_ok=False, cookie_required=True)
+                return videos
+            if info.get("challenge_hit"):
+                raise DouyinInventoryError(
+                    "Douyin challenge/captcha persists with this cookie "
+                    "(cookie expired or blocked)"
+                )
+            raise DouyinAuthRequiredError(
+                "Douyin cookie was rejected (login wall persists)"
+            )
 
         videos, info = self._attempt(target, cookies=None, full=full, max_pages=max_pages)
         if videos:
@@ -416,26 +466,39 @@ class PlaywrightDouyinInventoryProvider(DouyinInventoryProvider):
 
         # Anonymous hit an auth wall (login wall / captcha / challenge /
         # auth HTTP status / auth-caused empty response). Retry order:
-        # 1) saved QR-login session, 2) DOUYIN_COOKIES_B64 compatibility
-        # fallback. Only when neither exists -> auth_required.
-        cookie_jar: list[dict[str, Any]] = []
+        # 1) per-source cookie jar, 2) saved QR-login session,
+        # 3) DOUYIN_COOKIES_B64 compatibility fallback.
+        # Only when none exists -> auth_required.
+        jar_candidates: list[list[dict[str, Any]]] = []
+        if cookie_jar:
+            jar_candidates.append(cookie_jar)
         try:
             from app.douyin_session import load_saved_session_cookies
 
-            cookie_jar = load_saved_session_cookies()
+            saved = load_saved_session_cookies()
+            if saved:
+                jar_candidates.append(saved)
         except Exception:
             logger.warning("Saved Douyin session lookup failed", exc_info=True)
-            cookie_jar = []
-        if not cookie_jar:
+        try:
             cookie_jar = load_cookies_optional()
-        if not cookie_jar:
+        except Exception:
+            cookie_jar = []
+        if cookie_jar:
+            jar_candidates.append(cookie_jar)
+        if not jar_candidates:
             _record_access_probe(anonymous_ok=False, cookie_required=True)
             raise DouyinAuthRequiredError(AUTH_REQUIRED_MESSAGE)
 
-        logger.info("Anonymous scan hit auth wall; retrying with cookies")
-        videos, info = self._attempt(
-            target, cookies=cookie_jar, full=full, max_pages=max_pages
-        )
+        videos: list[dict[str, Any]] = []
+        info = {"auth_wall_hit": True}
+        for jar in jar_candidates:
+            logger.info("Anonymous scan hit auth wall; retrying with cookies")
+            videos, info = self._attempt(
+                target, cookies=jar, full=full, max_pages=max_pages
+            )
+            if videos:
+                break
         if videos:
             _record_access_probe(anonymous_ok=False, cookie_required=True)
             return videos
@@ -725,6 +788,8 @@ def discover_profile_videos(
     sec_uid: str,
     source_id: str,
     full: bool = True,
+    cookie_jar: list[dict[str, Any]] | None = None,
+    only_cookies: bool = False,
 ) -> tuple[list[dict[str, Any]], str]:
     """Run primary provider, then LAST fallback.
 
@@ -734,9 +799,12 @@ def discover_profile_videos(
     primary = get_primary_provider()
     try:
         if full:
-            videos = primary.fetch_all(profile_url, sec_uid, source_id)
+            videos = primary.fetch_all(profile_url, sec_uid, source_id, cookie_jar)
         else:
-            videos = primary.fetch_latest(profile_url, sec_uid, source_id)
+            videos = primary.fetch_latest(
+                profile_url, sec_uid, source_id,
+                cookie_jar=cookie_jar, only_cookies=only_cookies,
+            )
         return videos, primary.name
     except DouyinAuthRequiredError:
         raise

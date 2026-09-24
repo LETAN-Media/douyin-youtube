@@ -20,6 +20,7 @@ import {
   IconX,
 } from "@/components/icons";
 import type {
+  ChannelAutoStatus,
   ChannelDetail,
   ChannelInventoryItem,
   ManualMetadataResult,
@@ -27,6 +28,7 @@ import type {
   ManualPublishPayload,
   ManualPublishResponse,
   ManualResolveResult,
+  WorkspaceSourceItem,
 } from "@/lib/types";
 import { actionGetOauthUrl, actionToggleDestination, actionUpdateDestination } from "@/lib/actions";
 
@@ -100,7 +102,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [hashtags, setHashtags] = useState("");
   const [generatingMetadata, setGeneratingMetadata] = useState(false);
   const [metadataError, setMetadataError] = useState<string | null>(null);
-  const [contentMatchNotice, setContentMatchNotice] = useState<{ match: boolean; reason: string } | null>(null);
+  const [contentMatchNotice, setContentMatchNotice] = useState<{ match: boolean; level: "match" | "borderline" | "mismatch"; reason: string } | null>(null);
 
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
@@ -140,16 +142,13 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
           setTitle(meta.title);
           setDescription(meta.description);
           setHashtags(meta.hashtags.join(" "));
-          if (meta.content_match === false) {
-            setContentMatchNotice({
-              match: false,
-              reason: meta.content_match_reason || "Video không khớp với niche của kênh này",
-            });
-          } else if (meta.content_match === true) {
-            setContentMatchNotice({
-              match: true,
-              reason: meta.content_match_reason || "Khớp tiêu chí nội dung của kênh",
-            });
+          const level = (meta as { match_level?: string }).match_level ?? (meta.content_match === false ? "mismatch" : "match");
+          if (level === "mismatch") {
+            setContentMatchNotice({ match: false, level: "mismatch", reason: meta.content_match_reason || "Video không khớp với niche của kênh này — vẫn đăng được, bạn kiểm tra lại nhé" });
+          } else if (level === "borderline") {
+            setContentMatchNotice({ match: true, level: "borderline", reason: meta.content_match_reason || "Nội dung liên quan một phần — vẫn đăng bình thường" });
+          } else if (meta.content_match === true || (meta as { match_level?: string }).match_level === "match") {
+            setContentMatchNotice({ match: true, level: "match", reason: meta.content_match_reason || "Khớp tiêu chí nội dung của kênh" });
           }
         }
       } catch (err: unknown) {
@@ -365,14 +364,62 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   };
 
   // ==========================================
-  // TAB: SOURCES STATE & ACTIONS
+  // TAB: SOURCES STATE & ACTIONS (AUTO mode)
   // ==========================================
   const [sourceName, setSourceName] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
+  const [sourceCookie, setSourceCookie] = useState("");
+  const [sourceScanInterval, setSourceScanInterval] = useState("15");
+  const [sourceMaxPerDay, setSourceMaxPerDay] = useState("5");
+  const [sourceStartMode, setSourceStartMode] = useState<"new_only" | "last_n">("new_only");
+  const [sourceInitialLimit, setSourceInitialLimit] = useState("10");
+  const [sourceIncludeKw, setSourceIncludeKw] = useState("");
+  const [sourceExcludeKw, setSourceExcludeKw] = useState("");
   const [addingSource, setAddingSource] = useState(false);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [syncingSourceId, setSyncingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [workspaceSources, setWorkspaceSources] = useState<WorkspaceSourceItem[]>([]);
+  const [cookieEditorId, setCookieEditorId] = useState<string | null>(null);
+  const [cookieDraft, setCookieDraft] = useState("");
+  const [cookieBusyId, setCookieBusyId] = useState<string | null>(null);
+  const [cookieMsg, setCookieMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null);
+  const [autoStatus, setAutoStatus] = useState<ChannelAutoStatus | null>(null);
+  const [autoStatusLoading, setAutoStatusLoading] = useState(false);
+
+  const splitKw = (v: string) => v.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+
+  const fetchWorkspaceSources = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/channels/${channel.destination_id}/sources`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) setWorkspaceSources(data);
+      }
+    } catch (e) {
+      console.error("Failed to load workspace sources:", e);
+    }
+  }, [channel.destination_id]);
+
+  const fetchAutoStatus = useCallback(async () => {
+    setAutoStatusLoading(true);
+    try {
+      const res = await fetch(`/api/channels/${channel.destination_id}/auto/status`);
+      if (res.ok) setAutoStatus(await res.json());
+    } catch (e) {
+      console.error("Failed to load auto status:", e);
+    } finally {
+      setAutoStatusLoading(false);
+    }
+  }, [channel.destination_id]);
+
+  useEffect(() => {
+    fetchWorkspaceSources();
+  }, [fetchWorkspaceSources]);
+
+  useEffect(() => {
+    if (activeTab === "auto") fetchAutoStatus();
+  }, [activeTab, fetchAutoStatus]);
 
   const handleAddSource = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -383,15 +430,25 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       const res = await fetch(`/api/channels/${channel.destination_id}/sources`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: sourceName.trim(), url: sourceUrl.trim() }),
+        body: JSON.stringify({
+          name: sourceName.trim(),
+          url: sourceUrl.trim(),
+          cookie: sourceCookie.trim() || undefined,
+          scan_interval_minutes: Number(sourceScanInterval) || 15,
+          max_videos_per_day: Number(sourceMaxPerDay) || 0,
+          start_mode: sourceStartMode,
+          initial_limit: Number(sourceInitialLimit) || 10,
+          include_keywords: splitKw(sourceIncludeKw),
+          exclude_keywords: splitKw(sourceExcludeKw),
+        }),
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || err.error || "Thêm tác giả thất bại");
-      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || "Thêm tác giả thất bại");
       setSourceName("");
       setSourceUrl("");
+      setSourceCookie("");
       reloadDetail();
+      fetchWorkspaceSources();
     } catch (err: unknown) {
       setSourceError(err instanceof Error ? err.message : "Thêm tác giả thất bại");
     } finally {
@@ -402,18 +459,89 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const handleSyncSource = async (sourceId: string) => {
     setSyncingSourceId(sourceId);
     try {
-      const res = await fetch(`/api/channels/${channel.destination_id}/sources/${sourceId}/sync`, {
-        method: "POST",
-      });
+      const res = await fetch(`/api/sources/${sourceId}/scan`, { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Đồng bộ thất bại");
+        throw new Error(err.detail || err.error || "Đồng bộ thất bại");
       }
       reloadDetail();
+      fetchWorkspaceSources();
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Đồng bộ thất bại");
     } finally {
       setSyncingSourceId(null);
+    }
+  };
+
+  const handlePauseSource = async (sourceId: string, enabled: boolean) => {
+    const endpoint = enabled ? "pause" : "resume";
+    try {
+      const res = await fetch(`/api/sources/${sourceId}/${endpoint}`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || "Thao tác thất bại");
+      fetchWorkspaceSources();
+      reloadDetail();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Thao tác thất bại");
+    }
+  };
+
+  const handleSaveCookie = async (sourceId: string) => {
+    if (!cookieDraft.trim() || cookieBusyId) return;
+    setCookieBusyId(sourceId);
+    setCookieMsg(null);
+    try {
+      const res = await fetch(`/api/sources/${sourceId}/cookie`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookie: cookieDraft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || "Lưu cookie thất bại");
+      setCookieMsg({ id: sourceId, ok: true, text: "Đã lưu cookie." });
+      setCookieEditorId(null);
+      setCookieDraft("");
+      fetchWorkspaceSources();
+    } catch (err: unknown) {
+      setCookieMsg({ id: sourceId, ok: false, text: err instanceof Error ? err.message : "Lưu cookie thất bại" });
+    } finally {
+      setCookieBusyId(null);
+    }
+  };
+
+  const handleTestCookie = async (sourceId: string) => {
+    setCookieBusyId(sourceId);
+    setCookieMsg(null);
+    try {
+      const res = await fetch(`/api/sources/${sourceId}/test`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || "Cookie không hợp lệ");
+      setCookieMsg({ id: sourceId, ok: true, text: `Cookie OK — ${data.nickname || data.sec_uid || "verified"} · latest ${data.latest_aweme_id || ""}` });
+      fetchWorkspaceSources();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Test cookie thất bại";
+      const isExpired = msg.includes("COOKIE_EXPIRED");
+      setCookieMsg({ id: sourceId, ok: false, text: isExpired ? "Douyin cookie hết hạn — cập nhật lại." : msg });
+    } finally {
+      setCookieBusyId(null);
+    }
+  };
+
+  const handleDeleteCookie = async (sourceId: string) => {
+    if (!confirm("Xóa cookie Douyin của source này?")) return;
+    setCookieBusyId(sourceId);
+    try {
+      const res = await fetch(`/api/sources/${sourceId}/cookie`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Xóa cookie thất bại");
+      }
+      setCookieMsg({ id: sourceId, ok: true, text: "Đã xóa cookie." });
+      fetchWorkspaceSources();
+    } catch (err: unknown) {
+      setCookieMsg({ id: sourceId, ok: false, text: err instanceof Error ? err.message : "Xóa cookie thất bại" });
+    } finally {
+      setCookieBusyId(null);
     }
   };
 
@@ -429,6 +557,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         throw new Error(err.detail || "Xóa thất bại");
       }
       reloadDetail();
+      fetchWorkspaceSources();
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Xóa thất bại");
     } finally {
@@ -1142,16 +1271,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                     </div>
 
                     {contentMatchNotice && (
-                      <div
-                        className={`rounded-xl p-3 text-xs font-semibold ${
-                          contentMatchNotice.match
-                            ? "border border-emerald-200 bg-emerald-50 text-emerald-800"
-                            : "border border-amber-200 bg-amber-50 text-amber-800"
-                        }`}
-                      >
-                        <span className="font-bold">
-                          {contentMatchNotice.match ? "✓ AI Content Match: " : "⚠ AI Content Match Warning: "}
-                        </span>
+                      <div className={`rounded-xl p-3 text-xs font-semibold ${contentMatchNotice.level === "mismatch" ? "border border-rose-200 bg-rose-50 text-rose-800" : contentMatchNotice.level === "borderline" ? "border border-amber-200 bg-amber-50 text-amber-800" : "border border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+                        <span className="font-bold">{contentMatchNotice.level === "mismatch" ? "⛔ AI Content Mismatch (vẫn đăng được): " : contentMatchNotice.level === "borderline" ? "⚠ AI Borderline (vẫn đăng bình thường): " : "✓ AI Content Match: "}</span>
                         {contentMatchNotice.reason}
                       </div>
                     )}
@@ -1317,76 +1438,55 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       {/* TAB 3: AUTO SETTINGS                                         */}
       {/* ============================================================ */}
       {activeTab === "auto" && (
-        <Card className="p-5 sm:p-6">
-          <form onSubmit={handleSaveAuto} className="space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+        <div className="space-y-4">
+          <Card className="p-5 sm:p-6">
+            <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-extrabold text-slate-900">Cấu hình Auto Schedule (Kênh {channel.channel_title})</h3>
-                <p className="text-xs text-slate-500">Scheduler hoạt động độc lập theo cấu hình riêng của workspace này</p>
+                <h3 className="text-sm font-extrabold text-slate-900">Auto status — {channel.channel_title}</h3>
+                <p className="text-xs text-slate-500">{channel.enabled ? "Auto ON — scheduler sẽ pick inventory đủ điều kiện" : "Auto OFF — scheduler tạm dừng"}</p>
               </div>
-              <button
-                type="button"
-                onClick={handleToggleEnabled}
-                className={`rounded-xl px-4 py-2 text-xs font-bold text-white shadow-sm ${
-                  channel.enabled ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
-                }`}
-              >
+              <button type="button" onClick={() => { handleToggleEnabled(); setTimeout(fetchAutoStatus, 800); }} className={`rounded-xl px-4 py-2 text-xs font-bold text-white shadow-sm ${channel.enabled ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"}`}>
                 {channel.enabled ? "Tắt Auto Mode" : "Bật Auto Mode"}
               </button>
             </div>
-
-            {autoSuccess && (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-800">
-                ✓ Đã lưu cài đặt Auto Mode thành công!
+            {autoStatusLoading ? (
+              <p className="mt-4 text-xs text-slate-500">Đang tải…</p>
+            ) : autoStatus ? (
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">Sources</p><p className="mt-1 text-lg font-black text-slate-900">{autoStatus.sources_count}</p></div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">Enabled</p><p className="mt-1 text-lg font-black text-emerald-600">{autoStatus.enabled_sources}</p></div>
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3"><p className="text-[11px] font-bold text-rose-500">Needs re-auth</p><p className="mt-1 text-lg font-black text-rose-700">{autoStatus.needs_reauth_sources}</p></div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">Today</p><p className="mt-1 text-lg font-black text-slate-900">{autoStatus.today_published} / {autoStatus.today_limit}</p></div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">Queue</p><p className="mt-1 text-lg font-black text-slate-900">{autoStatus.queue_count}</p></div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">Failed</p><p className="mt-1 text-lg font-black text-rose-600">{autoStatus.failed_count}</p></div>
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-[11px] font-bold text-amber-600">Held</p><p className="mt-1 text-lg font-black text-amber-800">{autoStatus.held_count}</p></div>
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3"><p className="text-[11px] font-bold text-rose-600">Rejected</p><p className="mt-1 text-lg font-black text-rose-700">{autoStatus.rejected_count}</p></div>
+              </div>
+            ) : null}
+            {autoStatus && (
+              <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                <span>Last scan: <strong className="text-slate-700">{autoStatus.last_scan_at ? new Date(autoStatus.last_scan_at).toLocaleString() : "—"}</strong></span>
+                <span>Next scan: <strong className="text-slate-700">{autoStatus.next_scan_at ? new Date(autoStatus.next_scan_at).toLocaleString() : "—"}</strong></span>
+                <button type="button" onClick={fetchAutoStatus} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50"><IconRefresh size={12} />Làm mới</button>
               </div>
             )}
-
-            <div>
-              <label className="text-xs font-bold text-slate-700">Daily Upload Limit (videos/ngày)</label>
-              <input
-                type="number"
-                min={1}
-                max={50}
-                value={autoLimit}
-                onChange={(e) => setAutoLimit(Number(e.target.value) || 1)}
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-slate-700">Upload Slots (Giờ xuất bản, phân cách bằng dấu phẩy)</label>
-              <input
-                type="text"
-                value={autoSlots}
-                onChange={(e) => setAutoSlots(e.target.value)}
-                placeholder="09:00, 13:00, 17:00, 21:00"
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 font-mono text-sm font-bold text-indigo-600 shadow-sm focus:border-indigo-500 focus:outline-none"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">Định dạng 24h: <code>09:00, 13:00, 17:00, 21:00</code></p>
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-slate-700">Múi giờ (Timezone)</label>
-              <input
-                type="text"
-                value={autoTimezone}
-                onChange={(e) => setAutoTimezone(e.target.value)}
-                placeholder="America/New_York hoặc Asia/Ho_Chi_Minh"
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none"
-              />
-            </div>
-
-            <div className="pt-2">
-              <button
-                type="submit"
-                disabled={savingAuto}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-indigo-500 disabled:opacity-50"
-              >
-                {savingAuto ? "Đang lưu…" : "Lưu cài đặt Auto"}
-              </button>
-            </div>
-          </form>
-        </Card>
+          </Card>
+          <Card className="p-5 sm:p-6">
+            <form onSubmit={handleSaveAuto} className="space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">Cấu hình Auto Schedule (Kênh {channel.channel_title})</h3>
+                  <p className="text-xs text-slate-500">Scheduler hoạt động độc lập theo cấu hình riêng của workspace này</p>
+                </div>
+              </div>
+              {autoSuccess && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-800">✓ Đã lưu cài đặt Auto Mode thành công!</div>}
+              <div><label className="text-xs font-bold text-slate-700">Daily Upload Limit (videos/ngày)</label><input type="number" min={1} max={50} value={autoLimit} onChange={(e) => setAutoLimit(Number(e.target.value) || 1)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" /></div>
+              <div><label className="text-xs font-bold text-slate-700">Upload Slots (Giờ xuất bản, phân cách bằng dấu phẩy)</label><input type="text" value={autoSlots} onChange={(e) => setAutoSlots(e.target.value)} placeholder="09:00, 13:00, 17:00, 21:00" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 font-mono text-sm font-bold text-indigo-600 shadow-sm focus:border-indigo-500 focus:outline-none" /><p className="mt-1 text-[11px] text-slate-500">Định dạng 24h: <code>09:00, 13:00, 17:00, 21:00</code></p></div>
+              <div><label className="text-xs font-bold text-slate-700">Múi giờ (Timezone)</label><input type="text" value={autoTimezone} onChange={(e) => setAutoTimezone(e.target.value)} placeholder="America/New_York hoặc Asia/Ho_Chi_Minh" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" /></div>
+              <div className="pt-2"><button type="submit" disabled={savingAuto} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-indigo-500 disabled:opacity-50">{savingAuto ? "Đang lưu…" : "Lưu cài đặt Auto"}</button></div>
+            </form>
+          </Card>
+        </div>
       )}
 
       {/* ============================================================ */}
@@ -1401,26 +1501,27 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               Tác giả sẽ chỉ thuộc về workspace này. Video cào về sẽ chỉ lưu vào kho của kênh này.
             </p>
 
-            <form onSubmit={handleAddSource} className="mt-4 flex flex-col gap-3 sm:flex-row">
-              <input
-                type="text"
-                value={sourceName}
-                onChange={(e) => setSourceName(e.target.value)}
-                placeholder="Tên tác giả / Nhãn nhận diện"
-                className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none sm:w-1/3"
-              />
-              <input
-                type="text"
-                value={sourceUrl}
-                onChange={(e) => setSourceUrl(e.target.value)}
-                placeholder="Link trang cá nhân Douyin (https://v.douyin.com/...)"
-                className="flex-1 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none"
-              />
-              <button
-                type="submit"
-                disabled={addingSource || !sourceName.trim() || !sourceUrl.trim()}
-                className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
-              >
+            <form onSubmit={handleAddSource} className="mt-4 space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <input type="text" value={sourceName} onChange={(e) => setSourceName(e.target.value)} placeholder="Tên tác giả / Nhãn nhận diện" className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
+                <input type="text" value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="Link trang cá nhân Douyin (https://v.douyin.com/...)" className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500">Douyin cookie (Netscape cookies.txt hoặc JSON export) — optional</label>
+                <textarea value={sourceCookie} onChange={(e) => setSourceCookie(e.target.value)} placeholder="Dán nội dung cookies.txt hoặc JSON list từ trình duyệt — không log, chỉ lưu mã hóa" rows={3} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 font-mono text-[11px] text-slate-700 shadow-sm focus:border-indigo-500 focus:outline-none" />
+                <p className="mt-1 text-[11px] text-slate-500">Cookie là secret — DB chỉ lưu dạng mã hóa, UI không bao giờ hiện lại đầy đủ.</p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-4">
+                <div><label className="text-[11px] font-bold text-slate-600">Scan interval (phút)</label><input type="number" min={5} max={1440} value={sourceScanInterval} onChange={(e) => setSourceScanInterval(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900" /></div>
+                <div><label className="text-[11px] font-bold text-slate-600">Max videos/ngày</label><input type="number" min={0} max={50} value={sourceMaxPerDay} onChange={(e) => setSourceMaxPerDay(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900" /></div>
+                <div><label className="text-[11px] font-bold text-slate-600">Start mode</label><select value={sourceStartMode} onChange={(e) => setSourceStartMode(e.target.value as "new_only" | "last_n")} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700"><option value="new_only">NEW_ONLY (chỉ video mới)</option><option value="last_n">LAST_N (giữ N mới nhất)</option></select></div>
+                <div><label className="text-[11px] font-bold text-slate-600">Initial limit (LAST_N)</label><input type="number" min={1} max={50} value={sourceInitialLimit} onChange={(e) => setSourceInitialLimit(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900" /></div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div><label className="text-[11px] font-bold text-slate-600">Include keywords (phân cách dấu phẩy)</label><input type="text" value={sourceIncludeKw} onChange={(e) => setSourceIncludeKw(e.target.value)} placeholder="ví dụ: dance, street" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900" /></div>
+                <div><label className="text-[11px] font-bold text-slate-600">Exclude keywords</label><input type="text" value={sourceExcludeKw} onChange={(e) => setSourceExcludeKw(e.target.value)} placeholder="ví dụ: gym, food" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900" /></div>
+              </div>
+              <button type="submit" disabled={addingSource || !sourceName.trim() || !sourceUrl.trim()} className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
                 <IconPlus size={15} />
                 {addingSource ? "Đang thêm…" : "Thêm Source"}
               </button>
@@ -1431,45 +1532,73 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             )}
           </Card>
 
-          {/* Sources List */}
+          {/* Sources List — per-source cookie + scan controls */}
           <Card className="p-5 sm:p-6">
-            <h3 className="text-sm font-extrabold text-slate-900">Danh sách tác giả trong workspace ({detail.sources?.length || 0})</h3>
-            {(!detail.sources || detail.sources.length === 0) ? (
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-extrabold text-slate-900">Danh sách tác giả trong workspace ({workspaceSources.length || detail.sources?.length || 0})</h3>
+              <button type="button" onClick={() => { fetchWorkspaceSources(); reloadDetail(); }} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50">
+                <IconRefresh size={11} /> Làm mới
+              </button>
+            </div>
+            {(workspaceSources.length === 0 && (!detail.sources || detail.sources.length === 0)) ? (
               <p className="mt-4 text-xs text-slate-500">Chưa có tác giả nào. Hãy thêm link Douyin ở trên.</p>
             ) : (
               <div className="mt-4 divide-y divide-slate-100">
-                {detail.sources.map((s) => (
-                  <div key={s.id} className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-center sm:justify-between text-xs">
-                    <div>
-                      <span className="font-extrabold text-slate-900 text-sm">{s.name}</span>
-                      <p className="mt-0.5 font-mono text-[11px] text-slate-400 truncate max-w-md">{s.profile_url}</p>
-                      <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
-                        <span>Kho: <strong className="text-slate-800">{s.video_count || 0}</strong> video</span>
-                        <span>· Trạng thái: <Badge tone={s.status === "syncing" ? "amber" : "slate"}>{s.status}</Badge></span>
+                {(workspaceSources.length ? workspaceSources : (detail.sources as unknown as WorkspaceSourceItem[])).map((s) => {
+                  const source = s as WorkspaceSourceItem;
+                  const cookieLabel = source.cookie_status === "verified" ? "Cookie verified ✅" : source.cookie_status === "configured" ? "Cookie configured ✅" : source.cookie_status === "expired" ? "Cookie hết hạn ⚠️" : "Chưa có cookie";
+                  const isPaused = source.enabled === false;
+                  const needsAuth = source.needs_reauth === true;
+                  return (
+                    <div key={source.id} className="flex flex-col gap-2 py-3.5 text-xs">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <span className="font-extrabold text-slate-900 text-sm">{source.name}</span>
+                          <p className="mt-0.5 font-mono text-[11px] text-slate-400 truncate max-w-md">{source.profile_url}</p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                            <span>Kho: <strong className="text-slate-800">{source.video_count ?? 0}</strong> video</span>
+                            <span>· Trạng thái: <Badge tone={source.status === "syncing" || source.status === "running" ? "amber" : source.status === "auth_required" ? "rose" : "slate"}>{source.status}</Badge></span>
+                            <span className={needsAuth ? "font-bold text-rose-600" : source.cookie_status === "verified" || source.cookie_status === "configured" ? "font-bold text-emerald-600" : "text-slate-400"}>· {cookieLabel}{source.cookie_account_name ? ` · ${source.cookie_account_name}` : ""}</span>
+                            {source.cookie_verified_at && <span>· Last verified: {new Date(source.cookie_verified_at).toLocaleString()}</span>}
+                            {needsAuth && <span className="rounded-md bg-rose-50 px-1.5 py-0.5 font-bold text-rose-700">Cần cập nhật cookie</span>}
+                            {isPaused && <Badge tone="amber">Paused</Badge>}
+                          </div>
+                          {source.inventory_sync_error && <p className="mt-1 text-[11px] font-semibold text-rose-600 line-clamp-2">{source.inventory_sync_error}</p>}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button type="button" onClick={() => handleSyncSource(source.id)} disabled={syncingSourceId === source.id || needsAuth} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                            <IconRefresh size={13} /> {syncingSourceId === source.id ? "Đang đồng bộ…" : "Scan Now"}
+                          </button>
+                          <button type="button" onClick={() => handlePauseSource(source.id, !isPaused)} className={`inline-flex min-h-[36px] items-center rounded-lg border px-3 py-1.5 text-xs font-bold ${isPaused ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`} disabled={!!(needsAuth && !isPaused)}>
+                            {isPaused ? "Resume" : "Pause"}
+                          </button>
+                          <button type="button" onClick={() => setCookieEditorId(cookieEditorId === source.id ? null : source.id)} className="inline-flex min-h-[36px] items-center rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50">
+                            {cookieEditorId === source.id ? "Đóng" : source.cookie_configured ? "Update Cookie" : "Add Cookie"}
+                          </button>
+                          <button type="button" onClick={() => handleTestCookie(source.id)} disabled={!!cookieBusyId || !source.cookie_configured} className="inline-flex min-h-[36px] items-center rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 disabled:opacity-50">
+                            Test Cookie
+                          </button>
+                          {source.cookie_configured && <button type="button" onClick={() => handleDeleteCookie(source.id)} disabled={!!cookieBusyId} className="inline-flex min-h-[36px] items-center rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 disabled:opacity-50">Delete Cookie</button>}
+                          <button type="button" onClick={() => handleDeleteSource(source.id)} disabled={deletingSourceId === source.id} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50">
+                            <IconX size={13} /> Xóa
+                          </button>
+                        </div>
                       </div>
+                      {cookieEditorId === source.id && (
+                        <div className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-3">
+                          <p className="text-[11px] font-bold text-slate-600">Dán Netscape cookies.txt hoặc JSON export — không log, chỉ lưu mã hóa</p>
+                          <textarea value={cookieDraft} onChange={(e) => setCookieDraft(e.target.value)} rows={4} placeholder="Dán nội dung cookie vào đây…" className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] text-slate-700" />
+                          <div className="mt-2 flex gap-2">
+                            <button type="button" onClick={() => handleSaveCookie(source.id)} disabled={!!cookieBusyId || !cookieDraft.trim()} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50">Lưu cookie</button>
+                            <button type="button" onClick={() => { setCookieEditorId(null); setCookieDraft(""); }} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600">Hủy</button>
+                          </div>
+                        </div>
+                      )}
+                      {cookieMsg && cookieMsg.id === source.id && <p className={`text-[11px] font-bold ${cookieMsg.ok ? "text-emerald-600" : "text-rose-600"}`}>{cookieMsg.text}</p>}
+                      {cookieBusyId === source.id && <p className="text-[11px] text-slate-500">Đang xử lý…</p>}
                     </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleSyncSource(s.id)}
-                        disabled={syncingSourceId === s.id}
-                        className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                      >
-                        <IconRefresh size={13} />
-                        {syncingSourceId === s.id ? "Đang đồng bộ…" : "Sync Now"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteSource(s.id)}
-                        disabled={deletingSourceId === s.id}
-                        className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
-                      >
-                        <IconX size={13} />
-                        Xóa
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </Card>
@@ -1483,7 +1612,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         <div className="space-y-4">
           {/* Filters */}
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
-            {["all", "new", "backlog", "scheduled", "published", "content_mismatch"].map((st) => (
+            {["all", "new", "backlog", "scheduled", "published", "held", "rejected", "baseline", "content_mismatch"].map((st) => (
               <button
                 key={st}
                 type="button"

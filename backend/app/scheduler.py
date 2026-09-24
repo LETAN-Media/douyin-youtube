@@ -10,10 +10,125 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Destination, DouyinSource, DouyinVideo, Pipeline, Publication, VideoJob
-from app.ai_metadata import evaluate_content_match
+from app.ai_metadata import evaluate_content_level
 
 
 logger = logging.getLogger("douyin-youtube-scheduler")
+
+
+# Scheduler skip-reason codes surfaced via scheduler-status for observability.
+REASON_NOT_CONNECTED = "DESTINATION_NOT_CONNECTED"
+REASON_NO_INVENTORY = "NO_AVAILABLE_INVENTORY"
+REASON_DAILY_LIMIT = "DAILY_LIMIT_REACHED"
+REASON_WAITING_SLOT = "WAITING_NEXT_SLOT"
+REASON_DISABLED = "SCHEDULER_DISABLED"
+REASON_WORKER_ERROR = "WORKER_ERROR"
+REASON_UPLOAD_INTERVAL = "UPLOAD_INTERVAL_WAIT"
+REASON_SOURCE_DAILY_LIMIT = "SOURCE_DAILY_LIMIT_REACHED"
+
+
+def _keywords_hit(text: str, keywords: list[str] | None) -> bool:
+    lowered = (text or "").lower()
+    for kw in keywords or []:
+        kw = (kw or "").strip().lower()
+        if kw and kw in lowered:
+            return True
+    return False
+
+
+def count_source_today(
+    db: Session,
+    source_id: str,
+    day_start_utc: datetime,
+) -> int:
+    """AUTO publications (excl. failed/skipped) for a source since day start."""
+    day_end = day_start_utc + timedelta(days=1)
+    count = db.execute(
+        select(func.count(Publication.id))
+        .join(DouyinVideo, Publication.douyin_video_id == DouyinVideo.id)
+        .where(DouyinVideo.source_id == source_id)
+        .where(Publication.publication_mode == "auto")
+        .where(Publication.created_at >= day_start_utc)
+        .where(Publication.created_at < day_end)
+        .where(Publication.status.notin_(["failed", "skipped"]))
+    ).scalar_one_or_none()
+    return int(count or 0)
+
+
+def _source_daily_reached(
+    db: Session,
+    source: DouyinSource,
+    day_start_utc: datetime,
+) -> bool:
+    try:
+        limit = int(source.max_videos_per_day or 5)
+    except (TypeError, ValueError):
+        limit = 5
+    if limit <= 0:
+        return True
+    return count_source_today(db, source.id, day_start_utc) >= limit
+
+
+def _hold_video(
+    db: Session,
+    cand: DouyinVideo,
+    *,
+    level: str,
+    reason: str,
+) -> None:
+    cand.status = "held"
+    cand.match_level = level
+    cand.hold_reason = reason[:2000]
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _reject_video(
+    db: Session,
+    cand: DouyinVideo,
+    *,
+    level: str,
+    reason: str,
+) -> None:
+    cand.status = "rejected"
+    cand.match_level = level
+    cand.hold_reason = reason[:2000]
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _apply_keyword_action(
+    db: Session,
+    cand: DouyinVideo,
+    source: DouyinSource,
+    reason: str,
+    *,
+    policy: str,
+    destination_id: str | None,
+) -> None:
+    """Route a keyword-filter hit through the matching verdict policy."""
+    if policy == "mismatch":
+        action = (source.mismatch_policy or "reject").lower()
+    else:
+        action = (source.borderline_policy or "hold").lower()
+    logger.info(
+        "Video %s keyword-filtered for destination %s: %s (action=%s)",
+        cand.video_id,
+        destination_id,
+        reason,
+        action,
+    )
+    cand.match_level = "mismatch" if policy == "mismatch" else "borderline"
+    if action == "continue":
+        return
+    if action == "hold":
+        _hold_video(db, cand, level=cand.match_level or policy, reason=reason)
+    else:
+        _reject_video(db, cand, level=cand.match_level or policy, reason=reason)
 
 
 def utcnow() -> datetime:
@@ -118,9 +233,30 @@ def _try_pick_video(
         return None
 
     cursor = pipeline.source_selection_cursor or 0
+    day_start_utc: datetime | None = None
+    if destination is not None:
+        try:
+            day_start_utc, _ = get_local_day_bounds(
+                destination.timezone or "UTC", utcnow()
+            )
+        except Exception:
+            day_start_utc = None
+    if day_start_utc is None:
+        now_utc = utcnow()
+        day_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
     for i in range(len(sources)):
         idx = (cursor + i) % len(sources)
         source = sources[idx]
+
+        # Per-source daily AUTO limit.
+        if _source_daily_reached(db, source, day_start_utc):
+            logger.info(
+                "Source %s reached daily AUTO limit %s",
+                source.id,
+                source.max_videos_per_day,
+            )
+            continue
 
         query = (
             select(DouyinVideo)
@@ -135,7 +271,13 @@ def _try_pick_video(
         else:
             query = query.where(DouyinVideo.is_backlog == False)  # noqa: E712
 
-        if (pipeline.backlog_order or "asc").lower() == "desc":
+        # Source order overrides pipeline backlog_order (default oldest first).
+        desc_order = (pipeline.backlog_order or "asc").lower() == "desc"
+        if (source.order or "oldest_first").lower() == "newest_first":
+            desc_order = True
+        elif (source.order or "").lower() == "oldest_first":
+            desc_order = False
+        if desc_order:
             query = query.order_by(DouyinVideo.douyin_created_at.desc())
         else:
             query = query.order_by(DouyinVideo.douyin_created_at.asc())
@@ -146,13 +288,72 @@ def _try_pick_video(
             niche = destination.metadata_profile if destination else pipeline.niche
             prompt_override = destination.prompt_override if destination else None
 
-            is_match, match_reason = evaluate_content_match(
-                f"{cand.title} {cand.description}",
+            text = f"{cand.title or ''}\n{cand.description or ''}"
+
+            # Source keyword filters act like verdicts.
+            if _keywords_hit(text, source.exclude_keywords):
+                reason = (
+                    "KEYWORD_EXCLUDED: video matches source exclude_keywords"
+                )
+                _apply_keyword_action(
+                    db, cand, source, reason, policy="mismatch",
+                    destination_id=destination.id if destination else None,
+                )
+                continue
+            if (source.include_keywords or []) and not _keywords_hit(
+                text, source.include_keywords
+            ):
+                reason = (
+                    "KEYWORD_MISSING: video matches none of source "
+                    "include_keywords"
+                )
+                _apply_keyword_action(
+                    db, cand, source, reason, policy="borderline",
+                    destination_id=destination.id if destination else None,
+                )
+                continue
+
+            level, match_reason = evaluate_content_level(
+                text,
                 niche=niche,
                 prompt_override=prompt_override,
             )
+            cand.match_level = level
 
-            if not is_match:
+            if level == "match":
+                pipeline.source_selection_cursor = (idx + 1) % len(sources)
+                return cand
+
+            if level == "borderline":
+                policy = (source.borderline_policy or "hold").lower()
+                if policy == "continue":
+                    logger.info(
+                        "Video %s borderline but source %s policy=continue",
+                        cand.video_id,
+                        source.id,
+                    )
+                    pipeline.source_selection_cursor = (idx + 1) % len(sources)
+                    return cand
+                logger.info(
+                    "Video %s held (borderline) for destination %s: %s",
+                    cand.video_id,
+                    destination.id if destination else None,
+                    match_reason,
+                )
+                _hold_video(db, cand, level=level, reason=match_reason)
+                continue
+
+            # mismatch
+            policy = (source.mismatch_policy or "reject").lower()
+            if policy == "hold":
+                logger.info(
+                    "Video %s held (mismatch) for destination %s: %s",
+                    cand.video_id,
+                    destination.id if destination else None,
+                    match_reason,
+                )
+                _hold_video(db, cand, level=level, reason=match_reason)
+            else:
                 logger.warning(
                     "Video %s (%s) rejected by AI content match for destination %s: %s",
                     cand.video_id,
@@ -160,15 +361,8 @@ def _try_pick_video(
                     destination.id if destination else None,
                     match_reason,
                 )
-                cand.status = "content_mismatch"
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                continue
-
-            pipeline.source_selection_cursor = (idx + 1) % len(sources)
-            return cand
+                _reject_video(db, cand, level=level, reason=match_reason)
+            continue
 
     return None
 
@@ -295,14 +489,6 @@ def _mark_destination_cycle(
 
 SLOT_GRACE_MINUTES = 10
 CATCHUP_MAX_HOURS = 24
-
-# Scheduler skip-reason codes surfaced via scheduler-status for observability.
-REASON_NOT_CONNECTED = "DESTINATION_NOT_CONNECTED"
-REASON_NO_INVENTORY = "NO_AVAILABLE_INVENTORY"
-REASON_DAILY_LIMIT = "DAILY_LIMIT_REACHED"
-REASON_WAITING_SLOT = "WAITING_NEXT_SLOT"
-REASON_DISABLED = "SCHEDULER_DISABLED"
-REASON_WORKER_ERROR = "WORKER_ERROR"
 
 
 def _resolve_tz(timezone_name: str):
@@ -477,6 +663,34 @@ def schedule_for_destination(
             )
             _mark_destination_cycle(db, destination, now, REASON_DAILY_LIMIT)
             return
+
+        # Minimum interval between YouTube uploads for this destination.
+        try:
+            min_interval = int(destination.min_upload_interval_minutes or 0)
+        except (TypeError, ValueError):
+            min_interval = 0
+        if min_interval > 0:
+            last_pub_at = db.execute(
+                select(func.max(Publication.created_at))
+                .where(Publication.destination_id == destination.id)
+                .where(Publication.status.notin_(["failed", "skipped"]))
+            ).scalar_one_or_none()
+            ref = destination.last_job_created_at or last_pub_at
+            if ref is not None:
+                if ref.tzinfo is None:
+                    ref = ref.replace(tzinfo=timezone.utc)
+                elapsed = (now - ref).total_seconds()
+                if elapsed < min_interval * 60:
+                    logger.info(
+                        "Destination %s upload interval wait %.0fs < %sm",
+                        destination.id,
+                        elapsed,
+                        min_interval,
+                    )
+                    _mark_destination_cycle(
+                        db, destination, now, REASON_UPLOAD_INTERVAL
+                    )
+                    return
 
         slot_index = slot.hour * 60 + slot.minute
         slot_type = get_slot_type(

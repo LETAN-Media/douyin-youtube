@@ -178,6 +178,15 @@ class DouyinSourceUpdate(BaseModel):
         default=None,
         max_length=200,
     )
+    scan_interval_minutes: int | None = Field(default=None, ge=5, le=1440)
+    max_videos_per_day: int | None = Field(default=None, ge=0, le=50)
+    include_keywords: list[str] | None = None
+    exclude_keywords: list[str] | None = None
+    start_mode: Literal["new_only", "last_n"] | None = None
+    initial_limit: int | None = Field(default=None, ge=1, le=50)
+    borderline_policy: Literal["hold", "continue"] | None = None
+    mismatch_policy: Literal["reject", "hold"] | None = None
+    order: Literal["oldest_first", "newest_first"] | None = None
     last_checked_at: datetime | None = Field(
         default=None,
     )
@@ -200,6 +209,29 @@ class DouyinSourceOut(DouyinSourceBase):
     last_checked_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # AUTO mode fields (plain columns; cookie value never exposed)
+    cookie_status: str = "missing"
+    cookie_account_name: str | None = None
+    cookie_verified_at: datetime | None = None
+    needs_reauth: bool = False
+    scan_interval_minutes: int = 15
+    max_videos_per_day: int = 5
+    include_keywords: list[str] | None = None
+    exclude_keywords: list[str] | None = None
+    next_scan_at: datetime | None = None
+    last_scan_at: datetime | None = None
+    start_mode: str = "new_only"
+    initial_limit: int = 10
+    baseline_done: bool = False
+    borderline_policy: str = "hold"
+    mismatch_policy: str = "reject"
+    order: str = "oldest_first"
+
+
+class SourceWithCookieOut(DouyinSourceOut):
+    """Source detail incl. public cookie state (never the cookie itself)."""
+
+    cookie_configured: bool = False
 
 
 class JobCreate(BaseModel):
@@ -521,6 +553,7 @@ class ManualMetadataItem(BaseModel):
     final_description: str
     content_match: bool | None = None
     content_match_reason: str | None = None
+    match_level: Literal["match", "borderline", "mismatch"] | None = None
 
 
 class ManualMetadataRequest(BaseModel):
@@ -655,4 +688,48 @@ class ChannelUpdateRequest(BaseModel):
 class ChannelAddSourceRequest(BaseModel):
     name: str
     url: str
+    cookie: str | None = Field(default=None, max_length=200000)
+    scan_interval_minutes: int = Field(default=15, ge=5, le=1440)
+    max_videos_per_day: int = Field(default=5, ge=0, le=50)
+    start_mode: Literal["new_only", "last_n"] = "new_only"
+    initial_limit: int = Field(default=10, ge=1, le=50)
+    include_keywords: list[str] | None = None
+    exclude_keywords: list[str] | None = None
+    borderline_policy: Literal["hold", "continue"] = "hold"
+    mismatch_policy: Literal["reject", "hold"] = "reject"
+    order: Literal["oldest_first", "newest_first"] = "oldest_first"
+
+
+class SourceCookieSave(BaseModel):
+    cookie: str = Field(min_length=1, max_length=200000)
+
+
+class SourceCookieStatus(BaseModel):
+    configured: bool = False
+    status: str = "missing"
+    account_name: str | None = None
+    verified_at: datetime | None = None
+    needs_reauth: bool = False
+
+
+class SourceCookieTestResponse(BaseModel):
+    ok: bool = True
+    nickname: str | None = None
+    sec_uid: str | None = None
+    latest_aweme_id: str | None = None
+
+
+class ChannelAutoStatus(BaseModel):
+    auto_enabled: bool = False
+    sources_count: int = 0
+    enabled_sources: int = 0
+    needs_reauth_sources: int = 0
+    last_scan_at: datetime | None = None
+    next_scan_at: datetime | None = None
+    today_published: int = 0
+    today_limit: int = 0
+    queue_count: int = 0
+    failed_count: int = 0
+    held_count: int = 0
+    rejected_count: int = 0
 
