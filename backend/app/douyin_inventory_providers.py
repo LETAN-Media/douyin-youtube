@@ -1074,8 +1074,123 @@ class RevidDouyinFeedProvider(DouyinInventoryProvider):
         return text
 
 
+class SelfHostedDouyinFeedProvider(DouyinInventoryProvider):
+    """PRIMARY creator feed via the separate self-hosted Douyin Feed API
+    (Evil0ctal dtk v5 deployed independently, e.g. Northflank).
+
+    HTTP only — see app.integrations.douyin_feed.client. No Douyin cookie,
+    no browser, no embedded signing code in this repo. Discovery only;
+    downloading stays with download_video (Rcuts).
+    """
+
+    name = "self_hosted"
+
+    def fetch_all(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._fetch(sec_uid or profile_url, full=True)
+
+    def fetch_latest(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
+        vids = self._fetch(sec_uid or profile_url, full=False)
+        return vids[:limit]
+
+    def _fetch(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
+        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
+        if not sec_uid:
+            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
+        if not getattr(settings, "douyin_feed_api_enabled", True):
+            raise DouyinInventoryError("self_hosted provider disabled")
+
+        from app.integrations.douyin_feed.client import DouyinFeedClient
+
+        client = DouyinFeedClient()
+        # scan_creator_posts keeps last-good-page on transient upstream risk
+        # flags (guest-identity pool reality) and never fails a whole scan for
+        # a deeper page.
+        raw_items = client.scan_creator_posts(
+            sec_uid,
+            max_pages=max(
+                1,
+                min(int(getattr(settings, "douyin_max_pages_per_scan", 3) or 3), 3),
+            ),
+            count=20,
+        )
+
+        ordered: list[dict[str, Any]] = []
+        for item in raw_items:
+            aweme_id = str(item.get("aweme_id") or "").strip()
+            if not aweme_id:
+                continue
+            share_url = str(
+                item.get("share_url")
+                or f"https://www.douyin.com/video/{aweme_id}"
+            )
+            caption = str(item.get("caption") or "")
+            try:
+                ts = int(item.get("create_time") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            douyin_created_at = (
+                datetime.fromtimestamp(ts, tz=timezone.utc) if ts > 0 else None
+            )
+            ordered.append(
+                {
+                    "video_id": aweme_id,
+                    "aweme_id": aweme_id,
+                    "title": caption[:200] if caption else aweme_id,
+                    "description": caption[:1000],
+                    "url": share_url,
+                    "douyin_created_at": douyin_created_at,
+                    "author": "",
+                    "cover": str(item.get("cover_url") or ""),
+                    "share_url": share_url,
+                    "create_time": ts,
+                }
+            )
+
+        logger.info(
+            "self_hosted douyin_feed collected %s videos for secUid=%s",
+            len(ordered),
+            sec_uid[:12],
+        )
+        return ordered
+
+    @staticmethod
+    def _resolve_sec_uid(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("http"):
+            try:
+                from app.douyin_url import parse_douyin_profile_url
+
+                parsed = parse_douyin_profile_url(text)
+                if parsed is not None:
+                    return parsed.sec_uid
+            except Exception:
+                pass
+            cleaned = text.rstrip("/").split("?")[0]
+            return cleaned.rsplit("/", 1)[-1]
+        return text
+
+
 class JustOneRapidApiProvider(DouyinInventoryProvider):
-    """Primary creator feed via JustOneAPI (RapidAPI gateway, no cookie)."""
+    """OPTIONAL fallback via JustOneAPI (RapidAPI gateway, no cookie).
+
+    Default OFF: enabled only when DOUYIN_CREATOR_PROVIDER=rapidapi_justone.
+    """
 
     name = "rapidapi_justone"
 
@@ -1202,22 +1317,32 @@ class JustOneRapidApiProvider(DouyinInventoryProvider):
 
 
 def get_primary_provider() -> DouyinInventoryProvider:
-    # rapidapi_justone is primary when selected + key/host configured
-    if (getattr(settings, "douyin_creator_provider", "") or "") == "rapidapi_justone":
+    # self_hosted (separate Douyin Feed API service) is the default primary
+    provider_setting = (getattr(settings, "douyin_creator_provider", "") or "").strip()
+    if provider_setting == "self_hosted" or not provider_setting:
+        if getattr(settings, "douyin_feed_api_enabled", True) and (
+            settings.douyin_feed_api_base_url or ""
+        ).strip():
+            return SelfHostedDouyinFeedProvider()
+    # rapidapi_justone only when explicitly selected (optional fallback)
+    if provider_setting == "rapidapi_justone":
         if (settings.rapidapi_key or "").strip() and (
             (settings.douyin_rapidapi_host or "").strip()
             or (settings.douyin_rapidapi_base_url or "").strip()
         ):
             return JustOneRapidApiProvider()
-    # Revid is next if enabled and key exists, else Http (anonymous) then Playwright
+    # Revid next if enabled and key exists, else Http (anonymous) then Playwright
     if getattr(settings, "revid_scan_enabled", True) and (settings.revid_api_key or "").strip():
         return RevidDouyinFeedProvider()
     return HttpDouyinFeedProvider()
 
 
 def get_secondary_provider() -> DouyinInventoryProvider:
-    # Http is secondary if Revid/RapidAPI is primary, else Playwright
-    if isinstance(get_primary_provider(), (RevidDouyinFeedProvider, JustOneRapidApiProvider)):
+    # Http is secondary if an API-based provider is primary, else Playwright
+    if isinstance(
+        get_primary_provider(),
+        (RevidDouyinFeedProvider, JustOneRapidApiProvider, SelfHostedDouyinFeedProvider),
+    ):
         return HttpDouyinFeedProvider()
     return PlaywrightDouyinInventoryProvider()
 
@@ -1245,7 +1370,9 @@ def discover_profile_videos(
             if full:
                 videos = provider.fetch_all(profile_url, sec_uid, source_id, cookie_jar)
             else:
-                if provider.name in ("http_feed", "playwright", "revid", "rapidapi_justone"):
+                if provider.name in (
+                    "http_feed", "playwright", "revid", "rapidapi_justone", "self_hosted",
+                ):
                     videos = provider.fetch_latest(
                         profile_url, sec_uid, source_id,
                         cookie_jar=cookie_jar, only_cookies=only_cookies,

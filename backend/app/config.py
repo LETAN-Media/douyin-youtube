@@ -115,16 +115,23 @@ class Settings(BaseSettings):
     revid_max_pages_per_scan: int = 3
     revid_credits_per_request: int = 35
 
-    # RapidAPI Douyin creator feed (primary, free/freemium, no cookie)
-    # Provider: "Douyin/China Tiktok All API" by justoneapi.
-    # Host/path live-verified 2026-09-24 (endpoint get-user-video-list/v3).
+    # PRIMARY creator feed: separate self-hosted Douyin Feed API service
+    # (Evil0ctal Douyin_TikTok_Download_API v5, deployed independently —
+    # local docker or Northflank). HTTP client only; no vendored source.
+    douyin_creator_provider: str = "self_hosted"
+    douyin_feed_api_base_url: str = ""
+    douyin_feed_api_key: str = ""
+    douyin_feed_api_enabled: bool = True
+    douyin_max_pages_per_scan: int = 3
+
+    # OPTIONAL fallbacks, default OFF as primary:
+    # RapidAPI "Douyin/China Tiktok All API" by justoneapi
+    # (host/path live-verified 2026-09-24; free plan quota is tiny).
     rapidapi_key: str = ""
     douyin_rapidapi_host: str = ""
     douyin_rapidapi_base_url: str = ""
     douyin_rapidapi_user_posts_path: str = "/api/douyin/get-user-video-list/v3"
-    douyin_rapidapi_enabled: bool = True
-    douyin_creator_provider: str = "rapidapi_justone"
-    douyin_max_pages_per_scan: int = 3
+    douyin_rapidapi_enabled: bool = False
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
