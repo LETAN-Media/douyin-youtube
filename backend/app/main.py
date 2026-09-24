@@ -4160,10 +4160,37 @@ def add_channel_source_endpoint(
     if not d.pipeline_id:
         raise HTTPException(status_code=400, detail="Channel workspace lacks linked pipeline")
 
+    platform = (payload.platform or "douyin").lower()
     name = payload.name.strip()
     url = payload.url.strip()
     if not name or not url:
-        raise HTTPException(status_code=400, detail="Vui lòng nhập tên và link tác giả Douyin")
+        raise HTTPException(status_code=400, detail="Vui lòng nhập tên và link tác giả")
+
+    if platform == "facebook":
+        from app.models import PipelineSource as _PS
+        from app.source_providers import registry as _reg
+
+        prov = _reg.get("facebook")
+        resolved = prov.resolve_source(url) if prov else {"source_external_id": url, "source_url": url}
+        ps = _PS(
+            pipeline_id=d.pipeline_id,
+            platform="facebook",
+            source_external_id=resolved.get("source_external_id") or url.split("/")[-1].split("?")[0],
+            source_url=resolved.get("source_url") or url,
+            source_name=name,
+            enabled=True,
+        )
+        db.add(ps)
+        db.commit()
+        db.refresh(ps)
+        return {
+            "id": ps.id,
+            "name": ps.source_name,
+            "profile_url": ps.source_url,
+            "status": "idle",
+            "video_count": 0,
+            "platform": "facebook",
+        }
 
     from app.douyin import parse_profile_url
     parsed = parse_profile_url(url)
@@ -4177,6 +4204,7 @@ def add_channel_source_endpoint(
         profile_url=clean_url,
         original_profile_url=url,
         douyin_sec_uid=sec_uid,
+        platform="douyin",
         enabled=True,
         inventory_sync_status="idle",
         scan_interval_minutes=payload.scan_interval_minutes,
@@ -4193,16 +4221,6 @@ def add_channel_source_endpoint(
     db.commit()
     db.refresh(source)
 
-    if payload.cookie and payload.cookie.strip():
-        from app.source_cookies import save_source_cookie
-
-        try:
-            save_source_cookie(db, source, payload.cookie)
-        except ValueError as exc:
-            db.delete(source)
-            db.commit()
-            raise HTTPException(status_code=400, detail=f"Cookie không hợp lệ: {exc}")
-
     # NEW_ONLY establishes a cheap latest baseline first; LAST_N/full
     # discovers history (kept newest N active, rest baselined).
     initial_mode = "latest" if source.start_mode == "new_only" else "full"
@@ -4214,6 +4232,7 @@ def add_channel_source_endpoint(
         "profile_url": source.profile_url,
         "status": source.inventory_sync_status,
         "video_count": 0,
+        "platform": "douyin",
     }
 
 
@@ -4295,12 +4314,16 @@ def _require_workspace_source(
 
 
 def _source_with_cookie_out(s: DouyinSource) -> dict:
+    # Deprecated per-source cookie fields kept for backwards compat, not used in runtime.
     return {
         "id": s.id,
         "name": s.name,
         "pipeline_id": s.pipeline_id,
+        "platform": getattr(s, "platform", "douyin") or "douyin",
         "original_profile_url": s.original_profile_url,
         "profile_url": s.profile_url,
+        "source_url": s.profile_url,
+        "source_name": s.name,
         "douyin_sec_uid": s.douyin_sec_uid,
         "douyin_user_id": s.douyin_user_id,
         "enabled": s.enabled,
@@ -4312,10 +4335,10 @@ def _source_with_cookie_out(s: DouyinSource) -> dict:
         "last_checked_at": s.last_checked_at,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
-        "cookie_status": s.cookie_status or "missing",
-        "cookie_account_name": s.cookie_account_name,
-        "cookie_verified_at": s.cookie_verified_at,
-        "needs_reauth": bool(s.needs_reauth),
+        "cookie_status": "deprecated",
+        "cookie_account_name": None,
+        "cookie_verified_at": None,
+        "needs_reauth": False,
         "scan_interval_minutes": s.scan_interval_minutes or 15,
         "max_videos_per_day": s.max_videos_per_day
         if s.max_videos_per_day is not None else 5,
@@ -4329,7 +4352,9 @@ def _source_with_cookie_out(s: DouyinSource) -> dict:
         "borderline_policy": s.borderline_policy or "hold",
         "mismatch_policy": s.mismatch_policy or "reject",
         "order": s.order or "oldest_first",
-        "cookie_configured": bool(s.cookie_encrypted),
+        "cookie_configured": False,
+        "status": s.inventory_sync_status,
+        "video_count": s.inventory_count,
     }
 
 
@@ -4344,14 +4369,43 @@ def list_channel_sources_endpoint(
     d = db.get(Destination, destination_id)
     if d is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
-    sources = list(
+    from app.models import PipelineSource
+
+    douyin = list(
         db.execute(
             select(DouyinSource)
             .where(DouyinSource.pipeline_id == d.pipeline_id)
             .order_by(DouyinSource.created_at.asc())
         ).scalars().all()
     )
-    return [_source_with_cookie_out(s) for s in sources]
+    generic = list(
+        db.execute(
+            select(PipelineSource)
+            .where(PipelineSource.pipeline_id == d.pipeline_id)
+            .order_by(PipelineSource.created_at.asc())
+        ).scalars().all()
+    )
+    out = [_source_with_cookie_out(s) for s in douyin]
+    for g in generic:
+        out.append(
+            {
+                "id": g.id,
+                "name": g.source_name,
+                "pipeline_id": g.pipeline_id,
+                "platform": g.platform,
+                "profile_url": g.source_url,
+                "source_url": g.source_url,
+                "source_name": g.source_name,
+                "enabled": g.enabled,
+                "inventory_sync_status": "idle",
+                "inventory_count": 0,
+                "status": "idle",
+                "video_count": 0,
+                "created_at": g.created_at,
+                "updated_at": g.updated_at,
+            }
+        )
+    return out
 
 
 @app.post(

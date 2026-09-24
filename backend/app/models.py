@@ -224,6 +224,12 @@ class PlatformAccount(Base):
         nullable=True,
     )
 
+    needs_reauth: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -316,6 +322,11 @@ class PipelineSource(Base):
 
     next_scan_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_error: Mapped[str | None] = mapped_column(
+        Text,
         nullable=True,
     )
 

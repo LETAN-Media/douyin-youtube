@@ -125,10 +125,28 @@ def _build_source_context(profile_url: str, videos: list[dict[str, Any]]) -> str
     return "\n".join(parts)[:6000]
 
 
+def _platform_account_ok(platform: str) -> bool:
+    if platform != "douyin":
+        return True  # Facebook stub always ok for now
+    try:
+        from app.models import PlatformAccount
+
+        with SessionLocal() as _db:
+            acct = _db.execute(select(PlatformAccount).where(PlatformAccount.platform == "douyin").limit(1)).scalar_one_or_none()
+            if acct is None:
+                return False
+            if acct.status != "connected" or getattr(acct, "needs_reauth", False):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _source_is_due(source: DouyinSource, now: datetime) -> bool:
     if not source.enabled:
         return False
-    if source.needs_reauth:
+    platform = getattr(source, "platform", "douyin") or "douyin"
+    if platform == "douyin" and not _platform_account_ok("douyin"):
         return False
     nxt = source.next_scan_at
     if nxt is not None:
@@ -143,7 +161,11 @@ def _scan_one_source(source_id: str) -> None:
     try:
         with SessionLocal() as db:
             source = db.get(DouyinSource, source_id)
-            if source is None or not source.enabled or source.needs_reauth:
+            if source is None or not source.enabled:
+                return
+            platform = getattr(source, "platform", "douyin") or "douyin"
+            if platform == "douyin" and not _platform_account_ok("douyin"):
+                logger.info("Skipping source %s: Douyin PlatformAccount not ready", source_id)
                 return
             pipeline_id = source.pipeline_id
             profile_url = source.profile_url or ""
@@ -186,10 +208,7 @@ def run_monitor_once() -> None:
             .where(DouyinSource.enabled == True)  # noqa: E712
             .order_by(DouyinSource.created_at.asc())
         ).scalars().all()
-        due_ids = [
-            s.id for s in sources
-            if _source_is_due(s, now) and not s.needs_reauth
-        ]
+        due_ids = [s.id for s in sources if _source_is_due(s, now)]
 
     try:
         concurrency = int(

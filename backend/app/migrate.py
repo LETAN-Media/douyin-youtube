@@ -103,6 +103,8 @@ def run_migrations() -> None:
             ("douyin_sources", "platform", "VARCHAR(20) DEFAULT 'douyin'"),
             ("douyin_sources", "avatar_url", "TEXT"),
             ("douyin_sources", "priority", "INTEGER DEFAULT 0"),
+            ("platform_accounts", "needs_reauth", "BOOLEAN DEFAULT FALSE"),
+            ("pipeline_sources", "last_error", "TEXT"),
         ]:
             try:
                 if not column_exists(connection, _tbl, _col):

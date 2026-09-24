@@ -688,7 +688,7 @@ class ChannelUpdateRequest(BaseModel):
 class ChannelAddSourceRequest(BaseModel):
     name: str
     url: str
-    cookie: str | None = Field(default=None, max_length=200000)
+    platform: Literal["douyin", "facebook"] = "douyin"
     scan_interval_minutes: int = Field(default=15, ge=5, le=1440)
     max_videos_per_day: int = Field(default=5, ge=0, le=50)
     start_mode: Literal["new_only", "last_n"] = "new_only"
