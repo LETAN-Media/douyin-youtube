@@ -23,6 +23,8 @@ import type {
   ChannelAutoStatus,
   ChannelDetail,
   ChannelInventoryItem,
+  CommentListResponse,
+  CommentReplyMode,
   DouyinQuotaStatus,
   ManualMetadataResult,
   ManualPublicationItem,
@@ -30,6 +32,7 @@ import type {
   ManualPublishResponse,
   ManualResolveResult,
   WorkspaceSourceItem,
+  YouTubeComment,
 } from "@/lib/types";
 import { actionGetOauthUrl, actionToggleDestination, actionUpdateDestination } from "@/lib/actions";
 
@@ -58,6 +61,7 @@ type TabType =
   | "inventory"
   | "queue"
   | "published"
+  | "comments"
   | "ai_profile"
   | "settings";
 
@@ -727,6 +731,239 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   };
 
   // ==========================================
+  // TAB: COMMENTS (AI Comment Reply — a SEPARATE subsystem)
+  // Nothing here reads or writes the metadata prompt (prompt_override).
+  // ==========================================
+  const [comments, setComments] = useState<YouTubeComment[]>([]);
+  const [commentMeta, setCommentMeta] = useState<CommentListResponse | null>(null);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentFilter, setCommentFilter] = useState<string>("");
+  const [busyCommentId, setBusyCommentId] = useState<string | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editReplyText, setEditReplyText] = useState("");
+  const [commentNotice, setCommentNotice] = useState<string | null>(null);
+
+  // AI Comment Reply settings (independent from aiPrompt / prompt_override).
+  const [crEnabled, setCrEnabled] = useState<boolean>(detail.comment_reply_enabled ?? false);
+  const [crMode, setCrMode] = useState<CommentReplyMode>(
+    (detail.comment_reply_mode as CommentReplyMode) || "off",
+  );
+  const [crPrompt, setCrPrompt] = useState(detail.comment_reply_system_prompt || "");
+  const [crLanguage, setCrLanguage] = useState(detail.comment_reply_language || "auto");
+  const [crStyle, setCrStyle] = useState(detail.comment_reply_style || "friendly");
+  const [crDailyLimit, setCrDailyLimit] = useState(detail.comment_reply_daily_limit ?? 20);
+  const [crMinInterval, setCrMinInterval] = useState(
+    detail.comment_reply_min_interval_seconds ?? 180,
+  );
+  const [crNewOnly, setCrNewOnly] = useState(detail.comment_reply_new_only ?? true);
+  const [crPositive, setCrPositive] = useState(detail.comment_reply_to_positive ?? true);
+  const [crQuestions, setCrQuestions] = useState(detail.comment_reply_to_questions ?? true);
+  const [crNeutral, setCrNeutral] = useState(detail.comment_reply_to_neutral ?? false);
+  const [crNegative, setCrNegative] = useState(detail.comment_reply_to_negative ?? false);
+  const [crEmojiOnly, setCrEmojiOnly] = useState(detail.comment_reply_to_emoji_only ?? false);
+  const [savingComment, setSavingComment] = useState(false);
+  const [commentSettingsSuccess, setCommentSettingsSuccess] = useState(false);
+
+  const fetchCommentSettings = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/channels/${channel.destination_id}/comment-reply-settings`,
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      setCrEnabled(Boolean(data.enabled));
+      setCrMode((data.mode as CommentReplyMode) || "off");
+      setCrPrompt(data.system_prompt || "");
+      setCrLanguage(data.language || "auto");
+      setCrStyle(data.style || "friendly");
+      setCrDailyLimit(data.daily_limit ?? 20);
+      setCrMinInterval(data.min_interval_seconds ?? 180);
+      setCrNewOnly(Boolean(data.new_only));
+      setCrPositive(Boolean(data.reply_to_positive));
+      setCrQuestions(Boolean(data.reply_to_questions));
+      setCrNeutral(Boolean(data.reply_to_neutral));
+      setCrNegative(Boolean(data.reply_to_negative));
+      setCrEmojiOnly(Boolean(data.reply_to_emoji_only));
+    } catch (e) {
+      console.error("Failed to load comment reply settings:", e);
+    }
+  }, [channel.destination_id]);
+
+  const fetchComments = useCallback(
+    async (status?: string) => {
+      setCommentsLoading(true);
+      try {
+        const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+        const res = await fetch(`/api/channels/${channel.destination_id}/comments${qs}`);
+        if (!res.ok) return;
+        const data: CommentListResponse = await res.json();
+        setComments(Array.isArray(data.items) ? data.items : []);
+        setCommentMeta(data);
+      } catch (e) {
+        console.error("Failed to load comments:", e);
+      } finally {
+        setCommentsLoading(false);
+      }
+    },
+    [channel.destination_id],
+  );
+
+  useEffect(() => {
+    if (activeTab !== "comments") return;
+    fetchComments(commentFilter);
+    fetchCommentSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const notifyComments = (msg: string) => {
+    setCommentNotice(msg);
+    setTimeout(() => setCommentNotice(null), 4000);
+  };
+
+  const handleSaveCommentSettings = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    setSavingComment(true);
+    setCommentSettingsSuccess(false);
+    try {
+      const res = await fetch(
+        `/api/channels/${channel.destination_id}/comment-reply-settings`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: crEnabled,
+            mode: crMode,
+            system_prompt: crPrompt,
+            language: crLanguage,
+            style: crStyle,
+            daily_limit: crDailyLimit,
+            min_interval_seconds: crMinInterval,
+            new_only: crNewOnly,
+            reply_to_positive: crPositive,
+            reply_to_questions: crQuestions,
+            reply_to_neutral: crNeutral,
+            reply_to_negative: crNegative,
+            reply_to_emoji_only: crEmojiOnly,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Lưu cài đặt comment thất bại");
+      }
+      setCommentSettingsSuccess(true);
+      setTimeout(() => setCommentSettingsSuccess(false), 4000);
+      reloadDetail();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Lỗi lưu cài đặt AI Comment Reply");
+    } finally {
+      setSavingComment(false);
+    }
+  };
+
+  const handleScanComments = async () => {
+    setCommentsLoading(true);
+    try {
+      const res = await fetch(
+        `/api/channels/${channel.destination_id}/comments/scan`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Quét bình luận thất bại");
+      }
+      notifyComments("Đã xếp hàng quét bình luận — tải lại sau ít giây.");
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Quét thất bại");
+    } finally {
+      setCommentsLoading(false);
+    }
+  };
+
+  const handleGenerateComment = async (commentId: string) => {
+    setBusyCommentId(commentId);
+    try {
+      const res = await fetch(
+        `/api/channels/${channel.destination_id}/comments/${commentId}/generate-reply`,
+        { method: "POST" },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Tạo reply thất bại");
+      if (data.error) notifyComments(`AI: ${data.error}`);
+      await fetchComments(commentFilter);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Tạo reply thất bại");
+    } finally {
+      setBusyCommentId(null);
+    }
+  };
+
+  const handleSendCommentReply = async (commentId: string, text: string) => {
+    setBusyCommentId(commentId);
+    try {
+      const res = await fetch(
+        `/api/channels/${channel.destination_id}/comments/${commentId}/reply`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Gửi reply thất bại");
+      if (!data.ok) {
+        throw new Error(data.error || "Gửi reply thất bại");
+      }
+      setEditingCommentId(null);
+      setEditReplyText("");
+      notifyComments("Đã trả lời bình luận trên YouTube.");
+      await fetchComments(commentFilter);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Gửi reply thất bại");
+    } finally {
+      setBusyCommentId(null);
+    }
+  };
+
+  const handleSkipComment = async (commentId: string) => {
+    setBusyCommentId(commentId);
+    try {
+      const res = await fetch(
+        `/api/channels/${channel.destination_id}/comments/${commentId}/skip`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Bỏ qua thất bại");
+      }
+      notifyComments("Đã bỏ qua bình luận này.");
+      await fetchComments(commentFilter);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Bỏ qua thất bại");
+    } finally {
+      setBusyCommentId(null);
+    }
+  };
+
+  const commentStatusTone = (status: string): string => {
+    switch (status) {
+      case "replied":
+        return "bg-emerald-50 text-emerald-700 border-emerald-200";
+      case "ready_to_reply":
+        return "bg-indigo-50 text-indigo-700 border-indigo-200";
+      case "held":
+        return "bg-amber-50 text-amber-700 border-amber-200";
+      case "failed":
+        return "bg-rose-50 text-rose-700 border-rose-200";
+      case "ignored":
+      case "skipped":
+        return "bg-slate-100 text-slate-600 border-slate-200";
+      default:
+        return "bg-sky-50 text-sky-700 border-sky-200";
+    }
+  };
+
+  // ==========================================
   // TAB: SETTINGS FORM STATE & ACTIONS
   // ==========================================
   const [settingsName, setSettingsName] = useState(channel.channel_title || "");
@@ -747,6 +984,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: settingsName,
+          prompt_override: aiPrompt,
           daily_upload_limit: Number(settingsLimit),
           default_privacy: settingsPrivacy,
           timezone: settingsTz,
@@ -995,6 +1233,24 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
 
         <button
           type="button"
+          onClick={() => setActiveTab("comments")}
+          className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
+            activeTab === "comments"
+              ? "border-indigo-600 text-indigo-700"
+              : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
+          }`}
+        >
+          <IconSparkles size={15} />
+          Comments
+          {detail.comment_count ? (
+            <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-black text-slate-600">
+              {detail.comment_count}
+            </span>
+          ) : null}
+        </button>
+
+        <button
+          type="button"
           onClick={() => setActiveTab("ai_profile")}
           className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
             activeTab === "ai_profile"
@@ -1196,6 +1452,46 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               Kho video ({detail.inventory_count || detail.inventory?.length || 0})
             </button>
           </div>
+
+          {/* AI Comment Reply: auxiliary worker, NOT part of the publishing pipeline */}
+          <Card className="p-5 sm:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">
+                  YouTube Comments → AI Reply → YouTube Replies
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Worker phụ độc lập, không nằm trong pipeline đăng video.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab("comments")}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50"
+              >
+                AI Reply ({detail.comment_reply_mode || "off"}) →
+              </button>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-bold">
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-slate-600">
+                Bình luận: {detail.comment_count || 0}
+              </span>
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-slate-600">
+                Đã trả lời hôm nay: {detail.comment_replies_today || 0} / {detail.comment_reply_daily_limit ?? 20}
+              </span>
+              <span
+                className={`rounded-full border px-3 py-1 ${
+                  detail.comment_oauth_ready
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-amber-200 bg-amber-50 text-amber-800"
+                }`}
+              >
+                {detail.comment_oauth_ready
+                  ? "OAuth comment: OK (force-ssl)"
+                  : "Reconnect required for comment replies"}
+              </span>
+            </div>
+          </Card>
         </div>
       )}
 
@@ -1907,6 +2203,248 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       )}
 
       {/* ============================================================ */}
+      {
+        /* === TAB: COMMENTS (AI Comment Reply, independent worker) === */
+      }
+      {activeTab === "comments" && (
+        <div className="space-y-6">
+          {commentNotice && (
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs font-bold text-indigo-900">
+              {commentNotice}
+            </div>
+          )}
+
+          <Card className="p-5 sm:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">
+                  Bình luận YouTube ({detail.comment_count || 0})
+                </h3>
+                <p className="text-xs text-slate-500">
+                  AI trả lời bình luận dùng prompt riêng của kênh — không liên quan tới prompt tạo title/description/hashtags.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-black text-slate-700">
+                  AI Reply: {(commentMeta?.mode || crMode || "off").toUpperCase()}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleScanComments}
+                  disabled={commentsLoading}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <IconRefresh size={14} />
+                  Quét bình luận
+                </button>
+              </div>
+            </div>
+
+            {commentMeta && !commentMeta.oauth_ready && (
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-900">
+                Reconnect required for comment replies — kênh này chưa cấp quyền
+                youtube.force-ssl ({commentMeta.oauth_reason || "YOUTUBE_SCOPE_MISSING"}).
+                Hãy Reconnect OAuth cho kênh này ở tab Settings.
+              </div>
+            )}
+
+            <div className="mt-4 grid grid-cols-3 gap-2 sm:grid-cols-6">
+              {[
+                { label: "New", value: commentMeta?.stats?.new || 0 },
+                { label: "Ready", value: commentMeta?.stats?.ready_to_reply || 0 },
+                { label: "Replied today", value: commentMeta?.replies_today || 0 },
+                { label: "Held", value: commentMeta?.stats?.held || 0 },
+                { label: "Failed", value: commentMeta?.stats?.failed || 0 },
+                { label: "Limit", value: commentMeta?.daily_limit ?? crDailyLimit },
+              ].map((s) => (
+                <div
+                  key={s.label}
+                  className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm"
+                >
+                  <span className="text-[10px] font-bold text-slate-400">{s.label}</span>
+                  <p className="mt-0.5 text-lg font-black text-slate-900">{s.value}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {[
+                { key: "", label: "Tất cả" },
+                { key: "new", label: "New" },
+                { key: "ready_to_reply", label: "Ready" },
+                { key: "replied", label: "Replied" },
+                { key: "held", label: "Held" },
+                { key: "failed", label: "Failed" },
+              ].map((f) => (
+                <button
+                  key={f.key || "all"}
+                  type="button"
+                  onClick={() => {
+                    setCommentFilter(f.key);
+                    fetchComments(f.key);
+                  }}
+                  className={`rounded-full border px-3.5 py-1.5 text-[11px] font-bold transition ${
+                    commentFilter === f.key
+                      ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </Card>
+
+          {commentsLoading && comments.length === 0 ? (
+            <Card className="p-6 text-center text-xs font-bold text-slate-500">
+              Đang tải bình luận…
+            </Card>
+          ) : comments.length === 0 ? (
+            <Card className="p-6 text-center text-xs font-bold text-slate-500">
+              Chưa có bình luận nào. Bấm “Quét bình luận” để lấy bình luận mới từ YouTube.
+            </Card>
+          ) : (
+            <div className="space-y-3">
+              {comments.map((c) => (
+                <Card key={c.id} className="p-4 sm:p-5">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-xs font-black text-white">
+                      {(c.author_name || "?").slice(0, 1).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-extrabold text-slate-900">
+                          {c.author_name || "Ẩn danh"}
+                        </span>
+                        <span className="text-[10px] font-semibold text-slate-400">
+                          {formatTime(c.published_at)}
+                        </span>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-black ${commentStatusTone(
+                            c.status,
+                          )}`}
+                        >
+                          {c.status}
+                        </span>
+                        {c.ai_classification ? (
+                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-black text-slate-600">
+                            {c.ai_classification}
+                            {c.ai_confidence != null
+                              ? ` · ${Math.round(c.ai_confidence * 100)}%`
+                              : ""}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-1.5 whitespace-pre-wrap text-sm text-slate-800">
+                        {c.text_original}
+                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] font-semibold text-slate-400">
+                        <span>Video: {c.video_title || c.video_id}</span>
+                        {c.like_count ? <span>· {c.like_count} like</span> : null}
+                        {c.ai_reason ? <span>· {c.ai_reason}</span> : null}
+                      </div>
+
+                      {editingCommentId === c.id ? (
+                        <div className="mt-3">
+                          <textarea
+                            rows={3}
+                            value={editReplyText}
+                            onChange={(e) => setEditReplyText(e.target.value)}
+                            className="w-full rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none"
+                          />
+                          <div className="mt-2 flex gap-2">
+                            <button
+                              type="button"
+                              disabled={busyCommentId === c.id || !editReplyText.trim()}
+                              onClick={() => handleSendCommentReply(c.id, editReplyText)}
+                              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+                            >
+                              <IconCheck size={14} />
+                              Gửi reply
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingCommentId(null);
+                                setEditReplyText("");
+                              }}
+                              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-600 shadow-sm hover:bg-slate-50"
+                            >
+                              <IconX size={14} />
+                              Huỷ
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          {c.reply_text || c.ai_reply ? (
+                            <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
+                              <span className="text-[10px] font-black uppercase tracking-wide text-indigo-500">
+                                Suggested reply
+                              </span>
+                              <p className="mt-1 text-sm text-slate-800">
+                                {c.reply_text || c.ai_reply}
+                              </p>
+                            </div>
+                          ) : null}
+
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {c.status !== "replied" && c.status !== "ignored" ? (
+                              <button
+                                type="button"
+                                disabled={busyCommentId === c.id}
+                                onClick={() =>
+                                  handleSendCommentReply(
+                                    c.id,
+                                    (c.reply_text || c.ai_reply || "").trim(),
+                                  )
+                                }
+                                className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+                              >
+                                <IconCheck size={14} />
+                                Reply
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingCommentId(c.id);
+                                setEditReplyText(c.reply_text || c.ai_reply || "");
+                              }}
+                              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busyCommentId === c.id}
+                              onClick={() => handleGenerateComment(c.id)}
+                              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              <IconRefresh size={14} />
+                              Regenerate
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busyCommentId === c.id}
+                              onClick={() => handleSkipComment(c.id)}
+                              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-500 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              <IconX size={14} />
+                              Ignore
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* TAB 8: AI PROFILE (Requirement 7)                            */}
       {/* ============================================================ */}
       {activeTab === "ai_profile" && (
@@ -2063,6 +2601,185 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 onChange={(e) => setSettingsTz(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none"
               />
+            </div>
+
+            {/* ============================================================ */}
+            {/* SECTION A: AI METADATA (unchanged system prompt)              */}
+            {/* ============================================================ */}
+            <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
+              <div className="border-b border-slate-200 pb-2">
+                <h4 className="text-xs font-extrabold uppercase tracking-wide text-slate-700">
+                  AI Metadata
+                </h4>
+                <p className="text-[11px] text-slate-500">
+                  Chỉ dùng cho tiêu đề, mô tả và hashtags khi upload video. Prompt này KHÔNG liên quan tới AI trả lời bình luận.
+                </p>
+              </div>
+              <div className="mt-3">
+                <label className="text-xs font-bold text-slate-700">
+                  Metadata System Prompt
+                </label>
+                <textarea
+                  rows={8}
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  placeholder="System Prompt cho việc tạo title / description / hashtags..."
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Có thể chỉnh chi tiết hơn ở tab AI Profile. Nút “Lưu thay đổi” bên dưới sẽ lưu cả prompt này.
+                </p>
+              </div>
+            </div>
+
+            {/* ============================================================ */}
+            {/* SECTION B: AI COMMENT REPLY (fully separate prompt)          */}
+            {/* ============================================================ */}
+            <div className="rounded-2xl border border-indigo-200 bg-indigo-50/40 p-4">
+              <div className="border-b border-indigo-100 pb-2">
+                <h4 className="text-xs font-extrabold uppercase tracking-wide text-indigo-700">
+                  AI Comment Reply
+                </h4>
+                <p className="text-[11px] text-slate-500">
+                  Chỉ dùng để đọc bình luận và tạo câu trả lời. Prompt này hoàn toàn tách biệt với AI Metadata ở trên.
+                </p>
+              </div>
+
+              {commentSettingsSuccess && (
+                <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-800">
+                  ✓ Đã lưu cài đặt AI Comment Reply!
+                </div>
+              )}
+
+              <div className="mt-3 flex flex-wrap items-center gap-4">
+                <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={crEnabled}
+                    onChange={(e) => setCrEnabled(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  AI Comment Assistant
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-700">Mode</span>
+                  <select
+                    value={crMode}
+                    onChange={(e) => setCrMode(e.target.value as CommentReplyMode)}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 shadow-sm"
+                  >
+                    <option value="off">OFF</option>
+                    <option value="review">Manual Review</option>
+                    <option value="auto">Auto Reply</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="mt-3">
+                <label className="text-xs font-bold text-slate-700">
+                  Comment Reply System Prompt
+                </label>
+                <textarea
+                  rows={8}
+                  value={crPrompt}
+                  onChange={(e) => setCrPrompt(e.target.value)}
+                  placeholder="Ví dụ: You are the community manager for this channel. Reply naturally, friendly, short and playful..."
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Để trống sẽ dùng prompt mặc định trung tính cho comment (không bao giờ dùng prompt metadata).
+                </p>
+              </div>
+
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-bold text-slate-700">Reply language</label>
+                  <select
+                    value={crLanguage}
+                    onChange={(e) => setCrLanguage(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-sm"
+                  >
+                    <option value="auto">AUTO (theo ngôn ngữ comment)</option>
+                    <option value="en">English</option>
+                    <option value="vi">Vietnamese</option>
+                    <option value="zh">Chinese</option>
+                    <option value="ko">Korean</option>
+                    <option value="ja">Japanese</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">Reply style</label>
+                  <select
+                    value={crStyle}
+                    onChange={(e) => setCrStyle(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-sm"
+                  >
+                    <option value="friendly">Friendly</option>
+                    <option value="funny">Funny</option>
+                    <option value="warm">Warm</option>
+                    <option value="short">Short</option>
+                    <option value="professional">Professional</option>
+                    <option value="custom">Custom (theo prompt)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">Max replies/day</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={500}
+                    value={crDailyLimit}
+                    onChange={(e) => setCrDailyLimit(Number(e.target.value) || 0)}
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-900 shadow-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">Min interval (giây)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={86400}
+                    value={crMinInterval}
+                    onChange={(e) => setCrMinInterval(Number(e.target.value) || 0)}
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-900 shadow-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-4">
+                {[
+                  { label: "Reply only to new comments", value: crNewOnly, set: setCrNewOnly },
+                  { label: "Reply to positive", value: crPositive, set: setCrPositive },
+                  { label: "Reply to questions", value: crQuestions, set: setCrQuestions },
+                  { label: "Reply to neutral", value: crNeutral, set: setCrNeutral },
+                  { label: "Reply to negative", value: crNegative, set: setCrNegative },
+                  { label: "Reply to emoji-only", value: crEmojiOnly, set: setCrEmojiOnly },
+                ].map((f) => (
+                  <label
+                    key={f.label}
+                    className="inline-flex items-center gap-2 text-[11px] font-bold text-slate-700"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={f.value}
+                      onChange={(e) => f.set(e.target.checked)}
+                      className="h-4 w-4 rounded border-slate-300"
+                    />
+                    {f.label}
+                  </label>
+                ))}
+              </div>
+
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => handleSaveCommentSettings()}
+                  disabled={savingComment}
+                  className="inline-flex min-h-[40px] items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {savingComment ? "Đang lưu…" : "Lưu AI Comment Reply"}
+                </button>
+              </div>
             </div>
 
             <div className="pt-3">

@@ -497,5 +497,108 @@ export interface ChannelDetail {
   inventory_count?: number;
   failed_count?: number;
   next_slot?: string | null;
+
+  // AI Comment Reply — a separate subsystem from all metadata fields above.
+  comment_reply_enabled?: boolean;
+  comment_reply_mode?: string;
+  comment_reply_system_prompt?: string | null;
+  comment_reply_language?: string;
+  comment_reply_style?: string;
+  comment_reply_daily_limit?: number;
+  comment_reply_min_interval_seconds?: number;
+  comment_reply_new_only?: boolean;
+  comment_reply_to_positive?: boolean;
+  comment_reply_to_questions?: boolean;
+  comment_reply_to_neutral?: boolean;
+  comment_reply_to_negative?: boolean;
+  comment_reply_to_emoji_only?: boolean;
+  comment_oauth_ready?: boolean;
+  comment_oauth_reason?: string | null;
+  comment_replies_today?: number;
+  comment_count?: number;
+}
+
+export type CommentReplyMode = "off" | "review" | "auto";
+
+export interface CommentReplySettings {
+  destination_id: string;
+  enabled: boolean;
+  mode: CommentReplyMode;
+  system_prompt?: string | null;
+  language: string;
+  style: string;
+  daily_limit: number;
+  min_interval_seconds: number;
+  new_only: boolean;
+  reply_to_positive: boolean;
+  reply_to_questions: boolean;
+  reply_to_neutral: boolean;
+  reply_to_negative: boolean;
+  reply_to_emoji_only: boolean;
+  last_scan_at?: string | null;
+  replies_today: number;
+  oauth_ready: boolean;
+  oauth_reason?: string | null;
+}
+
+export interface CommentReplySettingsUpdate {
+  enabled?: boolean;
+  mode?: CommentReplyMode;
+  system_prompt?: string | null;
+  language?: string;
+  style?: string;
+  daily_limit?: number;
+  min_interval_seconds?: number;
+  new_only?: boolean;
+  reply_to_positive?: boolean;
+  reply_to_questions?: boolean;
+  reply_to_neutral?: boolean;
+  reply_to_negative?: boolean;
+  reply_to_emoji_only?: boolean;
+}
+
+export interface YouTubeComment {
+  id: string;
+  destination_id: string;
+  video_id: string;
+  video_title?: string | null;
+  youtube_comment_id: string;
+  parent_comment_id?: string | null;
+  author_channel_id?: string | null;
+  author_name?: string | null;
+  text_original: string;
+  published_at?: string | null;
+  like_count: number;
+  status: string;
+  reply_status: string;
+  ai_classification?: string | null;
+  ai_reply?: string | null;
+  reply_text?: string | null;
+  ai_confidence?: number | null;
+  ai_reason?: string | null;
+  detected_language?: string | null;
+  replied_at?: string | null;
+  youtube_reply_id?: string | null;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CommentListResponse {
+  destination_id: string;
+  total: number;
+  items: YouTubeComment[];
+  stats: Record<string, number>;
+  replies_today: number;
+  daily_limit: number;
+  mode: string;
+  oauth_ready: boolean;
+  oauth_reason?: string | null;
+}
+
+export interface CommentActionResult {
+  ok: boolean;
+  comment?: YouTubeComment | null;
+  error?: string | null;
 }
 

@@ -108,6 +108,29 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: int = 60
     scheduler_startup_delay_seconds: int = 10
 
+    # ---- AI Comment Reply ----
+    # A subsystem independent of publishing: its own worker and interval so
+    # comment polling can never block a video upload. Off entirely when
+    # COMMENT_REPLY_ENABLED=false.
+    comment_reply_enabled: bool = True
+    comment_scan_enabled: bool = True
+
+    # Both env names are accepted; the YOUTUBE_-prefixed one wins when set.
+    youtube_comment_scan_interval_minutes: int | None = None
+    comment_scan_interval_minutes: int = 10
+
+    comment_worker_poll_seconds: int = 60
+    comment_worker_startup_delay_seconds: int = 15
+
+    # Defaults seeded onto new channels; each channel can override them.
+    comment_reply_min_interval_seconds: int = 180
+    comment_reply_daily_limit: int = 20
+
+    # How many of the channel's most recent published videos to poll, and how
+    # many comment pages per video. Bounded so a scan stays cheap.
+    comment_scan_videos_per_channel: int = 5
+    comment_threads_max_pages: int = 2
+
     # RevidAPI Douyin creator feed (no Douyin cookie required). OPTIONAL and
     # default OFF: not part of the production creator scan path any more.
     revid_api_key: str = ""
@@ -190,6 +213,19 @@ class Settings(BaseSettings):
             )
 
         return url
+
+    @property
+    def comment_scan_minutes(self) -> int:
+        """Effective comment scan interval in minutes."""
+        value = (
+            self.youtube_comment_scan_interval_minutes
+            if self.youtube_comment_scan_interval_minutes
+            else self.comment_scan_interval_minutes
+        )
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 10
 
     @property
     def youtube_callback_url(self) -> str:

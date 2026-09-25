@@ -916,6 +916,267 @@ class Destination(Base):
         lazy="selectin",
     )
 
+    # ---- AI Comment Reply -------------------------------------------------
+    # Deliberately SEPARATE from the metadata fields above: prompt_override /
+    # metadata_profile / metadata_language only ever feed title/description/
+    # hashtags, while the comment_* fields below only ever feed comment
+    # analysis and replies. The two prompt sets are never merged or reused.
+    comment_reply_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    # off | review | auto
+    comment_reply_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="off",
+    )
+
+    # The ONLY system prompt used by the comment-reply AI flow.
+    comment_reply_system_prompt: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # auto | en | vi | zh ...
+    comment_reply_language: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="auto",
+    )
+
+    # friendly | funny | warm | short | professional | custom
+    comment_reply_style: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="friendly",
+    )
+
+    comment_reply_daily_limit: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=20,
+    )
+
+    comment_reply_min_interval_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=180,
+    )
+
+    comment_reply_new_only: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    # Comment filter config (editable from the dashboard).
+    comment_reply_to_positive: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    comment_reply_to_questions: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+
+    comment_reply_to_neutral: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    comment_reply_to_negative: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    comment_reply_to_emoji_only: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    last_comment_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class YouTubeComment(Base):
+    """A comment fetched from a channel's own published videos.
+
+    One row per (destination, YouTube comment). Never written by the metadata
+    or publishing flows; only the comment worker and the comment routes touch
+    it.
+    """
+
+    __tablename__ = "youtube_comments"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    destination_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # YouTube video id the comment lives on.
+    video_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    video_title: Mapped[str | None] = mapped_column(
+        String(400),
+        nullable=True,
+    )
+
+    youtube_comment_id: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+        index=True,
+    )
+
+    # Set only for replies (commentThreads children).
+    parent_comment_id: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+
+    author_channel_id: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+
+    author_name: Mapped[str | None] = mapped_column(
+        String(300),
+        nullable=True,
+    )
+
+    # Canonical comment text. `comment_text` mirrors it for fetch/dedupe.
+    text_original: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+    )
+
+    comment_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+    )
+
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    like_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    # new | analyzing | queued | generated | ready_to_reply | held | ignored
+    # | skipped | replying | replied | failed
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="new",
+        index=True,
+    )
+
+    # Mirror of `status` kept for the fetch/dedupe contract.
+    reply_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="new",
+    )
+
+    ai_classification: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+
+    ai_reply: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # Final reply text that was (or will be) posted.
+    reply_text: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    ai_confidence: Mapped[float | None] = mapped_column(
+        nullable=True,
+    )
+
+    ai_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # Coarse language detected on the comment (en/vi/zh/...).
+    detected_language: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
+    replied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    youtube_reply_id: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+
+    error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "destination_id",
+            "youtube_comment_id",
+            name="uq_youtube_comment_destination_comment",
+        ),
+        UniqueConstraint(
+            "youtube_comment_id",
+            name="uq_youtube_comment_id",
+        ),
+    )
+
 
 class Publication(Base):
     __tablename__ = "publications"

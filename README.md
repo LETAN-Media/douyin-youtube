@@ -7,6 +7,7 @@ Tự động tải video Douyin (qua Rcuts), tạo metadata AI, và đăng lên 
 ## Features
 
 - **Manual publish**: dán link Douyin → preview → AI metadata → Publish Now
+- **AI Comment Reply** (per channel): worker độc lập quét bình luận YouTube mới → AI phân loại → tạo reply → Review hoặc Auto → `comments.insert`. Dùng **prompt riêng biệt** với prompt metadata.
 - **Auto mode**: quét creator định kỳ (Playwright), dedupe `aweme_id`, AI Content Match 3 mức (match/borderline/mismatch), metadata, scheduler theo slot, YouTube upload
 - **Shared Platform Auth**: 1 Douyin login (PlatformAccount) dùng chung cho mọi source/pipeline; Facebook stub
 - **Downloader**: `Rcuts` primary (`DouYin_All.php`) → fallback (`DouYin.php`) → `yt-dlp` cuối; HTTP download MP4 + `ffprobe` validate
@@ -105,8 +106,43 @@ DASHBOARD_SECRET=...
 - `GET /api/pipelines/{id}/sources` / `POST /api/pipelines/{id}/sources` `{platform, source_url, source_name}`
 - `POST /api/sources/{id}/initial-import` / `/initial-import/resume` / `/refresh` → đồng bộ Inventory Douyin (thủ công)
 - `GET /api/sources/{id}/inventory` / `GET /api/douyin/quota`
+- `GET /api/channels/{id}/comments` / `POST /api/channels/{id}/comments/scan`
+- `POST /api/channels/{id}/comments/{comment_id}/generate-reply` `/reply` `/skip`
+- `GET|PATCH /api/channels/{id}/comment-reply-settings`
 - `GET /api/channels/{destination_id}/sources` / `POST /api/channels/{destination_id}/sources`
 - `POST /api/youtube/oauth-url?destination_id=...` → Google OAuth `https://accounts.google.com/o/oauth2/v2/auth`
+
+### AI Comment Reply — hai prompt hoàn toàn độc lập
+
+Mỗi YouTube destination/kênh có **hai** system prompt tách biệt, không bao giờ được merge hay fallback lẫn nhau:
+
+| Field | Dùng cho | Ghi chú |
+| --- | --- | --- |
+| `prompt_override` (là `metadata_system_prompt`) | title / description / hashtags / publish metadata | **Giữ nguyên** hành vi cũ, không rename |
+| `comment_reply_system_prompt` | đọc bình luận + tạo câu trả lời bình luận | Chỉ `app/ai_comment_reply.py` đọc field này |
+
+Ràng buộc được test tự động (`backend/tests/test_comment_reply.py`):
+
+- `app/ai_comment_reply.py` **không** được tham chiếu `prompt_override` / `metadata_profile` / `metadata_language`.
+- `app/ai_metadata.py` **không** được tham chiếu `comment_reply_system_prompt`.
+- Khi cả hai prompt được set khác hẳn nhau, payload gửi AI của luồng comment chỉ chứa prompt comment, và payload của luồng metadata chỉ chứa prompt metadata.
+
+Luồng:
+
+```
+VIDEO PUBLISH   video → metadata_system_prompt → title/description/hashtags → upload
+COMMENT REPLY   new comment → comment_reply_system_prompt → AI reply → comments.insert
+```
+
+Đặc điểm khác:
+
+- **OAuth**: cần thêm scope `https://www.googleapis.com/auth/youtube.force-ssl` (giữ `youtube.upload` + `youtube.readonly`). Kênh kết nối trước thay đổi này sẽ hiện *"Reconnect required for comment replies"* (mã `YOUTUBE_SCOPE_MISSING`) — không tự giả định refresh token cũ có scope mới.
+- **API**: đọc bằng `commentThreads.list`, trả lời bằng `comments.insert` với `parentId` (không dùng `commentThreads.insert`).
+- **Phân loại**: POSITIVE / QUESTION / NEUTRAL / NEGATIVE / SPAM / ABUSE / SENSITIVE / SKIP. SPAM, ABUSE, SENSITIVE, SKIP luôn bị giữ lại cho người duyệt, kể cả khi cấu hình kênh cho phép.
+- **Mode**: `off` / `review` (AI draft → `ready_to_reply`) / `auto` (reply trực tiếp). Lần quét đầu chỉ ingest, **không** auto-reply cả backlog.
+- **Rate limit**: `comment_reply_daily_limit` (mặc định 20/ngày) và `comment_reply_min_interval_seconds` (mặc định 180s) cho từng kênh.
+- **Chống trùng**: unique `youtube_comment_id`; comment đã có `youtube_reply_id` không bao giờ gửi lại; comment kẹt ở `replying` được reconcile lại với YouTube trước khi retry.
+- **Worker riêng**: `Lifespan` chạy task `comment_worker_loop()` với interval `COMMENT_SCAN_INTERVAL_MINUTES`, không dùng chung task với publish worker.
 
 ## Deployment
 

@@ -22,9 +22,14 @@ from app.models import AppSetting, Destination, OAuthState, Pipeline
 logger = logging.getLogger("douyin-youtube-youtube")
 
 
+#: Required to read comments and post replies (comments.insert).
+#: Channels authorised before this scope was added must reconnect.
+YOUTUBE_FORCE_SSL_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
+
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
+    YOUTUBE_FORCE_SSL_SCOPE,
 ]
 
 GLOBAL_TOKEN_SETTING_KEY = "youtube_credentials"
@@ -495,6 +500,62 @@ def destination_oauth_ready(
     if not data.get("refresh_token"):
         return False, "DESTINATION_NOT_CONNECTED"
     return True, None
+
+
+def granted_scopes(raw_credentials: str | None) -> list[str]:
+    """Scopes saved with a destination's OAuth token (never a secret)."""
+    if not raw_credentials:
+        return []
+    try:
+        data = json.loads(raw_credentials)
+    except Exception:
+        return []
+    scopes = data.get("scopes")
+    if not isinstance(scopes, list):
+        return []
+    return [str(item) for item in scopes if item]
+
+
+def destination_comment_scope_status(
+    destination: Destination | None,
+) -> tuple[bool, str | None]:
+    """Can this destination read/reply to comments?
+
+    Returns (ok, reason). A channel authorised before force-ssl was added
+    MUST reconnect: an old refresh token does not silently gain the scope.
+    """
+    if destination is None:
+        return False, "DESTINATION_NOT_FOUND"
+    if not destination.credentials:
+        return False, "YOUTUBE_REAUTH_REQUIRED"
+    scopes = granted_scopes(destination.credentials)
+    if not scopes:
+        # Token predates scope recording: assume it lacks force-ssl rather
+        # than risk a 403 mid-reply.
+        return False, "YOUTUBE_SCOPE_MISSING"
+    if YOUTUBE_FORCE_SSL_SCOPE in scopes:
+        return True, None
+    if any(str(s).endswith("youtube.force-ssl") for s in scopes):
+        return True, None
+    return False, "YOUTUBE_SCOPE_MISSING"
+
+
+def build_destination_client(
+    db: Session,
+    destination_id: str,
+) -> tuple[Credentials, Any]:
+    """YouTube API client bound to ONE destination's own OAuth token.
+
+    Never falls back to another destination / pipeline / global token.
+    """
+    credentials = load_credentials(db, destination_id=destination_id)
+    youtube = build(
+        "youtube",
+        "v3",
+        credentials=credentials,
+        cache_discovery=False,
+    )
+    return credentials, youtube
 
 
 def youtube_connected(

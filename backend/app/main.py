@@ -39,6 +39,7 @@ from app.models import (
     Pipeline,
     Publication,
     VideoJob,
+    YouTubeComment,
 )
 from app.schemas import (
     ChannelAddSourceRequest,
@@ -46,6 +47,12 @@ from app.schemas import (
     ChannelDetailResponse,
     ChannelItem,
     ChannelUpdateRequest,
+    CommentActionResult,
+    CommentListResponse,
+    CommentReplyRequest,
+    CommentReplySettingsOut,
+    CommentReplySettingsUpdate,
+    YouTubeCommentOut,
     DestinationCreate,
     DestinationOut,
     DestinationUpdate,
@@ -121,6 +128,7 @@ def _utcnow() -> datetime:
 worker_task: asyncio.Task | None = None
 monitor_task: asyncio.Task | None = None
 scheduler_task: asyncio.Task | None = None
+comment_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
@@ -164,7 +172,27 @@ async def lifespan(
         scheduler_task = None
         logger.info("Douyin scheduler is disabled via SCHEDULER_ENABLED=false")
 
+    # AI comment replies run in their OWN task with their own interval so
+    # comment polling can never block or delay a video upload.
+    if getattr(settings, "comment_reply_enabled", True):
+        from app.comment_poller import comment_worker_loop as _comment_loop
+
+        comment_task = asyncio.create_task(_comment_loop())
+    else:
+        comment_task = None
+        logger.info(
+            "Comment reply worker is disabled via COMMENT_REPLY_ENABLED=false"
+        )
+
     yield
+
+    if comment_task is not None:
+        comment_task.cancel()
+
+        try:
+            await comment_task
+        except asyncio.CancelledError:
+            pass
 
     if worker_task:
         worker_task.cancel()
@@ -4204,7 +4232,38 @@ def get_channel_detail_endpoint(
     nxt = get_next_upload_slot(slots, d.timezone or "UTC", now_utc)
     next_slot_str = nxt.isoformat() if nxt else None
 
+    from app.comment_poller import replies_today as _comment_replies_today
+    from app.youtube import destination_comment_scope_status
+
+    comment_oauth_ready, comment_oauth_reason = destination_comment_scope_status(d)
+    comment_count = int(
+        db.execute(
+            select(func.count(YouTubeComment.id))
+            .where(YouTubeComment.destination_id == d.id)
+        ).scalar()
+        or 0
+    )
+
     return ChannelDetailResponse(
+        comment_reply_enabled=bool(d.comment_reply_enabled),
+        comment_reply_mode=d.comment_reply_mode or "off",
+        comment_reply_system_prompt=d.comment_reply_system_prompt,
+        comment_reply_language=d.comment_reply_language or "auto",
+        comment_reply_style=d.comment_reply_style or "friendly",
+        comment_reply_daily_limit=int(d.comment_reply_daily_limit or 0),
+        comment_reply_min_interval_seconds=int(
+            d.comment_reply_min_interval_seconds or 0
+        ),
+        comment_reply_new_only=bool(d.comment_reply_new_only),
+        comment_reply_to_positive=bool(d.comment_reply_to_positive),
+        comment_reply_to_questions=bool(d.comment_reply_to_questions),
+        comment_reply_to_neutral=bool(d.comment_reply_to_neutral),
+        comment_reply_to_negative=bool(d.comment_reply_to_negative),
+        comment_reply_to_emoji_only=bool(d.comment_reply_to_emoji_only),
+        comment_oauth_ready=comment_oauth_ready,
+        comment_oauth_reason=comment_oauth_reason,
+        comment_count=comment_count,
+        comment_replies_today=_comment_replies_today(db, d.id),
         channel=channel_item,
         daily_upload_limit=d.daily_upload_limit,
         metadata_profile=d.metadata_profile,
@@ -5073,3 +5132,340 @@ def channel_workspace_publish_endpoint(
     payload.destination_ids = [d.id]
     return manual_publish_endpoint(payload=payload, db=db)
 
+
+
+# ---------------------------------------------------------------------------
+# AI Comment Reply (independent subsystem; isolated from metadata prompts)
+# ---------------------------------------------------------------------------
+
+
+def _comment_reply_settings_out(
+    db: Session,
+    destination: Destination,
+) -> CommentReplySettingsOut:
+    from app.comment_poller import replies_today
+    from app.youtube import destination_comment_scope_status
+
+    oauth_ready, oauth_reason = destination_comment_scope_status(destination)
+    return CommentReplySettingsOut(
+        destination_id=destination.id,
+        enabled=bool(destination.comment_reply_enabled),
+        mode=destination.comment_reply_mode or "off",
+        system_prompt=destination.comment_reply_system_prompt,
+        language=destination.comment_reply_language or "auto",
+        style=destination.comment_reply_style or "friendly",
+        daily_limit=int(destination.comment_reply_daily_limit or 0),
+        min_interval_seconds=int(
+            destination.comment_reply_min_interval_seconds or 0
+        ),
+        new_only=bool(destination.comment_reply_new_only),
+        reply_to_positive=bool(destination.comment_reply_to_positive),
+        reply_to_questions=bool(destination.comment_reply_to_questions),
+        reply_to_neutral=bool(destination.comment_reply_to_neutral),
+        reply_to_negative=bool(destination.comment_reply_to_negative),
+        reply_to_emoji_only=bool(destination.comment_reply_to_emoji_only),
+        last_scan_at=destination.last_comment_scan_at,
+        replies_today=replies_today(db, destination.id),
+        oauth_ready=oauth_ready,
+        oauth_reason=oauth_reason,
+    )
+
+
+def _require_youtube_channel(db: Session, destination_id: str) -> Destination:
+    d = db.get(Destination, destination_id)
+    if d is None or (d.platform or "").lower() != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    return d
+
+
+def _resolve_channel_comment(
+    db: Session,
+    destination_id: str,
+    comment_id: str,
+) -> YouTubeComment:
+    comment = db.get(YouTubeComment, comment_id)
+    if comment is None:
+        comment = db.execute(
+            select(YouTubeComment)
+            .where(YouTubeComment.destination_id == destination_id)
+            .where(YouTubeComment.youtube_comment_id == comment_id)
+            .limit(1)
+        ).scalar_one_or_none()
+    if comment is None or comment.destination_id != destination_id:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bình luận")
+    return comment
+
+
+@app.get(
+    "/api/channels/{destination_id}/comment-reply-settings",
+    response_model=CommentReplySettingsOut,
+    dependencies=[Depends(require_admin)],
+)
+def get_comment_reply_settings_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+) -> CommentReplySettingsOut:
+    """Comment-reply settings for one channel (never the metadata prompt)."""
+    destination = _require_youtube_channel(db, destination_id)
+    return _comment_reply_settings_out(db, destination)
+
+
+@app.patch(
+    "/api/channels/{destination_id}/comment-reply-settings",
+    response_model=CommentReplySettingsOut,
+    dependencies=[Depends(require_admin)],
+)
+def update_comment_reply_settings_endpoint(
+    destination_id: str,
+    payload: CommentReplySettingsUpdate,
+    db: Session = Depends(get_db),
+) -> CommentReplySettingsOut:
+    """Update ONLY the comment-reply settings.
+
+    The metadata prompt/profile/language columns are deliberately not
+    reachable from this endpoint.
+    """
+    destination = _require_youtube_channel(db, destination_id)
+
+    if payload.enabled is not None:
+        destination.comment_reply_enabled = payload.enabled
+    if payload.mode is not None:
+        destination.comment_reply_mode = payload.mode
+        if payload.mode == "off":
+            destination.comment_reply_enabled = False
+        elif payload.enabled is None:
+            destination.comment_reply_enabled = True
+    if payload.system_prompt is not None:
+        destination.comment_reply_system_prompt = payload.system_prompt
+    if payload.language is not None:
+        destination.comment_reply_language = payload.language
+    if payload.style is not None:
+        destination.comment_reply_style = payload.style
+    if payload.daily_limit is not None:
+        destination.comment_reply_daily_limit = payload.daily_limit
+    if payload.min_interval_seconds is not None:
+        destination.comment_reply_min_interval_seconds = (
+            payload.min_interval_seconds
+        )
+    if payload.new_only is not None:
+        destination.comment_reply_new_only = payload.new_only
+    if payload.reply_to_positive is not None:
+        destination.comment_reply_to_positive = payload.reply_to_positive
+    if payload.reply_to_questions is not None:
+        destination.comment_reply_to_questions = payload.reply_to_questions
+    if payload.reply_to_neutral is not None:
+        destination.comment_reply_to_neutral = payload.reply_to_neutral
+    if payload.reply_to_negative is not None:
+        destination.comment_reply_to_negative = payload.reply_to_negative
+    if payload.reply_to_emoji_only is not None:
+        destination.comment_reply_to_emoji_only = payload.reply_to_emoji_only
+
+    db.commit()
+    db.refresh(destination)
+    return _comment_reply_settings_out(db, destination)
+
+
+@app.get(
+    "/api/channels/{destination_id}/comments",
+    response_model=CommentListResponse,
+    dependencies=[Depends(require_admin)],
+)
+def list_channel_comments_endpoint(
+    destination_id: str,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+) -> CommentListResponse:
+    """Stored comments for one channel plus the review counters."""
+    from app.comment_poller import replies_today
+    from app.youtube import destination_comment_scope_status
+
+    destination = _require_youtube_channel(db, destination_id)
+
+    query = select(YouTubeComment).where(
+        YouTubeComment.destination_id == destination_id
+    )
+    count_query = select(func.count(YouTubeComment.id)).where(
+        YouTubeComment.destination_id == destination_id
+    )
+    if status:
+        query = query.where(YouTubeComment.status == status)
+        count_query = count_query.where(YouTubeComment.status == status)
+
+    total = int(db.execute(count_query).scalar() or 0)
+    rows = db.execute(
+        query.order_by(YouTubeComment.published_at.desc().nullslast())
+        .limit(max(1, min(limit, 500)))
+        .offset(max(0, offset))
+    ).scalars().all()
+
+    stat_rows = db.execute(
+        select(YouTubeComment.status, func.count(YouTubeComment.id))
+        .where(YouTubeComment.destination_id == destination_id)
+        .group_by(YouTubeComment.status)
+    ).all()
+    stats = {str(name): int(count) for name, count in stat_rows}
+
+    oauth_ready, oauth_reason = destination_comment_scope_status(destination)
+
+    return CommentListResponse(
+        destination_id=destination_id,
+        total=total,
+        items=[YouTubeCommentOut.model_validate(row) for row in rows],
+        stats=stats,
+        replies_today=replies_today(db, destination_id),
+        daily_limit=int(destination.comment_reply_daily_limit or 0),
+        mode=destination.comment_reply_mode or "off",
+        oauth_ready=oauth_ready,
+        oauth_reason=oauth_reason,
+    )
+
+
+@app.post(
+    "/api/channels/{destination_id}/comments/scan",
+    response_model=dict,
+    status_code=202,
+    dependencies=[Depends(require_admin)],
+)
+def scan_channel_comments_endpoint(
+    destination_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Trigger one comment scan for this channel now (does not block serving)."""
+    from app.comment_poller import scan_destination
+
+    destination = _require_youtube_channel(db, destination_id)
+
+    def _run(destination_id: str) -> None:
+        from app.db import SessionLocal as _SessionLocal
+        from app.models import Destination as _Destination
+
+        with _SessionLocal() as session:
+            target = session.get(_Destination, destination_id)
+            if target is None:
+                return
+            scan_destination(session, target)
+
+    background_tasks.add_task(_run, destination.id)
+    return {"ok": True, "destination_id": destination.id, "status": "queued"}
+
+
+@app.post(
+    "/api/channels/{destination_id}/comments/{comment_id}/generate-reply",
+    response_model=CommentActionResult,
+    dependencies=[Depends(require_admin)],
+)
+def generate_comment_reply_endpoint(
+    destination_id: str,
+    comment_id: str,
+    db: Session = Depends(get_db),
+) -> CommentActionResult:
+    """(Re)generate an AI draft using this channel's comment-reply prompt."""
+    from app.ai_comment_reply import generate_comment_reply
+
+    destination = _require_youtube_channel(db, destination_id)
+    comment = _resolve_channel_comment(db, destination_id, comment_id)
+
+    result = generate_comment_reply(
+        comment.text_original,
+        destination=destination,
+        video_title=comment.video_title,
+    )
+    if result is None:
+        comment.error = "AI_REPLY_FAILED"
+        comment.status = "failed"
+        comment.reply_status = "failed"
+        db.commit()
+        db.refresh(comment)
+        return CommentActionResult(
+            ok=False,
+            comment=YouTubeCommentOut.model_validate(comment),
+            error="AI_REPLY_FAILED",
+        )
+
+    comment.ai_classification = result["classification"]
+    comment.ai_confidence = result["confidence"]
+    comment.ai_reason = result["reason"]
+    comment.detected_language = result["language"]
+    comment.ai_reply = result["reply"]
+    comment.reply_text = result["reply"]
+    comment.error = None
+
+    from app.comment_poller import eligibility_reason
+
+    eligible, reason = eligibility_reason(result["classification"], destination)
+    if not eligible:
+        comment.ai_reason = reason
+        comment.status = "held"
+        comment.reply_status = "held"
+    elif not result["should_reply"] or not result["reply"]:
+        comment.status = "held"
+        comment.reply_status = "held"
+    else:
+        comment.status = "ready_to_reply"
+        comment.reply_status = "ready_to_reply"
+
+    db.commit()
+    db.refresh(comment)
+    return CommentActionResult(
+        ok=True, comment=YouTubeCommentOut.model_validate(comment)
+    )
+
+
+@app.post(
+    "/api/channels/{destination_id}/comments/{comment_id}/reply",
+    response_model=CommentActionResult,
+    dependencies=[Depends(require_admin)],
+)
+def reply_to_comment_endpoint(
+    destination_id: str,
+    comment_id: str,
+    payload: CommentReplyRequest,
+    db: Session = Depends(get_db),
+) -> CommentActionResult:
+    """Post a reply to YouTube (comments.insert). Never replies twice."""
+    from app.comment_poller import post_reply
+
+    destination = _require_youtube_channel(db, destination_id)
+    comment = _resolve_channel_comment(db, destination_id, comment_id)
+
+    if comment.youtube_reply_id:
+        return CommentActionResult(
+            ok=True,
+            comment=YouTubeCommentOut.model_validate(comment),
+            error="ALREADY_REPLIED",
+        )
+
+    post_reply(db, comment, destination, payload.text)
+    db.refresh(comment)
+    ok = comment.status == "replied"
+    return CommentActionResult(
+        ok=ok,
+        comment=YouTubeCommentOut.model_validate(comment),
+        error=None if ok else comment.error,
+    )
+
+
+@app.post(
+    "/api/channels/{destination_id}/comments/{comment_id}/skip",
+    response_model=CommentActionResult,
+    dependencies=[Depends(require_admin)],
+)
+def skip_comment_endpoint(
+    destination_id: str,
+    comment_id: str,
+    db: Session = Depends(get_db),
+) -> CommentActionResult:
+    """Ignore a comment: never auto-reply to it."""
+    destination = _require_youtube_channel(db, destination_id)
+    comment = _resolve_channel_comment(db, destination_id, comment_id)
+
+    comment.status = "ignored"
+    comment.reply_status = "ignored"
+    db.commit()
+    db.refresh(comment)
+    return CommentActionResult(
+        ok=True, comment=YouTubeCommentOut.model_validate(comment)
+    )

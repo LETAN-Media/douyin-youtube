@@ -387,6 +387,16 @@ class DestinationBase(BaseModel):
         default=None,
     )
 
+    # ---- AI Comment Reply (isolated from the metadata fields above) ----
+    comment_reply_enabled: bool = False
+    comment_reply_mode: Literal["off", "review", "auto"] = "off"
+    comment_reply_system_prompt: str | None = None
+    comment_reply_language: str = "auto"
+    comment_reply_style: str = "friendly"
+    comment_reply_daily_limit: int = 20
+    comment_reply_min_interval_seconds: int = 180
+    comment_reply_new_only: bool = True
+
 
 class DestinationCreate(BaseModel):
     pipeline_id: str | None = Field(
@@ -720,6 +730,25 @@ class ChannelDetailResponse(BaseModel):
     failed_count: int = 0
     next_slot: str | None = None
 
+    # AI Comment Reply (separate from every metadata field above).
+    comment_reply_enabled: bool = False
+    comment_reply_mode: str = "off"
+    comment_reply_system_prompt: str | None = None
+    comment_reply_language: str = "auto"
+    comment_reply_style: str = "friendly"
+    comment_reply_daily_limit: int = 20
+    comment_reply_min_interval_seconds: int = 180
+    comment_reply_new_only: bool = True
+    comment_reply_to_positive: bool = True
+    comment_reply_to_questions: bool = True
+    comment_reply_to_neutral: bool = False
+    comment_reply_to_negative: bool = False
+    comment_reply_to_emoji_only: bool = False
+    comment_oauth_ready: bool = False
+    comment_oauth_reason: str | None = None
+    comment_replies_today: int = 0
+    comment_count: int = 0
+
 
 class ChannelUpdateRequest(BaseModel):
     name: str | None = None
@@ -782,4 +811,101 @@ class ChannelAutoStatus(BaseModel):
     failed_count: int = 0
     held_count: int = 0
     rejected_count: int = 0
+
+
+# ---------------------------------------------------------------------------
+# AI Comment Reply
+# ---------------------------------------------------------------------------
+
+
+class CommentReplySettingsOut(BaseModel):
+    destination_id: str
+    enabled: bool = False
+    mode: Literal["off", "review", "auto"] = "off"
+    system_prompt: str | None = None
+    language: str = "auto"
+    style: str = "friendly"
+    daily_limit: int = 20
+    min_interval_seconds: int = 180
+    new_only: bool = True
+    reply_to_positive: bool = True
+    reply_to_questions: bool = True
+    reply_to_neutral: bool = False
+    reply_to_negative: bool = False
+    reply_to_emoji_only: bool = False
+    last_scan_at: datetime | None = None
+    replies_today: int = 0
+    # OAuth readiness for comments (needs youtube.force-ssl).
+    oauth_ready: bool = False
+    oauth_reason: str | None = None
+
+
+class CommentReplySettingsUpdate(BaseModel):
+    """PATCH payload. Only the comment_* fields — the metadata prompt is
+    never settable from this endpoint."""
+
+    enabled: bool | None = None
+    mode: Literal["off", "review", "auto"] | None = None
+    system_prompt: str | None = None
+    language: str | None = None
+    style: str | None = None
+    daily_limit: int | None = Field(default=None, ge=0, le=500)
+    min_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
+    new_only: bool | None = None
+    reply_to_positive: bool | None = None
+    reply_to_questions: bool | None = None
+    reply_to_neutral: bool | None = None
+    reply_to_negative: bool | None = None
+    reply_to_emoji_only: bool | None = None
+
+
+class YouTubeCommentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    destination_id: str
+    video_id: str
+    video_title: str | None = None
+    youtube_comment_id: str
+    parent_comment_id: str | None = None
+    author_channel_id: str | None = None
+    author_name: str | None = None
+    text_original: str = ""
+    published_at: datetime | None = None
+    like_count: int = 0
+    status: str = "new"
+    reply_status: str = "new"
+    ai_classification: str | None = None
+    ai_reply: str | None = None
+    reply_text: str | None = None
+    ai_confidence: float | None = None
+    ai_reason: str | None = None
+    detected_language: str | None = None
+    replied_at: datetime | None = None
+    youtube_reply_id: str | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CommentListResponse(BaseModel):
+    destination_id: str
+    total: int = 0
+    items: list[YouTubeCommentOut] = Field(default_factory=list)
+    stats: dict[str, int] = Field(default_factory=dict)
+    replies_today: int = 0
+    daily_limit: int = 20
+    mode: str = "off"
+    oauth_ready: bool = False
+    oauth_reason: str | None = None
+
+
+class CommentReplyRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class CommentActionResult(BaseModel):
+    ok: bool = True
+    comment: YouTubeCommentOut | None = None
+    error: str | None = None
 

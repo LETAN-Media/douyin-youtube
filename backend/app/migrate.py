@@ -6,7 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import engine
-from app.models import Base, Destination, DouyinSource, DouyinVideo, Pipeline, Publication
+from app.models import (
+    Base,
+    Destination,
+    DouyinSource,
+    DouyinVideo,
+    Pipeline,
+    Publication,
+    YouTubeComment,
+)
 
 logger = logging.getLogger("douyin-youtube-migrate")
 
@@ -414,6 +422,42 @@ def run_migrations() -> None:
                         "ALTER TABLE destinations "
                     "ADD COLUMN IF NOT EXISTS min_upload_interval_minutes INTEGER DEFAULT 0"
                 )
+            )
+
+        # ---- AI Comment Reply (isolated from the metadata prompt) ----
+        # Additive only: new comment_* columns on destinations. The existing
+        # prompt_override/metadata_* columns that feed title/description/
+        # hashtags are never renamed or touched.
+        for column_name, column_type in [
+            ("comment_reply_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("comment_reply_mode", "VARCHAR(20) DEFAULT 'off'"),
+            ("comment_reply_system_prompt", "TEXT"),
+            ("comment_reply_language", "VARCHAR(20) DEFAULT 'auto'"),
+            ("comment_reply_style", "VARCHAR(30) DEFAULT 'friendly'"),
+            ("comment_reply_daily_limit", "INTEGER DEFAULT 20"),
+            ("comment_reply_min_interval_seconds", "INTEGER DEFAULT 180"),
+            ("comment_reply_new_only", "BOOLEAN DEFAULT TRUE"),
+            ("comment_reply_to_positive", "BOOLEAN DEFAULT TRUE"),
+            ("comment_reply_to_questions", "BOOLEAN DEFAULT TRUE"),
+            ("comment_reply_to_neutral", "BOOLEAN DEFAULT FALSE"),
+            ("comment_reply_to_negative", "BOOLEAN DEFAULT FALSE"),
+            ("comment_reply_to_emoji_only", "BOOLEAN DEFAULT FALSE"),
+            ("last_comment_scan_at", "TIMESTAMPTZ"),
+        ]:
+            if not column_exists(connection, "destinations", column_name):
+                logger.info("Adding %s to destinations", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE destinations "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
+
+        if not table_exists(connection, "youtube_comments"):
+            logger.info("Creating youtube_comments table")
+            Base.metadata.create_all(
+                bind=connection,
+                tables=[YouTubeComment.__table__],
             )
 
         # Existing sources with prior scans keep flowing: mark their baseline
