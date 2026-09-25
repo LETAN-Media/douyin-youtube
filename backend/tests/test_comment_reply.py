@@ -813,6 +813,40 @@ class CommentSettingsApiTests(_CommentTestBase):
         )
         self.assertEqual(res.status_code, 401)
 
+    def test_scan_fails_loudly_without_force_ssl_scope(self):
+        """The scan must never answer "queued" when it cannot read YouTube."""
+        with self.Session() as db:
+            destination = db.get(Destination, self.destination_id)
+            destination.credentials = json.dumps(
+                {
+                    "refresh_token": "fake",
+                    "scopes": [
+                        "https://www.googleapis.com/auth/youtube.readonly",
+                    ],
+                }
+            )
+            db.commit()
+
+        res = self._client.post(
+            f"/api/channels/{self.destination_id}/comments/scan",
+            headers=self._admin,
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.json()["detail"], "YOUTUBE_SCOPE_MISSING")
+
+    def test_scan_queues_and_reports_the_reply_mode(self):
+        res = self._client.post(
+            f"/api/channels/{self.destination_id}/comments/scan",
+            headers=self._admin,
+        )
+
+        self.assertEqual(res.status_code, 202)
+        body = res.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status"], "queued")
+        self.assertEqual(body["mode"], "review")
+        self.assertEqual(body["destination_id"], self.destination_id)
+
 
 # ---------------------------------------------------------------------------
 # End-to-end worker scan (mocked YouTube + AI)
@@ -873,8 +907,8 @@ class EndToEndScanTests(_CommentTestBase):
         with self.Session() as db:
             destination = db.get(Destination, self.destination_id)
             destination.comment_reply_mode = mode
-            if mode == "off":
-                destination.comment_reply_enabled = False
+            # Picking REVIEW/AUTO in the UI also switches the assistant on.
+            destination.comment_reply_enabled = mode != "off"
             # `first_scan=False` means the channel was scanned before, so new
             # comments are eligible. first_scan=True exercises the backfill rule.
             destination.last_comment_scan_at = (
@@ -984,13 +1018,55 @@ class EndToEndScanTests(_CommentTestBase):
         self.assertIn("first scan", rows[0].ai_reason)
         self.assertEqual(summary["replied"], 0)
 
-    def test_disabled_channel_is_skipped_entirely(self):
-        summary, rows, inserted, _captured = self._run_scan(
+    def test_scan_while_ai_off_ingests_but_never_drafts(self):
+        """Scanning is independent of the AI-reply switch (read-only ingest)."""
+        summary, rows, inserted, captured = self._run_scan(
             [_thread("c5", "hello")], _reply_payload(), "off"
         )
-        self.assertEqual(rows, [])
+        self.assertEqual(summary["fetched"], 1)
+        self.assertEqual(summary["mode"], "off")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "new")
+        self.assertEqual(rows[0].reply_status, "new")
+        self.assertIsNone(rows[0].ai_reply)
         self.assertEqual(inserted, [])
-        self.assertEqual(summary["fetched"], 0)
+        # No AI call is made when the assistant is off.
+        self.assertEqual(captured.get("systems", []), [])
+        self.assertEqual(summary["drafted"], 0)
+
+    def test_review_scan_drafts_comments_ingested_while_off(self):
+        """Comments stored with the assistant OFF get a draft once REVIEW is on.
+
+        Drafting never writes to YouTube, so this is safe; the alternative
+        would be silently stranding every comment fetched before enabling.
+        """
+        _summary, first_rows, _inserted, first_captured = self._run_scan(
+            [_thread("c6", "love it")], _reply_payload(), "off"
+        )
+        self.assertEqual(first_rows[0].status, "new")
+        self.assertEqual(first_captured.get("systems", []), [])
+
+        summary, rows, inserted, captured = self._run_scan(
+            [], _reply_payload(), "review"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "ready_to_reply")
+        self.assertEqual(rows[0].ai_reply, "Glad you enjoyed it!")
+        self.assertEqual(inserted, [])
+        self.assertEqual(summary["drafted"], 1)
+        # Still only the comment prompt reaches the model.
+        self.assertEqual(captured["systems"], [COMMENT_PROMPT])
+
+    def test_auto_scan_never_replies_to_comments_ingested_while_off(self):
+        """AUTO must only reply to comments discovered by its own scan."""
+        self._run_scan([_thread("c7", "great moves")], _reply_payload(), "off")
+
+        _summary, rows, inserted, _captured = self._run_scan(
+            [], _reply_payload(), "auto"
+        )
+        self.assertEqual(inserted, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "new")
 
     def test_child_reply_is_stored_but_never_replied_to(self):
         child = _thread("child-1", "me too")

@@ -737,6 +737,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [comments, setComments] = useState<YouTubeComment[]>([]);
   const [commentMeta, setCommentMeta] = useState<CommentListResponse | null>(null);
   const [commentsLoading, setCommentsLoading] = useState(false);
+  const [scanningComments, setScanningComments] = useState(false);
   const [commentFilter, setCommentFilter] = useState<string>("");
   const [busyCommentId, setBusyCommentId] = useState<string | null>(null);
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
@@ -790,17 +791,19 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   }, [channel.destination_id]);
 
   const fetchComments = useCallback(
-    async (status?: string) => {
+    async (status?: string): Promise<CommentListResponse | null> => {
       setCommentsLoading(true);
       try {
         const qs = status ? `?status=${encodeURIComponent(status)}` : "";
         const res = await fetch(`/api/channels/${channel.destination_id}/comments${qs}`);
-        if (!res.ok) return;
+        if (!res.ok) return null;
         const data: CommentListResponse = await res.json();
         setComments(Array.isArray(data.items) ? data.items : []);
         setCommentMeta(data);
+        return data;
       } catch (e) {
         console.error("Failed to load comments:", e);
+        return null;
       } finally {
         setCommentsLoading(false);
       }
@@ -862,7 +865,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   };
 
   const handleScanComments = async () => {
-    setCommentsLoading(true);
+    setScanningComments(true);
     try {
       const res = await fetch(
         `/api/channels/${channel.destination_id}/comments/scan`,
@@ -872,11 +875,25 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || "Quét bình luận thất bại");
       }
-      notifyComments("Đã xếp hàng quét bình luận — tải lại sau ít giây.");
+
+      const before = commentMeta?.total ?? comments.length;
+      notifyComments("Đang quét bình luận trên YouTube…");
+
+      // The scan runs in the background, so poll a few times and report the
+      // real outcome instead of claiming success unconditionally.
+      for (const delay of [2500, 6000, 12000]) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        const data = await fetchComments(commentFilter);
+        if (data && data.total > before) {
+          notifyComments(`Đã lấy thêm ${data.total - before} bình luận.`);
+          return;
+        }
+      }
+      notifyComments("Đã quét xong — chưa thấy bình luận mới.");
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Quét thất bại");
     } finally {
-      setCommentsLoading(false);
+      setScanningComments(false);
     }
   };
 
@@ -2218,7 +2235,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-sm font-extrabold text-slate-900">
-                  Bình luận YouTube ({detail.comment_count || 0})
+                  Bình luận YouTube ({commentMeta?.total ?? detail.comment_count ?? 0})
                 </h3>
                 <p className="text-xs text-slate-500">
                   AI trả lời bình luận dùng prompt riêng của kênh — không liên quan tới prompt tạo title/description/hashtags.
@@ -2231,11 +2248,11 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 <button
                   type="button"
                   onClick={handleScanComments}
-                  disabled={commentsLoading}
+                  disabled={commentsLoading || scanningComments}
                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
                 >
                   <IconRefresh size={14} />
-                  Quét bình luận
+                  {scanningComments ? "Đang quét…" : "Quét bình luận"}
                 </button>
               </div>
             </div>

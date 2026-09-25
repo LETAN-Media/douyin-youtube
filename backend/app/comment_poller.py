@@ -418,8 +418,16 @@ def scan_destination(db: Session, destination: Destination) -> dict[str, Any]:
     }
 
     mode = (destination.comment_reply_mode or "off").lower()
-    if not destination.comment_reply_enabled or mode not in ("review", "auto"):
-        return summary
+    summary["mode"] = mode
+
+    # Ingesting comments (commentThreads.list -> youtube_comments) is
+    # INDEPENDENT of the AI-reply switch. An admin pressing "Quét bình luận"
+    # must always fetch and store what is on YouTube; the mode only decides
+    # whether the comments below are classified, drafted or replied to.
+    reply_enabled = bool(destination.comment_reply_enabled) and mode in (
+        "review",
+        "auto",
+    )
 
     ok, reason = destination_comment_scope_status(destination)
     if not ok:
@@ -508,7 +516,7 @@ def scan_destination(db: Session, destination: Destination) -> dict[str, Any]:
                     _apply_status(comment, "ignored")
                     comment.ai_reason = "older than last scan (new_only)"
                     continue
-            if is_first_scan and mode == "auto":
+            if reply_enabled and is_first_scan and mode == "auto":
                 # Never blast a backlog of old comments on the first pass.
                 _apply_status(comment, "ignored")
                 comment.ai_reason = "first scan (backfill): no auto reply"
@@ -518,9 +526,26 @@ def scan_destination(db: Session, destination: Destination) -> dict[str, Any]:
 
     # Drafting / replying happens after the ingest commit so a crash mid-AI
     # never loses the fetched comments.
-    for comment in created:
-        if comment.status not in ("new",):
-            continue
+    #
+    # REVIEW also picks up comments that were ingested while the assistant was
+    # OFF (they are still `new`): drafting never writes to YouTube, so nothing
+    # unsafe happens. AUTO stays restricted to the comments discovered by THIS
+    # scan so enabling it can never reply to an existing backlog.
+    pending: list[YouTubeComment] = []
+    if reply_enabled:
+        # Newly discovered comments keep their discovery order.
+        pending = [c for c in created if c.status == "new"]
+        if mode != "auto":
+            seen = {c.id for c in pending}
+            stored = db.execute(
+                select(YouTubeComment)
+                .where(YouTubeComment.destination_id == destination.id)
+                .where(YouTubeComment.status == "new")
+                .order_by(YouTubeComment.created_at.asc())
+            ).scalars().all()
+            pending += [c for c in stored if c.id not in seen]
+
+    for comment in pending:
         _apply_status(comment, "analyzing")
         db.commit()
 

@@ -5333,23 +5333,51 @@ def scan_channel_comments_endpoint(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict:
-    """Trigger one comment scan for this channel now (does not block serving)."""
+    """Trigger one comment scan for this channel now (does not block serving).
+
+    A scan only READS from YouTube, so it runs regardless of the AI-reply
+    switch; the mode only controls drafting/replying. It fails loudly (409)
+    instead of reporting a false success when the token cannot read comments.
+    """
     from app.comment_poller import scan_destination
+    from app.youtube import destination_comment_scope_status
 
     destination = _require_youtube_channel(db, destination_id)
+
+    oauth_ready, oauth_reason = destination_comment_scope_status(destination)
+    if not oauth_ready:
+        raise HTTPException(
+            status_code=409,
+            detail=oauth_reason or "YOUTUBE_SCOPE_MISSING",
+        )
 
     def _run(destination_id: str) -> None:
         from app.db import SessionLocal as _SessionLocal
         from app.models import Destination as _Destination
 
-        with _SessionLocal() as session:
-            target = session.get(_Destination, destination_id)
-            if target is None:
-                return
-            scan_destination(session, target)
+        try:
+            with _SessionLocal() as session:
+                target = session.get(_Destination, destination_id)
+                if target is None:
+                    return
+                summary = scan_destination(session, target)
+                logger.info(
+                    "Manual comment scan %s finished: %s",
+                    destination_id,
+                    summary,
+                )
+        except Exception:
+            logger.exception(
+                "Manual comment scan failed for %s", destination_id
+            )
 
     background_tasks.add_task(_run, destination.id)
-    return {"ok": True, "destination_id": destination.id, "status": "queued"}
+    return {
+        "ok": True,
+        "destination_id": destination.id,
+        "status": "queued",
+        "mode": destination.comment_reply_mode or "off",
+    }
 
 
 @app.post(
