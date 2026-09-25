@@ -744,6 +744,8 @@ class ChannelDetailResponse(BaseModel):
     comment_reply_to_neutral: bool = False
     comment_reply_to_negative: bool = False
     comment_reply_to_emoji_only: bool = False
+    comment_reply_to_funny: bool = False
+    comment_reply_to_excited: bool = False
     comment_oauth_ready: bool = False
     comment_oauth_reason: str | None = None
     comment_replies_today: int = 0
@@ -833,6 +835,11 @@ class CommentReplySettingsOut(BaseModel):
     reply_to_neutral: bool = False
     reply_to_negative: bool = False
     reply_to_emoji_only: bool = False
+    reply_to_funny: bool = False
+    reply_to_excited: bool = False
+    # Shown in the UI when the channel has no prompt of its own; it is the
+    # exact text the backend uses for generation in that case.
+    default_system_prompt: str = ""
     last_scan_at: datetime | None = None
     replies_today: int = 0
     # OAuth readiness for comments (needs youtube.force-ssl).
@@ -857,6 +864,8 @@ class CommentReplySettingsUpdate(BaseModel):
     reply_to_neutral: bool | None = None
     reply_to_negative: bool | None = None
     reply_to_emoji_only: bool | None = None
+    reply_to_funny: bool | None = None
+    reply_to_excited: bool | None = None
 
 
 class YouTubeCommentOut(BaseModel):

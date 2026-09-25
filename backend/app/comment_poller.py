@@ -23,9 +23,21 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+# Sentiment routing lives in ai_comment_reply; `is_emoji_only` is re-exported
+# from there so the poller keeps a single source of truth for the check.
 from app.ai_comment_reply import (
+    EMOJI_ONLY,
+    EXCITED,
+    FUNNY,
     HOLD_CLASSIFICATIONS,
-    generate_comment_reply,
+    NEGATIVE,
+    NEUTRAL,
+    POSITIVE,
+    QUESTION,
+    build_reply_for_classification,
+    classify_comment,
+    is_emoji_only,
+    normalize_label,
 )
 from app.config import settings
 from app.db import SessionLocal
@@ -58,39 +70,40 @@ def utcnow() -> datetime:
 # Eligibility
 # ---------------------------------------------------------------------------
 
+#: Which channel toggle governs each sentiment label, and its default when a
+#: channel has never been configured. Praise and questions are answered by
+#: default; every other category is opt-in.
+_REPLY_TOGGLES: dict[str, tuple[str, bool]] = {
+    POSITIVE: ("comment_reply_to_positive", True),
+    QUESTION: ("comment_reply_to_questions", True),
+    NEUTRAL: ("comment_reply_to_neutral", False),
+    NEGATIVE: ("comment_reply_to_negative", False),
+    FUNNY: ("comment_reply_to_funny", False),
+    EXCITED: ("comment_reply_to_excited", False),
+    EMOJI_ONLY: ("comment_reply_to_emoji_only", False),
+}
+
+
 def eligibility_reason(
     classification: str,
     destination: Destination,
 ) -> tuple[bool, str]:
     """Can this classified comment be replied to for this channel?
 
-    Returns (eligible, reason). Channel filter config wins; safety always
-    withholds SPAM/ABUSE/SENSITIVE/SKIP regardless of config.
+    Returns (eligible, reason). One toggle per sentiment label; a disabled
+    category is held WITHOUT any further model call (the reply for everything
+    but `positive` is a backend emoji map anyway).
     """
-    value = (classification or "").upper()
+    label = normalize_label(classification)
+    if label is None:
+        return False, f"no policy for classification={classification or 'UNKNOWN'}"
 
-    if value in HOLD_CLASSIFICATIONS:
-        return False, f"held: classification={value}"
+    if label in HOLD_CLASSIFICATIONS:
+        return False, f"held: classification={label}"
 
-    if value == "POSITIVE":
-        allowed = bool(getattr(destination, "comment_reply_to_positive", True))
-        return (allowed, "ok" if allowed else "positive replies disabled")
-
-    if value == "QUESTION":
-        allowed = bool(getattr(destination, "comment_reply_to_questions", True))
-        return (allowed, "ok" if allowed else "question replies disabled")
-
-    if value == "NEUTRAL":
-        allowed = bool(getattr(destination, "comment_reply_to_neutral", False))
-        return (allowed, "ok" if allowed else "neutral replies disabled")
-
-    return False, f"no policy for classification={value or 'UNKNOWN'}"
-
-
-def is_emoji_only(text: str) -> bool:
-    """True when a comment carries no letters or digits at all."""
-    value = text or ""
-    return not any(ch.isalnum() for ch in value)
+    flag, default = _REPLY_TOGGLES[label]
+    allowed = bool(getattr(destination, flag, default))
+    return (allowed, "ok" if allowed else f"{label} replies disabled")
 
 
 # ---------------------------------------------------------------------------
@@ -356,51 +369,75 @@ def post_reply(
 # Scanning
 # ---------------------------------------------------------------------------
 
-def _draft_for_comment(
+def draft_for_comment(
     comment: YouTubeComment,
     destination: Destination,
     video_title: str | None,
 ) -> YouTubeComment:
-    """Classify + draft (or send) a single new comment."""
-    result = generate_comment_reply(
+    """Classify one comment and build its reply.
+
+    Cost shape (one model call per comment, two only for praise):
+        1. classify  -> ALWAYS one call, unless the comment is emoji-only
+                        (detected locally, no call).
+        2. route     -> `positive` spends ONE generation call; every other
+                        label is answered from the backend emoji map.
+        3. filter    -> a category disabled on the channel is held BEFORE any
+                        generation call is spent.
+
+    A failure (AI off, both models down, reply rejected by the hard rules)
+    leaves the exact error on the row and never writes random text.
+    """
+    classification = classify_comment(
         comment.text_original,
         destination=destination,
         video_title=video_title,
-        comment_language=None,
     )
+    comment.detected_language = classification["language"]
 
-    if result is None:
-        comment.error = "AI_REPLY_FAILED"
+    if not classification["ok"]:
+        comment.ai_reason = "classification failed"
+        comment.error = classification.get("error") or "AI_CLASSIFICATION_FAILED"
         _apply_status(comment, "failed")
         return comment
 
-    comment.ai_classification = result["classification"]
-    comment.ai_confidence = result["confidence"]
-    comment.ai_reason = result["reason"]
-    comment.detected_language = result["language"]
+    label = classification["classification"]
+    comment.ai_classification = label
+    comment.ai_confidence = classification["confidence"]
+    comment.ai_reason = classification["reason"]
     comment.error = None
 
-    eligible, reason = eligibility_reason(result["classification"], destination)
+    # A previous draft is stale the moment the comment is re-classified.
+    comment.ai_reply = None
+    comment.reply_text = None
+
+    eligible, reason = eligibility_reason(label, destination)
     if not eligible:
         comment.ai_reason = reason
         _apply_status(comment, "held")
         return comment
 
-    # Emoji-only guard (channel config).
-    if is_emoji_only(comment.text_original) and not bool(
-        getattr(destination, "comment_reply_to_emoji_only", False)
-    ):
-        comment.ai_reason = "emoji-only comment filtered"
+    built = build_reply_for_classification(
+        label,
+        comment.text_original,
+        destination=destination,
+        video_title=video_title,
+        reply_language=classification["language"],
+        detected_language=classification["detected_language"],
+    )
+    if not built["ok"]:
+        comment.error = built.get("error") or "AI_REPLY_FAILED"
+        comment.ai_reason = f"reply build failed for {label}"
+        _apply_status(comment, "failed")
+        return comment
+
+    reply = built["reply"]
+    if not built["should_reply"] or not reply:
+        comment.ai_reason = reason or "empty reply"
         _apply_status(comment, "held")
         return comment
 
-    if not result["should_reply"] or not result["reply"]:
-        comment.ai_reason = reason if not result["should_reply"] else "empty draft"
-        _apply_status(comment, "held")
-        return comment
-
-    comment.ai_reply = result["reply"]
-    comment.reply_text = result["reply"]
+    comment.ai_reply = reply
+    comment.reply_text = reply
     _apply_status(comment, "ready_to_reply")
     return comment
 
@@ -549,7 +586,7 @@ def scan_destination(db: Session, destination: Destination) -> dict[str, Any]:
         _apply_status(comment, "analyzing")
         db.commit()
 
-        _draft_for_comment(comment, destination, comment.video_title)
+        draft_for_comment(comment, destination, comment.video_title)
         db.commit()
 
         if comment.status == "ready_to_reply":
@@ -645,6 +682,7 @@ async def comment_worker_loop() -> None:
 __all__ = [
     "can_reply_now",
     "comment_worker_loop",
+    "draft_for_comment",
     "eligibility_reason",
     "is_emoji_only",
     "post_reply",

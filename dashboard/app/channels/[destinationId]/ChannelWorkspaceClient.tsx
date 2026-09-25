@@ -762,6 +762,10 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [crNeutral, setCrNeutral] = useState(detail.comment_reply_to_neutral ?? false);
   const [crNegative, setCrNegative] = useState(detail.comment_reply_to_negative ?? false);
   const [crEmojiOnly, setCrEmojiOnly] = useState(detail.comment_reply_to_emoji_only ?? false);
+  // The default prompt the backend uses when the field below is empty.
+  const [crDefaultPrompt, setCrDefaultPrompt] = useState("");
+  const [crFunny, setCrFunny] = useState(detail.comment_reply_to_funny ?? false);
+  const [crExcited, setCrExcited] = useState(detail.comment_reply_to_excited ?? false);
   const [savingComment, setSavingComment] = useState(false);
   const [commentSettingsSuccess, setCommentSettingsSuccess] = useState(false);
 
@@ -775,6 +779,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       setCrEnabled(Boolean(data.enabled));
       setCrMode((data.mode as CommentReplyMode) || "off");
       setCrPrompt(data.system_prompt || "");
+      setCrDefaultPrompt(data.default_system_prompt || "");
       setCrLanguage(data.language || "auto");
       setCrStyle(data.style || "friendly");
       setCrDailyLimit(data.daily_limit ?? 20);
@@ -785,6 +790,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       setCrNeutral(Boolean(data.reply_to_neutral));
       setCrNegative(Boolean(data.reply_to_negative));
       setCrEmojiOnly(Boolean(data.reply_to_emoji_only));
+      setCrFunny(Boolean(data.reply_to_funny));
+      setCrExcited(Boolean(data.reply_to_excited));
     } catch (e) {
       console.error("Failed to load comment reply settings:", e);
     }
@@ -847,6 +854,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             reply_to_neutral: crNeutral,
             reply_to_negative: crNegative,
             reply_to_emoji_only: crEmojiOnly,
+            reply_to_funny: crFunny,
+            reply_to_excited: crExcited,
           }),
         },
       );
@@ -2345,7 +2354,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                         </span>
                         {c.ai_classification ? (
                           <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-black text-slate-600">
-                            {c.ai_classification}
+                            {c.ai_classification.toUpperCase()}
                             {c.ai_confidence != null
                               ? ` · ${Math.round(c.ai_confidence * 100)}%`
                               : ""}
@@ -2700,11 +2709,15 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   rows={8}
                   value={crPrompt}
                   onChange={(e) => setCrPrompt(e.target.value)}
-                  placeholder="Ví dụ: You are the community manager for this channel. Reply naturally, friendly, short and playful..."
+                  placeholder={
+                    crDefaultPrompt ||
+                    "Ví dụ: You are the community manager for this channel. Reply naturally, friendly, short and playful..."
+                  }
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none"
                 />
                 <p className="mt-1 text-[11px] text-slate-400">
-                  Để trống sẽ dùng prompt mặc định trung tính cho comment (không bao giờ dùng prompt metadata).
+                  Để trống sẽ dùng đúng prompt mặc định của backend (nội dung xám trong ô trên) — prompt này
+                  tách hoàn toàn khỏi AI Metadata.
                 </p>
               </div>
 
@@ -2763,6 +2776,11 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 </div>
               </div>
 
+              <p className="mt-3 rounded-xl border border-indigo-100 bg-white/70 p-2 text-[11px] font-semibold text-slate-500">
+                Bình luận khen/ngợi → AI viết 1 câu cảm ơn ngắn. Các loại khác → backend trả đúng 1 emoji,
+                không gọi model: question 😊 · neutral ❤️ · negative 🙏 · funny 😂 · excited 🔥 · emoji-only ❤️.
+              </p>
+
               <div className="mt-3 flex flex-wrap gap-4">
                 {[
                   { label: "Reply only to new comments", value: crNewOnly, set: setCrNewOnly },
@@ -2771,6 +2789,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   { label: "Reply to neutral", value: crNeutral, set: setCrNeutral },
                   { label: "Reply to negative", value: crNegative, set: setCrNegative },
                   { label: "Reply to emoji-only", value: crEmojiOnly, set: setCrEmojiOnly },
+                  { label: "Reply to funny", value: crFunny, set: setCrFunny },
+                  { label: "Reply to excited", value: crExcited, set: setCrExcited },
                 ].map((f) => (
                   <label
                     key={f.label}

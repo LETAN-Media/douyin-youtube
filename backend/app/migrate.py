@@ -442,6 +442,8 @@ def run_migrations() -> None:
             ("comment_reply_to_neutral", "BOOLEAN DEFAULT FALSE"),
             ("comment_reply_to_negative", "BOOLEAN DEFAULT FALSE"),
             ("comment_reply_to_emoji_only", "BOOLEAN DEFAULT FALSE"),
+            ("comment_reply_to_funny", "BOOLEAN DEFAULT FALSE"),
+            ("comment_reply_to_excited", "BOOLEAN DEFAULT FALSE"),
             ("last_comment_scan_at", "TIMESTAMPTZ"),
         ]:
             if not column_exists(connection, "destinations", column_name):

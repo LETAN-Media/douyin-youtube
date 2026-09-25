@@ -1,4 +1,12 @@
-"""AI YouTube comment reply tests, with prompt isolation as the centrepiece."""
+"""AI YouTube comment reply tests — sentiment routing + prompt isolation.
+
+Two things are proven here and must never regress:
+
+* sentiment routing — praise costs ONE thank-you generation call, every other
+  label is answered from the backend emoji map with NO second model call;
+* prompt isolation — the comment flow reads only the comment prompt, while the
+  metadata flow reads only the metadata prompt.
+"""
 
 import json
 import unittest
@@ -28,6 +36,8 @@ COMMENT_PROMPT = (
 
 
 class _FakeResponse:
+    """Chat-completions response whose message content is JSON."""
+
     def __init__(self, content):
         self.text = json.dumps(
             {"choices": [{"message": {"content": json.dumps(content)}}]}
@@ -38,16 +48,80 @@ class _FakeResponse:
         return None
 
 
-def _reply_payload(**overrides):
-    payload = {
-        "classification": "POSITIVE",
-        "should_reply": True,
-        "confidence": 0.93,
-        "reply": "Glad you enjoyed it!",
-        "reason": "kind comment",
-    }
-    payload.update(overrides)
-    return payload
+class _RawResponse:
+    """Chat-completions response whose message content is plain text."""
+
+    def __init__(self, content):
+        self.text = json.dumps({"choices": [{"message": {"content": content}}]})
+        self.status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+
+class _Gateway:
+    """Scripted fake of the AI gateway.
+
+    ``classify`` / ``generate`` are response queues consumed in call order;
+    each item is a payload, a raw string (returned verbatim), or an exception
+    to raise. ``fail_models`` makes a model always fail like a timeout.
+    """
+
+    def __init__(
+        self,
+        *,
+        classify=None,
+        generate=None,
+        fail_models=(),
+        fail_all=False,
+    ):
+        self.classify = list(classify or [])
+        self.generate = list(generate or [])
+        self.fail_models = set(fail_models)
+        self.fail_all = fail_all
+        self.calls = []
+
+    def __call__(self, url, headers=None, json=None, timeout=None):
+        model = json.get("model")
+        system = json["messages"][0]["content"]
+        kind = "classify" if system == acr.CLASSIFIER_PROMPT else "generate"
+        self.calls.append(
+            {
+                "model": model,
+                "kind": kind,
+                "system": system,
+                "messages": json["messages"],
+            }
+        )
+
+        if self.fail_all or model in self.fail_models:
+            raise RuntimeError(f"gateway down: {model}")
+
+        queue = self.classify if kind == "classify" else self.generate
+        if queue:
+            item = queue.pop(0)
+        else:
+            item = (
+                {"label": "positive"}
+                if kind == "classify"
+                else {"reply": "Thank you so much!"}
+            )
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, str):
+            return _RawResponse(item)
+        return _FakeResponse(item)
+
+    @property
+    def models(self):
+        return [call["model"] for call in self.calls]
+
+    @property
+    def kinds(self):
+        return [call["kind"] for call in self.calls]
+
+    def calls_of(self, kind):
+        return [call for call in self.calls if call["kind"] == kind]
 
 
 class _CommentTestBase(unittest.TestCase):
@@ -119,6 +193,14 @@ class _CommentTestBase(unittest.TestCase):
     def _destination(self, db):
         return db.get(Destination, self.destination_id)
 
+    def _generate(self, text, gateway, **kwargs):
+        with self.Session() as db:
+            destination = self._destination(db)
+            with patch.object(acr.httpx, "post", gateway):
+                return acr.generate_comment_reply(
+                    text, destination=destination, **kwargs
+                )
+
 
 # ---------------------------------------------------------------------------
 # PROMPT ISOLATION — the hard requirement
@@ -127,31 +209,38 @@ class _CommentTestBase(unittest.TestCase):
 
 class PromptIsolationTests(_CommentTestBase):
     def test_comment_reply_uses_only_the_comment_prompt(self):
-        captured = {}
+        gateway = _Gateway(
+            classify=[{"label": "positive"}],
+            generate=[{"reply": "Glad you enjoyed it!"}],
+        )
+        result = self._generate(
+            "love this channel!", gateway, video_title="Best moments"
+        )
 
-        def _fake_post(url, headers=None, json=None, timeout=None):
-            captured["messages"] = json["messages"]
-            return _FakeResponse(_reply_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["classification"], acr.POSITIVE)
+        self.assertEqual(result["reply"], "Glad you enjoyed it!")
 
-        with self.Session() as db:
-            destination = self._destination(db)
-            with patch.object(acr.httpx, "post", _fake_post):
-                result = acr.generate_comment_reply(
-                    "love this channel!",
-                    destination=destination,
-                    video_title="Best moments",
-                )
+        # Classification is backend-owned...
+        classify_system = gateway.calls_of("classify")[0]["system"]
+        self.assertEqual(classify_system, acr.CLASSIFIER_PROMPT)
 
-        self.assertIsNotNone(result)
-        system = captured["messages"][0]["content"]
-        self.assertEqual(system, COMMENT_PROMPT)
-        self.assertNotIn(METADATA_PROMPT, system)
-        self.assertNotEqual(system, METADATA_PROMPT)
+        # ...and the thank-you uses the CHANNEL's comment prompt + hard rules.
+        generate_system = gateway.calls_of("generate")[0]["system"]
+        self.assertTrue(generate_system.startswith(COMMENT_PROMPT))
+        self.assertIn(acr.POSITIVE_HARD_RULES, generate_system)
 
-        user = captured["messages"][1]["content"]
-        self.assertIn("love this channel!", user)
-        # The metadata prompt must never leak into the comment flow.
-        self.assertNotIn(METADATA_PROMPT, user)
+        for call in gateway.calls:
+            self.assertNotIn(METADATA_PROMPT, call["system"])
+            self.assertNotIn(METADATA_PROMPT, call["messages"][1]["content"])
+
+    def test_channel_prompt_never_reaches_the_classifier(self):
+        gateway = _Gateway(classify=[{"label": "neutral"}])
+        self._generate("plain remark", gateway)
+
+        classify_system = gateway.calls_of("classify")[0]["system"]
+        self.assertNotIn("Handsome Boys Universe", classify_system)
+        self.assertEqual(classify_system, acr.CLASSIFIER_PROMPT)
 
     def test_channel_without_comment_prompt_falls_back_to_neutral_default(self):
         with self.Session() as db:
@@ -165,6 +254,18 @@ class PromptIsolationTests(_CommentTestBase):
         # Crucially NOT the metadata prompt.
         self.assertNotEqual(system, METADATA_PROMPT)
         self.assertNotIn("attractive English YouTube titles", system)
+
+    def test_default_prompt_documents_the_routing_rules(self):
+        prompt = acr.DEFAULT_COMMENT_REPLY_PROMPT
+        self.assertIn(
+            "You are the comment assistant for this YouTube channel.", prompt
+        )
+        self.assertIn("Maximum one short sentence.", prompt)
+        self.assertIn("At most one emoji.", prompt)
+        self.assertIn("Never mention AI.", prompt)
+        self.assertIn("Never use hashtags.", prompt)
+        self.assertIn("Never ask follow-up questions.", prompt)
+        self.assertIn("predefined emoji according to classification", prompt)
 
     def test_comment_prompt_beats_metadata_prompt_when_both_set(self):
         with self.Session() as db:
@@ -214,7 +315,7 @@ class PromptIsolationTests(_CommentTestBase):
         self.assertNotIn("comment_reply_system_prompt", code)
 
     def test_metadata_generation_still_uses_the_metadata_prompt(self):
-        """Regression: adding comment replies must not change metadata."""
+        """Regression: comment replies must not change metadata generation."""
         captured = {}
 
         def _fake_post(url, headers=None, json=None, timeout=None):
@@ -223,13 +324,7 @@ class PromptIsolationTests(_CommentTestBase):
                 {
                     "title": "Generated Title",
                     "description": "Clean description",
-                    "hashtags": [
-                        "#a1",
-                        "#a2",
-                        "#a3",
-                        "#a4",
-                        "#a5",
-                    ],
+                    "hashtags": ["#a1", "#a2", "#a3", "#a4", "#a5"],
                 }
             )
 
@@ -263,7 +358,9 @@ class PromptIsolationTests(_CommentTestBase):
             db.commit()
 
             first = acr.build_comment_reply_system_prompt(self._destination(db))
-            second = acr.build_comment_reply_system_prompt(db.get(Destination, other.id))
+            second = acr.build_comment_reply_system_prompt(
+                db.get(Destination, other.id)
+            )
 
         self.assertEqual(first, COMMENT_PROMPT)
         self.assertEqual(second, other_prompt)
@@ -271,67 +368,272 @@ class PromptIsolationTests(_CommentTestBase):
 
 
 # ---------------------------------------------------------------------------
-# Classification + safety
+# Sentiment routing: one classify call, a second only for positive
 # ---------------------------------------------------------------------------
 
 
-class ClassificationTests(_CommentTestBase):
-    def _generate(self, content):
-        with self.Session() as db:
-            destination = self._destination(db)
-            with patch.object(
-                acr.httpx, "post", lambda *a, **k: _FakeResponse(content)
-            ):
-                return acr.generate_comment_reply(
-                    "some comment", destination=destination
-                )
-
-    def test_positive_comment_can_reply(self):
-        result = self._generate(_reply_payload())
-        self.assertTrue(result["should_reply"])
-        self.assertEqual(result["classification"], "POSITIVE")
-        self.assertEqual(result["reply"], "Glad you enjoyed it!")
-
-    def test_spam_is_hard_blocked_even_if_model_asks_to_reply(self):
-        result = self._generate(
-            _reply_payload(classification="SPAM", should_reply=True)
+class SentimentRoutingTests(_CommentTestBase):
+    def test_positive_comment_gets_one_ai_thank_you(self):
+        gateway = _Gateway(
+            classify=[{"label": "positive", "confidence": 0.93}],
+            generate=[{"reply": "Thank you so much!"}],
         )
+        result = self._generate("Your videos are amazing!", gateway)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["classification"], "positive")
+        self.assertTrue(result["should_reply"])
+        self.assertEqual(result["reply"], "Thank you so much!")
+        self.assertEqual(result["confidence"], 0.93)
+        self.assertEqual(gateway.kinds, ["classify", "generate"])
+
+    def test_every_non_positive_label_is_a_backend_emoji(self):
+        expected = {
+            "question": "\U0001f60a",
+            "neutral": "\u2764\ufe0f",
+            "negative": "\U0001f64f",
+            "funny": "\U0001f602",
+            "excited": "\U0001f525",
+        }
+        for label, emoji in expected.items():
+            with self.subTest(label=label):
+                gateway = _Gateway(classify=[{"label": label}])
+                result = self._generate("a comment", gateway)
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["classification"], label)
+                self.assertEqual(result["reply"], emoji)
+                self.assertTrue(result["should_reply"])
+                # Exactly ONE model call: classification. No generation call.
+                self.assertEqual(gateway.kinds, ["classify"])
+
+    def test_emoji_only_maps_to_heart(self):
+        gateway = _Gateway(classify=[{"label": "whatever"}])
+        result = self._generate("\U0001f525\U0001f525", gateway)
+
+        self.assertEqual(result["classification"], "emoji_only")
+        self.assertEqual(result["reply"], "\u2764\ufe0f")
+        # Detected locally: not even the classification call is made.
+        self.assertEqual(gateway.calls, [])
+
+    def test_positive_disabled_spends_no_generation_call(self):
+        gateway = _Gateway(classify=[{"label": "positive"}])
+        result = self._generate("amazing!", gateway, allow_positive=False)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["classification"], "positive")
         self.assertFalse(result["should_reply"])
+        self.assertEqual(result["reply"], "")
+        self.assertEqual(gateway.kinds, ["classify"])
 
-    def test_abuse_is_hard_blocked(self):
-        result = self._generate(_reply_payload(classification="ABUSE"))
+    def test_known_praise_uses_two_calls_only(self):
+        gateway = _Gateway(
+            classify=[{"label": "positive"}],
+            generate=[{"reply": "Thanks!"}],
+        )
+        self._generate("great video", gateway)
+        self.assertEqual(len(gateway.calls), 2)
+
+    def test_confidence_is_clamped(self):
+        gateway = _Gateway(classify=[{"label": "positive", "confidence": 9}])
+        result = self._generate("great video", gateway)
+        self.assertEqual(result["confidence"], 1.0)
+
+    def test_bare_label_word_is_accepted(self):
+        gateway = _Gateway(classify=["neutral"])
+        result = self._generate("ok then", gateway)
+        self.assertEqual(result["classification"], "neutral")
+
+    def test_json_inside_a_code_fence_is_accepted(self):
+        gateway = _Gateway(classify=['```json\n{"label": "funny"}\n```'])
+        result = self._generate("haha good one", gateway)
+        self.assertEqual(result["classification"], "funny")
+
+    def test_legacy_uppercase_vocabulary_still_maps(self):
+        self.assertEqual(acr.normalize_label("POSITIVE"), "positive")
+        self.assertEqual(acr.normalize_label("emoji-only"), "emoji_only")
+        # Legacy safety labels fold into negative (opt-in, off by default).
+        self.assertEqual(acr.normalize_label("SPAM"), "negative")
+        self.assertEqual(acr.normalize_label("SENSITIVE"), "negative")
+        self.assertIsNone(acr.normalize_label("banana"))
+
+
+# ---------------------------------------------------------------------------
+# Invalid output, retry budget and fallback model
+# ---------------------------------------------------------------------------
+
+
+class FallbackTests(_CommentTestBase):
+    def test_invalid_output_retries_once_then_uses_the_fallback_model(self):
+        gateway = _Gateway(
+            classify=[
+                {"label": "banana"},  # primary attempt
+                {"label": "banana"},  # primary retry
+                {"label": "banana"},  # fallback attempt
+            ]
+        )
+        result = self._generate("hmm", gateway)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["classification"], "neutral")
+        self.assertIn("neutral", result["reason"])
+        self.assertEqual(len(gateway.calls), 3)
+        models = gateway.models
+        self.assertEqual(models[0], "groq/qwen/qwen3.8-27b")
+        self.assertEqual(models[1], models[0])
+        self.assertEqual(models[2], "gpt-oss-20b")
+
+    def test_valid_fallback_answer_is_used(self):
+        gateway = _Gateway(
+            classify=[{"label": "nope"}, {"label": "nope"}, {"label": "funny"}]
+        )
+        result = self._generate("haha", gateway)
+        self.assertEqual(result["classification"], "funny")
+        self.assertEqual(result["model"], "gpt-oss-20b")
+
+    def test_primary_timeout_falls_back_to_the_second_model(self):
+        gateway = _Gateway(
+            classify=[{"label": "positive"}],
+            generate=[{"reply": "Thank you so much!"}],
+            fail_models={"groq/qwen/qwen3.8-27b"},
+        )
+        result = self._generate("nice one", gateway)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["classification"], "positive")
+        self.assertEqual(result["model"], "gpt-oss-20b")
+        self.assertEqual(gateway.models[0], "groq/qwen/qwen3.8-27b")
+        self.assertEqual(gateway.models[1], "gpt-oss-20b")
+
+    def test_both_models_failing_reports_the_exact_error(self):
+        gateway = _Gateway(fail_all=True)
+        result = self._generate("hello", gateway)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reply"], "")
         self.assertFalse(result["should_reply"])
+        self.assertIn("RuntimeError", result["error"])
+        self.assertIn("gpt-oss-20b", result["error"])
+        # Bounded: one try per tier, never an infinite retry loop.
+        self.assertEqual(len(gateway.calls), 2)
 
-    def test_sensitive_is_held(self):
-        result = self._generate(_reply_payload(classification="SENSITIVE"))
-        self.assertFalse(result["should_reply"])
-
-    def test_unknown_classification_becomes_skip(self):
-        result = self._generate(_reply_payload(classification="WHATEVER"))
-        self.assertEqual(result["classification"], "SKIP")
-        self.assertFalse(result["should_reply"])
-
-    def test_invalid_confidence_is_clamped(self):
-        result = self._generate(_reply_payload(confidence="not-a-number"))
-        self.assertEqual(result["confidence"], 0.0)
-
-    def test_eligibility_mapping_follows_channel_config(self):
+    def test_ai_disabled_reports_a_stable_error(self):
         with self.Session() as db:
             destination = self._destination(db)
+            with patch.object(acr.settings, "ai_enabled", False), patch.object(
+                acr.settings, "ai_api_key", ""
+            ), patch.dict("os.environ", {"AI_ENABLED": "false", "AI_API_KEY": ""}):
+                result = acr.generate_comment_reply(
+                    "hello", destination=destination
+                )
+        self.assertFalse(result["ok"])
+        self.assertIn("AI_DISABLED", result["error"])
 
-            self.assertTrue(cp.eligibility_reason("POSITIVE", destination)[0])
-            self.assertTrue(cp.eligibility_reason("QUESTION", destination)[0])
-            self.assertFalse(cp.eligibility_reason("NEUTRAL", destination)[0])
-            self.assertFalse(cp.eligibility_reason("NEGATIVE", destination)[0])
-            self.assertFalse(cp.eligibility_reason("SPAM", destination)[0])
+    def test_rejected_generation_is_a_failure_not_random_text(self):
+        gateway = _Gateway(
+            classify=[{"label": "positive"}],
+            generate=[
+                {"reply": "Your videos are amazing!"},  # echo of the comment
+                {"reply": "Your videos are amazing!"},
+                {"reply": "Your videos are amazing!"},
+            ],
+        )
+        result = self._generate("Your videos are amazing!", gateway)
 
-            destination.comment_reply_to_neutral = True
-            db.commit()
-            self.assertTrue(cp.eligibility_reason("NEUTRAL", destination)[0])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reply"], "")
+        self.assertIn("hard rules", result["error"])
 
-    def test_emoji_only_detection(self):
-        self.assertTrue(cp.is_emoji_only("🔥🔥"))
-        self.assertFalse(cp.is_emoji_only("nice 🔥"))
+    def test_empty_comment_is_not_sent_to_the_model(self):
+        gateway = _Gateway()
+        self.assertIsNone(
+            self._generate("   ", gateway)
+        )
+        self.assertEqual(gateway.calls, [])
+
+
+# ---------------------------------------------------------------------------
+# POSITIVE hard rules, enforced in the backend
+# ---------------------------------------------------------------------------
+
+
+class PositiveReplyRulesTests(unittest.TestCase):
+    def test_spec_examples_are_kept(self):
+        self.assertEqual(
+            acr.enforce_positive_reply(
+                "Thank you so much! \u2764\ufe0f", "Your videos are amazing!"
+            ),
+            "Thank you so much! \u2764\ufe0f",
+        )
+        self.assertEqual(
+            acr.enforce_positive_reply(
+                "C\u1ea3m \u01a1n b\u1ea1n nhi\u1ec1u nh\u00e9 \u2764\ufe0f",
+                "Video hay qu\u00e1",
+            ),
+            "C\u1ea3m \u01a1n b\u1ea1n nhi\u1ec1u nh\u00e9 \u2764\ufe0f",
+        )
+        self.assertEqual(
+            acr.enforce_positive_reply(
+                "\u8c22\u8c22\u4f60\u7684\u652f\u6301 \u2764\ufe0f",
+                "\u592a\u5e05\u4e86",
+            ),
+            "\u8c22\u8c22\u4f60\u7684\u652f\u6301 \u2764\ufe0f",
+        )
+        self.assertEqual(
+            acr.enforce_positive_reply(
+                "\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044\u307e\u3059\uff01\u2764\ufe0f",
+                "\u6700\u9ad8\u3067\u3059\uff01",
+            ),
+            "\u3042\u308a\u304c\u3068\u3046\u3054\u3056\u3044\u307e\u3059\uff01\u2764\ufe0f",
+        )
+
+    def test_keeps_only_the_first_sentence(self):
+        self.assertEqual(
+            acr.enforce_positive_reply(
+                "Thank you so much! Glad you liked it.", "nice"
+            ),
+            "Thank you so much!",
+        )
+
+    def test_drops_a_follow_up_question(self):
+        text = acr.enforce_positive_reply(
+            "Thanks! Do you want more videos?", "nice video"
+        )
+        self.assertEqual(text, "Thanks!")
+        self.assertNotIn("?", text)
+
+    def test_strips_hashtags_links_and_ai_mentions(self):
+        text = acr.enforce_positive_reply(
+            "Thanks a lot! #viral #love https://spam.example now",
+            "great",
+        )
+        self.assertNotIn("#", text)
+        self.assertNotIn("http", text)
+
+        text = acr.enforce_positive_reply("As an AI I thank you", "great")
+        self.assertNotIn("AI", text)
+
+    def test_at_most_one_emoji(self):
+        self.assertEqual(
+            acr.enforce_positive_reply(
+                "Thank you \U0001f525\U0001f602\U0001f64f", "wow"
+            ),
+            "Thank you \U0001f525",
+        )
+
+    def test_echoing_the_comment_is_rejected(self):
+        self.assertEqual(
+            acr.enforce_positive_reply(
+                "Your videos are amazing!", "Your videos are amazing!"
+            ),
+            "",
+        )
+
+    def test_emoji_only_answer_is_rejected(self):
+        self.assertEqual(acr.enforce_positive_reply("\u2764\ufe0f", "nice"), "")
+
+    def test_empty_answer_is_rejected(self):
+        self.assertEqual(acr.enforce_positive_reply("", "nice"), "")
 
 
 # ---------------------------------------------------------------------------
@@ -340,20 +642,102 @@ class ClassificationTests(_CommentTestBase):
 
 
 class LanguageTests(unittest.TestCase):
-    def test_detects_vietnamese_chinese_and_english(self):
+    def test_detects_vietnamese_chinese_japanese_and_english(self):
         self.assertEqual(acr.detect_language("Video này hay quá"), "vi")
         self.assertEqual(acr.detect_language("很好"), "zh")
+        self.assertEqual(acr.detect_language("最高です！"), "ja")
         self.assertEqual(acr.detect_language("nice video"), "en")
 
     def test_reply_defaults_to_commenter_language(self):
-        self.assertEqual(
-            acr.resolve_reply_language("hay quá", "auto"), "vi"
-        )
+        self.assertEqual(acr.resolve_reply_language("hay quá", "auto"), "vi")
 
     def test_channel_language_overrides_comment_language(self):
-        self.assertEqual(
-            acr.resolve_reply_language("hay quá", "en"), "en"
-        )
+        self.assertEqual(acr.resolve_reply_language("hay quá", "en"), "en")
+
+    def test_thank_you_is_asked_in_the_commenter_language(self):
+        for comment, expected in (
+            ("Your videos are amazing!", "English"),
+            ("Video hay quá", "Vietnamese"),
+            ("太帅了", "Chinese"),
+            ("最高です！", "Japanese"),
+        ):
+            with self.subTest(comment=comment):
+                gateway = _Gateway(
+                    classify=[{"label": "positive"}],
+                    generate=[{"reply": "ok"}],
+                )
+                with patch.object(acr.httpx, "post", gateway):
+                    acr.build_reply_for_classification(
+                        "positive", comment, destination=None
+                    )
+                user_block = gateway.calls_of("generate")[0]["messages"][1][
+                    "content"
+                ]
+                self.assertIn(f"Reply language: {expected}.", user_block)
+
+
+# ---------------------------------------------------------------------------
+# Filtering: one toggle per label
+# ---------------------------------------------------------------------------
+
+
+class EligibilityTests(_CommentTestBase):
+    def test_defaults_follow_the_channel_configuration(self):
+        with self.Session() as db:
+            destination = self._destination(db)
+
+            for label in ("positive", "POSITIVE", "question"):
+                self.assertTrue(
+                    cp.eligibility_reason(label, destination)[0], label
+                )
+            for label in (
+                "neutral",
+                "negative",
+                "funny",
+                "excited",
+                "emoji_only",
+                "SPAM",
+            ):
+                self.assertFalse(
+                    cp.eligibility_reason(label, destination)[0], label
+                )
+
+    def test_each_toggle_controls_its_own_label(self):
+        with self.Session() as db:
+            destination = self._destination(db)
+            destination.comment_reply_to_neutral = True
+            destination.comment_reply_to_negative = True
+            destination.comment_reply_to_funny = True
+            destination.comment_reply_to_excited = True
+            destination.comment_reply_to_emoji_only = True
+            db.commit()
+
+            for label in (
+                "neutral",
+                "negative",
+                "funny",
+                "excited",
+                "emoji_only",
+            ):
+                eligible, reason = cp.eligibility_reason(label, destination)
+                self.assertTrue(eligible, f"{label}: {reason}")
+
+            destination.comment_reply_to_funny = False
+            db.commit()
+            eligible, reason = cp.eligibility_reason("funny", destination)
+            self.assertFalse(eligible)
+            self.assertIn("funny", reason)
+
+    def test_unknown_label_is_never_eligible(self):
+        with self.Session() as db:
+            destination = self._destination(db)
+            eligible, reason = cp.eligibility_reason("banana", destination)
+            self.assertFalse(eligible)
+            self.assertIn("no policy", reason)
+
+    def test_emoji_only_detection(self):
+        self.assertTrue(cp.is_emoji_only("🔥🔥"))
+        self.assertFalse(cp.is_emoji_only("nice 🔥"))
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +858,9 @@ class DedupeTests(_CommentTestBase):
             db.commit()
 
             with patch.object(
-                yc, "insert_comment_reply", side_effect=AssertionError("must not call")
+                yc,
+                "insert_comment_reply",
+                side_effect=AssertionError("must not call"),
             ):
                 cp.post_reply(db, comment, destination, "duplicate?")
 
@@ -505,7 +891,9 @@ class DedupeTests(_CommentTestBase):
             db.commit()
 
             with patch.object(
-                yc, "insert_comment_reply", side_effect=AssertionError("must not call")
+                yc,
+                "insert_comment_reply",
+                side_effect=AssertionError("must not call"),
             ):
                 cp.post_reply(db, comment, destination, "hello")
 
@@ -527,14 +915,10 @@ class DedupeTests(_CommentTestBase):
             db.add(comment)
             db.commit()
 
-            # Patch the name the poller actually calls, and hand it a client
-            # so no real credential refresh is attempted.
             with patch.object(
                 cp, "insert_comment_reply", return_value="reply-42"
             ) as mocked:
-                cp.post_reply(
-                    db, comment, destination, "Thanks!", youtube=object()
-                )
+                cp.post_reply(db, comment, destination, "Thanks!", youtube=object())
 
             mocked.assert_called_once()
 
@@ -703,7 +1087,7 @@ class YouTubeCommentServiceTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# HTTP layer — isolation must hold through the real routes
+# HTTP layer — isolation and the new filters must hold through the routes
 # ---------------------------------------------------------------------------
 
 
@@ -742,6 +1126,8 @@ class CommentSettingsApiTests(_CommentTestBase):
         self.assertEqual(data["system_prompt"], COMMENT_PROMPT)
         self.assertNotIn(METADATA_PROMPT, data["system_prompt"])
         self.assertTrue(data["oauth_ready"])
+        self.assertFalse(data["reply_to_funny"])
+        self.assertFalse(data["reply_to_excited"])
         # The metadata prompt must not be reachable from this endpoint.
         self.assertNotIn("prompt_override", data)
         self.assertNotIn("metadata_profile", data)
@@ -755,10 +1141,14 @@ class CommentSettingsApiTests(_CommentTestBase):
                 "system_prompt": new_prompt,
                 "mode": "review",
                 "daily_limit": 7,
+                "reply_to_funny": True,
+                "reply_to_excited": True,
             },
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["system_prompt"], new_prompt)
+        self.assertTrue(res.json()["reply_to_funny"])
+        self.assertTrue(res.json()["reply_to_excited"])
 
         with self.Session() as db:
             destination = db.get(Destination, self.destination_id)
@@ -766,6 +1156,8 @@ class CommentSettingsApiTests(_CommentTestBase):
             self.assertEqual(destination.comment_reply_system_prompt, new_prompt)
             self.assertEqual(destination.comment_reply_mode, "review")
             self.assertEqual(destination.comment_reply_daily_limit, 7)
+            self.assertTrue(destination.comment_reply_to_funny)
+            self.assertTrue(destination.comment_reply_to_excited)
             # ...metadata fields did not.
             self.assertEqual(destination.prompt_override, METADATA_PROMPT)
             self.assertEqual(
@@ -896,13 +1288,8 @@ class EndToEndScanTests(_CommentTestBase):
         )
         db.commit()
 
-    def _run_scan(self, comments, ai_payload, mode, first_scan=False):
+    def _run_scan(self, comments, gateway, mode, first_scan=False, **dest_config):
         inserted: list[tuple[str, str]] = []
-        captured: dict = {}
-
-        def _fake_post(url, headers=None, json=None, timeout=None):
-            captured.setdefault("systems", []).append(json["messages"][0]["content"])
-            return _FakeResponse(ai_payload)
 
         with self.Session() as db:
             destination = db.get(Destination, self.destination_id)
@@ -916,6 +1303,8 @@ class EndToEndScanTests(_CommentTestBase):
                 if first_scan
                 else datetime.now(timezone.utc) - timedelta(hours=1)
             )
+            for key, value in dest_config.items():
+                setattr(destination, key, value)
             db.commit()
             self._seed_published_video(db)
 
@@ -932,59 +1321,164 @@ class EndToEndScanTests(_CommentTestBase):
             ), patch.object(
                 cp, "insert_comment_reply", _fake_insert
             ), patch.object(
-                acr.httpx, "post", _fake_post
+                acr.httpx, "post", gateway
             ):
                 summary = cp.scan_destination(db, destination)
 
             rows = db.query(YouTubeComment).all()
-            return summary, rows, inserted, captured
+            return summary, rows, inserted, gateway
 
     def test_review_mode_drafts_without_posting(self):
-        summary, rows, inserted, captured = self._run_scan(
-            [_thread("c1", "love this!")],
-            _reply_payload(),
-            "review",
+        gateway = _Gateway(
+            classify=[{"label": "positive"}],
+            generate=[{"reply": "Thank you so much!"}],
         )
+        summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c1", "love this!")], gateway, "review"
+        )
+
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].status, "ready_to_reply")
-        self.assertEqual(rows[0].ai_reply, "Glad you enjoyed it!")
-        self.assertEqual(rows[0].ai_classification, "POSITIVE")
+        self.assertEqual(rows[0].ai_reply, "Thank you so much!")
+        self.assertEqual(rows[0].ai_classification, "positive")
         self.assertEqual(inserted, [])
         self.assertEqual(summary["drafted"], 1)
         # Isolation holds in the worker path too.
-        self.assertEqual(captured["systems"], [COMMENT_PROMPT])
-
-    def test_auto_mode_posts_the_reply(self):
-        summary, rows, inserted, captured = self._run_scan(
-            [_thread("c2", "great moves")],
-            _reply_payload(reply="Thank you so much!"),
-            "auto",
+        for call in gateway.calls:
+            self.assertNotIn(METADATA_PROMPT, call["system"])
+        self.assertTrue(
+            gateway.calls_of("generate")[0]["system"].startswith(COMMENT_PROMPT)
         )
+
+    def test_auto_mode_posts_the_thank_you(self):
+        gateway = _Gateway(
+            classify=[{"label": "positive"}],
+            generate=[{"reply": "Thank you so much!"}],
+        )
+        summary, rows, inserted, _gateway = self._run_scan(
+            [_thread("c2", "great moves")], gateway, "auto"
+        )
+
         self.assertEqual(len(inserted), 1)
         self.assertEqual(inserted[0][0], "c2")
         self.assertEqual(inserted[0][1], "Thank you so much!")
         self.assertEqual(rows[0].status, "replied")
         self.assertEqual(rows[0].youtube_reply_id, "reply-99")
         self.assertEqual(summary["replied"], 1)
-        self.assertEqual(captured["systems"], [COMMENT_PROMPT])
 
-    def test_spam_comment_is_held_and_never_posted(self):
-        summary, rows, inserted, _captured = self._run_scan(
-            [_thread("c3", "FREE CRYPTO CLICK HERE")],
-            _reply_payload(
-                classification="SPAM", should_reply=True, reply="sure!"
-            ),
-            "auto",
+    def test_auto_mode_sends_the_question_emoji(self):
+        gateway = _Gateway(classify=[{"label": "question"}])
+        summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c3", "what is that dance?")], gateway, "auto"
         )
+
+        self.assertEqual(inserted, [("c3", "\U0001f60a")])
+        self.assertEqual(rows[0].status, "replied")
+        self.assertEqual(rows[0].ai_classification, "question")
+        self.assertEqual(summary["replied"], 1)
+        # Only the classification call was made.
+        self.assertEqual(gateway.kinds, ["classify"])
+
+    def test_auto_mode_holds_a_disabled_category_without_a_generation_call(self):
+        gateway = _Gateway(classify=[{"label": "neutral"}])
+        summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c4", "post this on douyin")], gateway, "auto"
+        )
+
         self.assertEqual(inserted, [])
         self.assertEqual(rows[0].status, "held")
+        self.assertIn("neutral", rows[0].ai_reason)
+        self.assertEqual(rows[0].ai_reply, None)
+        self.assertEqual(gateway.kinds, ["classify"])
+        self.assertEqual(summary["replied"], 0)
+
+    def test_auto_mode_keeps_a_negative_comment_held_by_default(self):
+        gateway = _Gateway(classify=[{"label": "negative"}])
+        _summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c5", "worst video ever")], gateway, "auto"
+        )
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(rows[0].status, "held")
+        self.assertEqual(gateway.kinds, ["classify"])
+
+    def test_auto_mode_does_not_generate_when_positive_is_disabled(self):
+        gateway = _Gateway(classify=[{"label": "positive"}])
+        _summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c14", "love this channel")],
+            gateway,
+            "auto",
+            comment_reply_to_positive=False,
+        )
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(rows[0].status, "held")
+        self.assertIn("positive", rows[0].ai_reason)
+        # A disabled category must never spend a generation call.
+        self.assertEqual(gateway.kinds, ["classify"])
+
+    def test_funny_and_excited_follow_their_toggles(self):
+        gateway = _Gateway(
+            classify=[{"label": "funny"}, {"label": "excited"}]
+        )
+        summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c6", "haha nice joke"), _thread("c7", "LETS GOOOO")],
+            gateway,
+            "auto",
+            comment_reply_to_funny=True,
+            comment_reply_to_excited=True,
+            # Two replies in one pass: the interval gate would queue the second.
+            comment_reply_min_interval_seconds=0,
+        )
+
+        self.assertEqual(
+            sorted(inserted), sorted([("c6", "\U0001f602"), ("c7", "\U0001f525")])
+        )
+        self.assertEqual(summary["replied"], 2)
+        # Emoji replies never generate text.
+        self.assertEqual(gateway.kinds, ["classify", "classify"])
+
+    def test_emoji_only_comment_holds_by_default_and_costs_no_model_call(self):
+        gateway = _Gateway()
+        _summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c8", "\U0001f525\U0001f525")], gateway, "auto"
+        )
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(gateway.calls, [])
+        self.assertEqual(rows[0].status, "held")
+        self.assertEqual(rows[0].ai_classification, "emoji_only")
+
+    def test_emoji_only_comment_is_answered_when_enabled(self):
+        gateway = _Gateway()
+        _summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c8b", "\U0001f525\U0001f525")],
+            gateway,
+            "auto",
+            comment_reply_to_emoji_only=True,
+        )
+
+        self.assertEqual(inserted, [("c8b", "\u2764\ufe0f")])
+        self.assertEqual(gateway.calls, [])
+
+    def test_ai_failure_marks_the_comment_failed_with_the_exact_error(self):
+        gateway = _Gateway(fail_all=True)
+        summary, rows, inserted, _gateway = self._run_scan(
+            [_thread("c8c", "nice one")], gateway, "auto"
+        )
+
+        self.assertEqual(inserted, [])
+        self.assertEqual(rows[0].status, "failed")
+        self.assertIn("RuntimeError", rows[0].error)
         self.assertEqual(summary["replied"], 0)
 
     def test_second_scan_does_not_duplicate_comments(self):
-        comments = [_thread("c4", "hi")]
+        comments = [_thread("c9", "hi")]
+        gateway = _Gateway(classify=[{"label": "positive", "confidence": 0.5}])
         with self.Session() as db:
             destination = db.get(Destination, self.destination_id)
             destination.comment_reply_mode = "review"
+            destination.comment_reply_enabled = True
             db.commit()
             self._seed_published_video(db)
 
@@ -997,7 +1491,7 @@ class EndToEndScanTests(_CommentTestBase):
             ), patch.object(
                 cp, "insert_comment_reply", return_value="never"
             ), patch.object(
-                acr.httpx, "post", lambda *a, **k: _FakeResponse(_reply_payload())
+                acr.httpx, "post", gateway
             ):
                 cp.scan_destination(db, destination)
                 cp.scan_destination(db, destination)
@@ -1007,12 +1501,14 @@ class EndToEndScanTests(_CommentTestBase):
         self.assertEqual(total, 1)
 
     def test_auto_mode_does_not_blast_backlog_on_first_scan(self):
-        summary, rows, inserted, _captured = self._run_scan(
-            [_thread("c9", "old comment from weeks ago")],
-            _reply_payload(),
+        gateway = _Gateway(classify=[{"label": "positive"}])
+        summary, rows, inserted, _gateway = self._run_scan(
+            [_thread("c10", "old comment from weeks ago")],
+            gateway,
             "auto",
             first_scan=True,
         )
+
         self.assertEqual(inserted, [])
         self.assertEqual(rows[0].status, "ignored")
         self.assertIn("first scan", rows[0].ai_reason)
@@ -1020,9 +1516,11 @@ class EndToEndScanTests(_CommentTestBase):
 
     def test_scan_while_ai_off_ingests_but_never_drafts(self):
         """Scanning is independent of the AI-reply switch (read-only ingest)."""
-        summary, rows, inserted, captured = self._run_scan(
-            [_thread("c5", "hello")], _reply_payload(), "off"
+        gateway = _Gateway()
+        summary, rows, inserted, gateway = self._run_scan(
+            [_thread("c11", "hello")], gateway, "off"
         )
+
         self.assertEqual(summary["fetched"], 1)
         self.assertEqual(summary["mode"], "off")
         self.assertEqual(len(rows), 1)
@@ -1031,7 +1529,7 @@ class EndToEndScanTests(_CommentTestBase):
         self.assertIsNone(rows[0].ai_reply)
         self.assertEqual(inserted, [])
         # No AI call is made when the assistant is off.
-        self.assertEqual(captured.get("systems", []), [])
+        self.assertEqual(gateway.calls, [])
         self.assertEqual(summary["drafted"], 0)
 
     def test_review_scan_drafts_comments_ingested_while_off(self):
@@ -1040,30 +1538,32 @@ class EndToEndScanTests(_CommentTestBase):
         Drafting never writes to YouTube, so this is safe; the alternative
         would be silently stranding every comment fetched before enabling.
         """
-        _summary, first_rows, _inserted, first_captured = self._run_scan(
-            [_thread("c6", "love it")], _reply_payload(), "off"
+        first_gateway = _Gateway()
+        _summary, first_rows, _inserted, first_gateway = self._run_scan(
+            [_thread("c12", "love it")], first_gateway, "off"
         )
         self.assertEqual(first_rows[0].status, "new")
-        self.assertEqual(first_captured.get("systems", []), [])
+        self.assertEqual(first_gateway.calls, [])
 
-        summary, rows, inserted, captured = self._run_scan(
-            [], _reply_payload(), "review"
+        gateway = _Gateway(
+            classify=[{"label": "positive"}],
+            generate=[{"reply": "Thank you!"}],
         )
+        summary, rows, inserted, gateway = self._run_scan([], gateway, "review")
+
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].status, "ready_to_reply")
-        self.assertEqual(rows[0].ai_reply, "Glad you enjoyed it!")
+        self.assertEqual(rows[0].ai_reply, "Thank you!")
         self.assertEqual(inserted, [])
         self.assertEqual(summary["drafted"], 1)
-        # Still only the comment prompt reaches the model.
-        self.assertEqual(captured["systems"], [COMMENT_PROMPT])
 
     def test_auto_scan_never_replies_to_comments_ingested_while_off(self):
         """AUTO must only reply to comments discovered by its own scan."""
-        self._run_scan([_thread("c7", "great moves")], _reply_payload(), "off")
+        self._run_scan([_thread("c13", "great moves")], _Gateway(), "off")
 
-        _summary, rows, inserted, _captured = self._run_scan(
-            [], _reply_payload(), "auto"
-        )
+        gateway = _Gateway(classify=[{"label": "positive"}])
+        _summary, rows, inserted, _gateway = self._run_scan([], gateway, "auto")
+
         self.assertEqual(inserted, [])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].status, "new")
@@ -1071,15 +1571,15 @@ class EndToEndScanTests(_CommentTestBase):
     def test_child_reply_is_stored_but_never_replied_to(self):
         child = _thread("child-1", "me too")
         child["parent_comment_id"] = "parent-1"
-        summary, rows, inserted, _captured = self._run_scan(
-            [_thread("parent-1", "first"), child],
-            _reply_payload(),
-            "auto",
+        gateway = _Gateway(classify=[{"label": "question"}])
+        _summary, rows, inserted, _gateway = self._run_scan(
+            [_thread("parent-1", "first?"), child], gateway, "auto"
         )
+
         self.assertEqual(len(inserted), 1)
         self.assertEqual(inserted[0][0], "parent-1")
-        statuses = sorted(r.youtube_comment_id for r in rows)
-        self.assertEqual(statuses, ["child-1", "parent-1"])
+        ids = sorted(r.youtube_comment_id for r in rows)
+        self.assertEqual(ids, ["child-1", "parent-1"])
 
 
 if __name__ == "__main__":

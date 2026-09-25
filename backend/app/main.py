@@ -4260,6 +4260,8 @@ def get_channel_detail_endpoint(
         comment_reply_to_neutral=bool(d.comment_reply_to_neutral),
         comment_reply_to_negative=bool(d.comment_reply_to_negative),
         comment_reply_to_emoji_only=bool(d.comment_reply_to_emoji_only),
+        comment_reply_to_funny=bool(d.comment_reply_to_funny),
+        comment_reply_to_excited=bool(d.comment_reply_to_excited),
         comment_oauth_ready=comment_oauth_ready,
         comment_oauth_reason=comment_oauth_reason,
         comment_count=comment_count,
@@ -5143,6 +5145,7 @@ def _comment_reply_settings_out(
     db: Session,
     destination: Destination,
 ) -> CommentReplySettingsOut:
+    from app.ai_comment_reply import DEFAULT_COMMENT_REPLY_PROMPT
     from app.comment_poller import replies_today
     from app.youtube import destination_comment_scope_status
 
@@ -5164,6 +5167,9 @@ def _comment_reply_settings_out(
         reply_to_neutral=bool(destination.comment_reply_to_neutral),
         reply_to_negative=bool(destination.comment_reply_to_negative),
         reply_to_emoji_only=bool(destination.comment_reply_to_emoji_only),
+        reply_to_funny=bool(destination.comment_reply_to_funny),
+        reply_to_excited=bool(destination.comment_reply_to_excited),
+        default_system_prompt=DEFAULT_COMMENT_REPLY_PROMPT,
         last_scan_at=destination.last_comment_scan_at,
         replies_today=replies_today(db, destination.id),
         oauth_ready=oauth_ready,
@@ -5259,6 +5265,10 @@ def update_comment_reply_settings_endpoint(
         destination.comment_reply_to_negative = payload.reply_to_negative
     if payload.reply_to_emoji_only is not None:
         destination.comment_reply_to_emoji_only = payload.reply_to_emoji_only
+    if payload.reply_to_funny is not None:
+        destination.comment_reply_to_funny = payload.reply_to_funny
+    if payload.reply_to_excited is not None:
+        destination.comment_reply_to_excited = payload.reply_to_excited
 
     db.commit()
     db.refresh(destination)
@@ -5390,55 +5400,25 @@ def generate_comment_reply_endpoint(
     comment_id: str,
     db: Session = Depends(get_db),
 ) -> CommentActionResult:
-    """(Re)generate an AI draft using this channel's comment-reply prompt."""
-    from app.ai_comment_reply import generate_comment_reply
+    """(Re)generate an AI draft using this channel's comment-reply prompt.
+
+    Uses the same classifier + sentiment routing as the worker, so a manual
+    regeneration can never produce something the worker would not.
+    """
+    from app.comment_poller import draft_for_comment
 
     destination = _require_youtube_channel(db, destination_id)
     comment = _resolve_channel_comment(db, destination_id, comment_id)
 
-    result = generate_comment_reply(
-        comment.text_original,
-        destination=destination,
-        video_title=comment.video_title,
-    )
-    if result is None:
-        comment.error = "AI_REPLY_FAILED"
-        comment.status = "failed"
-        comment.reply_status = "failed"
-        db.commit()
-        db.refresh(comment)
-        return CommentActionResult(
-            ok=False,
-            comment=YouTubeCommentOut.model_validate(comment),
-            error="AI_REPLY_FAILED",
-        )
-
-    comment.ai_classification = result["classification"]
-    comment.ai_confidence = result["confidence"]
-    comment.ai_reason = result["reason"]
-    comment.detected_language = result["language"]
-    comment.ai_reply = result["reply"]
-    comment.reply_text = result["reply"]
-    comment.error = None
-
-    from app.comment_poller import eligibility_reason
-
-    eligible, reason = eligibility_reason(result["classification"], destination)
-    if not eligible:
-        comment.ai_reason = reason
-        comment.status = "held"
-        comment.reply_status = "held"
-    elif not result["should_reply"] or not result["reply"]:
-        comment.status = "held"
-        comment.reply_status = "held"
-    else:
-        comment.status = "ready_to_reply"
-        comment.reply_status = "ready_to_reply"
-
+    draft_for_comment(comment, destination, comment.video_title)
     db.commit()
     db.refresh(comment)
+
+    ok = comment.status == "ready_to_reply"
     return CommentActionResult(
-        ok=True, comment=YouTubeCommentOut.model_validate(comment)
+        ok=ok,
+        comment=YouTubeCommentOut.model_validate(comment),
+        error=None if ok else (comment.error or comment.ai_reason),
     )
 
 

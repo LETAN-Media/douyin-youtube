@@ -1003,6 +1003,18 @@ class Destination(Base):
         default=False,
     )
 
+    comment_reply_to_funny: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    comment_reply_to_excited: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
     last_comment_scan_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

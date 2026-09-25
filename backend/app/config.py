@@ -126,6 +126,15 @@ class Settings(BaseSettings):
     comment_reply_min_interval_seconds: int = 180
     comment_reply_daily_limit: int = 20
 
+    # Dedicated model for the comment-reply AI. Deliberately NOT the metadata
+    # model (ai_model above): routing comments through their own model keeps
+    # the two features from coupling — changing one never changes the other.
+    # `comment_reply_fallback_model` is tried when the primary errors out.
+    comment_reply_model: str = "groq/qwen/qwen3.8-27b"
+    comment_reply_fallback_model: str = "gpt-oss-20b"
+    comment_reply_temperature: float = 0.3
+    comment_reply_max_tokens: int = 80
+
     # How many of the channel's most recent published videos to poll, and how
     # many comment pages per video. Bounded so a scan stays cheap.
     comment_scan_videos_per_channel: int = 5

@@ -512,6 +512,8 @@ export interface ChannelDetail {
   comment_reply_to_neutral?: boolean;
   comment_reply_to_negative?: boolean;
   comment_reply_to_emoji_only?: boolean;
+  comment_reply_to_funny?: boolean;
+  comment_reply_to_excited?: boolean;
   comment_oauth_ready?: boolean;
   comment_oauth_reason?: string | null;
   comment_replies_today?: number;
@@ -535,6 +537,9 @@ export interface CommentReplySettings {
   reply_to_neutral: boolean;
   reply_to_negative: boolean;
   reply_to_emoji_only: boolean;
+  reply_to_funny: boolean;
+  reply_to_excited: boolean;
+  default_system_prompt?: string;
   last_scan_at?: string | null;
   replies_today: number;
   oauth_ready: boolean;
@@ -555,6 +560,8 @@ export interface CommentReplySettingsUpdate {
   reply_to_neutral?: boolean;
   reply_to_negative?: boolean;
   reply_to_emoji_only?: boolean;
+  reply_to_funny?: boolean;
+  reply_to_excited?: boolean;
 }
 
 export interface YouTubeComment {
