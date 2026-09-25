@@ -89,7 +89,8 @@ class Settings(BaseSettings):
             self.rcuts_fallback_api_url = env_fallback
         return self
 
-    # Monitor configuration
+    # Monitor configuration. The loop still exists but no longer polls Douyin:
+    # with DOUYIN_AUTO_SCAN_ENABLED=false it is a no-op for douyin sources.
     monitor_enabled: bool = True
     monitor_poll_seconds: int = 300
     monitor_startup_delay_seconds: int = 10
@@ -107,31 +108,59 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: int = 60
     scheduler_startup_delay_seconds: int = 10
 
-    # RevidAPI Douyin creator feed (no Douyin cookie required)
+    # RevidAPI Douyin creator feed (no Douyin cookie required). OPTIONAL and
+    # default OFF: not part of the production creator scan path any more.
     revid_api_key: str = ""
     revid_api_base_url: str = "https://revidapi.com"
-    revid_scan_enabled: bool = True
+    revid_scan_enabled: bool = False
     revid_scan_interval_minutes: int = 60
     revid_max_pages_per_scan: int = 3
     revid_credits_per_request: int = 35
 
-    # PRIMARY creator feed: separate self-hosted Douyin Feed API service
-    # (Evil0ctal Douyin_TikTok_Download_API v5, deployed independently —
-    # local docker or Northflank). HTTP client only; no vendored source.
-    douyin_creator_provider: str = "self_hosted"
-    douyin_feed_api_base_url: str = ""
-    douyin_feed_api_key: str = ""
-    douyin_feed_api_enabled: bool = True
-    douyin_max_pages_per_scan: int = 3
-
-    # OPTIONAL fallbacks, default OFF as primary:
-    # RapidAPI "Douyin/China Tiktok All API" by justoneapi
-    # (host/path live-verified 2026-09-24; free plan quota is tiny).
+    # PRIMARY creator feed: RapidAPI "Douyin/China Tiktok All API" by
+    # justoneapi. Live-verified 2026-09-24 (Daniel Xu = 63 videos, no cookie,
+    # no browser, no identity pool). The plan quota is tiny (~20 requests a
+    # month) and every PAGE costs one request, so Douyin discovery is
+    # admin-driven only: one Initial Import for the backlog, then manual
+    # "new videos" refreshes. See DOUYIN_AUTO_SCAN_ENABLED below.
+    douyin_creator_provider: str = "rapidapi_justone"
     rapidapi_key: str = ""
     douyin_rapidapi_host: str = ""
     douyin_rapidapi_base_url: str = ""
     douyin_rapidapi_user_posts_path: str = "/api/douyin/get-user-video-list/v3"
-    douyin_rapidapi_enabled: bool = False
+    douyin_rapidapi_enabled: bool = True
+
+    # RapidAPI quota guard. The BASIC plan bills per request and each feed
+    # page is one request, so a full backlog import is N requests, never one.
+    # `remaining` below is the floor at which scanning stops safely.
+    rapidapi_monthly_request_limit: int = 20
+    rapidapi_quota_safety_margin: int = 1
+
+    # Initial full import: walk pages until has_more=false. Resumable, so a
+    # quota stop keeps the cursor instead of restarting from page 1.
+    douyin_initial_import_max_pages: int = 50
+    douyin_initial_import_page_delay_seconds: float = 0.5
+
+    # Manual refresh: how many pages past the first known aweme we may walk
+    # when a creator published more than one page of new videos.
+    douyin_refresh_max_pages: int = 3
+
+    # Douyin creator discovery NEVER runs on a schedule. The scheduler only
+    # reads Inventory. Set true only for a deliberate one-off backfill.
+    douyin_auto_scan_enabled: bool = False
+
+    # OPTIONAL fallbacks, default OFF (kept for manual/one-off use only):
+    # self-hosted Evil0ctal feed service and the generic http/playwright/yt-dlp
+    # providers are no longer part of the production creator scan path.
+    douyin_feed_api_base_url: str = ""
+    douyin_feed_api_key: str = ""
+    douyin_feed_api_enabled: bool = False
+    douyin_max_pages_per_scan: int = 3
+
+    # Failover providers (http_feed / playwright / yt-dlp). Default OFF: in
+    # manual-inventory mode JustOne RapidAPI is the only discovery path, and a
+    # blocked provider must surface as an error rather than silently scraping.
+    douyin_creator_fallbacks_enabled: bool = False
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

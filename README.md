@@ -19,8 +19,17 @@ Tự động tải video Douyin (qua Rcuts), tạo metadata AI, và đăng lên 
 Douyin URL ──► Rcuts (primary All.php → fallback DouYin.php) ──► video_url ──► HTTP MP4 (/tmp/douyin-youtube/{job_id}.mp4) ──► yt-dlp fallback
                                           │
 Manual: paste URL → /api/manual/resolve → Rcuts metadata → /api/manual/metadata (AI) → /api/channels/{id}/publish → Publication (queued) → worker
-Auto: PlatformAccount(douyin) ──► PipelineSource (douyin/facebook) ──► Playwright scan ──► DouyinVideo (inventory) ──► AI match → metadata → scheduler → Publication → worker → YouTube
+Inventory (manual, admin-triggered): PipelineSource (douyin) ──► RapidAPI JustOne get-user-video-list/v3 ──► DouyinVideo (inventory) ──► AI match → metadata → scheduler → Publication → worker → YouTube
 ```
+
+### Douyin Inventory (chế độ thủ công, tiết kiệm quota)
+
+Douyin **không còn được quét tự động** (`DOUYIN_AUTO_SCAN_ENABLED=false`); scheduler chỉ đọc Inventory để chọn video đăng. Admin tự bấm cập nhật trên dashboard:
+
+- **Import ban đầu** (`POST /api/sources/{id}/initial-import`): phân trang đến `has_more=false`, upsert từng trang vào Inventory. Lưu cursor sau mỗi trang nên có thể **chạy tiếp** (`POST /api/sources/{id}/initial-import/resume`) khi hết quota.
+- **Cập nhật video mới** (`POST /api/sources/{id}/refresh`): chỉ đọc trang 1 (mới nhất) và dừng ngay khi gặp `aweme_id` đã biết → tốn tối thiểu request.
+- **Quota guard** (`GET /api/douyin/quota`): RapidAPI BASIC ~20 request/tháng (1 page = 1 request). `app_settings.rapidapi_quota_state` theo dõi số còn lại + tháng, chặn trước khi gọi khi chạm ngưỡng `RAPIDAPI_QUOTA_SAFETY_MARGIN`, và đánh dấu `quota_exhausted` khi provider trả 429/code 303.
+- Xem Inventory của một source: `GET /api/sources/{id}/inventory`.
 
 - **Frontend**: `dashboard/` Next.js 16 (App Router) → proxy `/api/[...path]` tới FastAPI, `X-Admin-Token` server-only
 - **Backend**: `backend/app` FastAPI + SQLAlchemy + Supabase Postgres, `worker.py` (download → AI → upload), `monitor.py` (due scan), `scheduler.py` (slot), `youtube.py` (OAuth)
@@ -94,6 +103,8 @@ DASHBOARD_SECRET=...
 - `POST /api/channels/{destination_id}/publish` / `POST /api/manual/publish` → Publication queued
 - `GET /api/platform-accounts` / `POST /api/platform-accounts/douyin` / `POST /api/platform-accounts/douyin/test`
 - `GET /api/pipelines/{id}/sources` / `POST /api/pipelines/{id}/sources` `{platform, source_url, source_name}`
+- `POST /api/sources/{id}/initial-import` / `/initial-import/resume` / `/refresh` → đồng bộ Inventory Douyin (thủ công)
+- `GET /api/sources/{id}/inventory` / `GET /api/douyin/quota`
 - `GET /api/channels/{destination_id}/sources` / `POST /api/channels/{destination_id}/sources`
 - `POST /api/youtube/oauth-url?destination_id=...` → Google OAuth `https://accounts.google.com/o/oauth2/v2/auth`
 

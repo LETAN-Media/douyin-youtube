@@ -544,6 +544,75 @@ class DouyinSource(Base):
         default="oldest_first",
     )
 
+    # ---- admin-driven Douyin discovery (no scheduled scanning) ----
+    # Which creator-feed provider this source uses. Recorded per source so the
+    # UI can show it even after the default provider changes.
+    feed_provider: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="rapidapi_justone",
+    )
+
+    # Initial full import (one-off backlog walk). Resumable: a quota stop keeps
+    # the cursor so the next run continues instead of refetching page 1.
+    # pending | running | paused_quota | completed | failed
+    initial_import_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+    )
+
+    initial_import_cursor: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    initial_import_pages: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    initial_import_videos: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    initial_import_last_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    initial_import_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    initial_import_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Manual "check for new videos" refresh.
+    last_refresh_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # ok | quota_exhausted | provider_error | invalid
+    # Never "needs_login": this provider needs no Douyin cookie at all.
+    provider_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="ok",
+    )
+
+    provider_status_detail: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,

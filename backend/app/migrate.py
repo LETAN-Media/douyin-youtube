@@ -356,6 +356,43 @@ def run_migrations() -> None:
                     )
                 )
 
+        # ---- admin-driven Douyin discovery (no scheduled scanning) ----
+        for column_name, column_type in [
+            ("feed_provider", "VARCHAR(50) DEFAULT 'rapidapi_justone'"),
+            ("initial_import_status", "VARCHAR(20) DEFAULT 'pending'"),
+            ("initial_import_cursor", "VARCHAR(64)"),
+            ("initial_import_pages", "INTEGER DEFAULT 0"),
+            ("initial_import_videos", "INTEGER DEFAULT 0"),
+            ("initial_import_last_error", "TEXT"),
+            ("initial_import_started_at", "TIMESTAMPTZ"),
+            ("initial_import_completed_at", "TIMESTAMPTZ"),
+            ("last_refresh_at", "TIMESTAMPTZ"),
+            ("provider_status", "VARCHAR(30) DEFAULT 'ok'"),
+            ("provider_status_detail", "TEXT"),
+        ]:
+            if not column_exists(connection, "douyin_sources", column_name):
+                logger.info("Adding %s to douyin_sources", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE douyin_sources "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
+
+        # Existing sources already scanned under the old monitor are treated as
+        # completed so the UI does not offer them a first-time import.
+        try:
+            connection.execute(
+                text(
+                    "UPDATE douyin_sources SET initial_import_status = 'completed' "
+                    "WHERE initial_import_status = 'pending' AND ("
+                    "inventory_count > 0 OR last_scan_at IS NOT NULL "
+                    "OR inventory_synced_at IS NOT NULL)"
+                )
+            )
+        except Exception:
+            logger.info("initial_import_status backfill skipped")
+
         for column_name, column_type in [
             ("match_level", "VARCHAR(20)"),
             ("hold_reason", "TEXT"),

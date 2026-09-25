@@ -171,13 +171,17 @@ def _set_source_state(
         source.inventory_synced_at = utcnow()
         source.last_checked_at = utcnow()
         source.last_scan_at = utcnow()
-        try:
-            interval = int(source.scan_interval_minutes or 15)
-        except (TypeError, ValueError):
-            interval = 15
-        source.next_scan_at = utcnow() + __import__("datetime").timedelta(
-            minutes=max(5, interval)
-        )
+        # Manual-inventory mode: do NOT schedule the next douyin scan. Nothing
+        # is due automatically, so the monitor cannot spend RapidAPI quota in
+        # the background. Only an explicit opt-in restores scheduling.
+        if getattr(settings, "douyin_auto_scan_enabled", False):
+            try:
+                interval = int(source.scan_interval_minutes or 15)
+            except (TypeError, ValueError):
+                interval = 15
+            source.next_scan_at = utcnow() + __import__("datetime").timedelta(
+                minutes=max(5, interval)
+            )
     db.commit()
 
 

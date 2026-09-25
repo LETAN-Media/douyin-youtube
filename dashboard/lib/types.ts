@@ -387,6 +387,44 @@ export interface WorkspaceSourceItem extends ChannelSourceItem {
   next_scan_at?: string | null;
   last_scan_at?: string | null;
   inventory_sync_error?: string | null;
+  // Manual-inventory mode (admin-driven Douyin discovery).
+  feed_provider?: string | null;
+  initial_import_status?: string | null;
+  initial_import_cursor?: string | null;
+  initial_import_pages?: number | null;
+  initial_import_videos?: number | null;
+  initial_import_last_error?: string | null;
+  initial_import_started_at?: string | null;
+  initial_import_completed_at?: string | null;
+  last_refresh_at?: string | null;
+  provider_status?: string | null;
+  provider_status_detail?: string | null;
+}
+
+export interface DouyinQuotaStatus {
+  limit: number;
+  remaining: number;
+  used: number;
+  month?: string | null;
+  reset_at?: string | null;
+  status: "ok" | "low" | "quota_exhausted" | string;
+  exhausted: boolean;
+  safety_margin: number;
+  source?: string | null;
+  last_error?: string | null;
+  updated_at?: string | null;
+}
+
+export interface SourceImportResult {
+  source_id: string;
+  status: string;
+  new: number;
+  updated: number;
+  pages: number;
+  videos: number;
+  cursor?: string | null;
+  error?: string | null;
+  quota?: DouyinQuotaStatus | null;
 }
 
 export interface SourceCookieStatus {

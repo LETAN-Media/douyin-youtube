@@ -158,6 +158,15 @@ def _source_is_due(source: DouyinSource, now: datetime) -> bool:
 
 
 def _scan_one_source(source_id: str) -> None:
+    # Manual-inventory mode: Douyin discovery is admin-driven only. The
+    # scheduler reads Inventory; it never spends a RapidAPI request.
+    if not getattr(settings, "douyin_auto_scan_enabled", False):
+        logger.info("Douyin auto-scan disabled; skipping source=%s", source_id)
+        return
+    _scan_one_source_impl(source_id)
+
+
+def _scan_one_source_impl(source_id: str) -> None:
     try:
         with SessionLocal() as db:
             source = db.get(DouyinSource, source_id)
@@ -200,7 +209,19 @@ def run_monitor_once() -> None:
 
     Limited concurrency (DOUYIN_SCAN_CONCURRENCY, default 2). One failing
     source never kills the cycle for the others.
+
+    Manual-inventory mode: when DOUYIN_AUTO_SCAN_ENABLED=false (the default)
+    this is a no-op — the loop stays alive but never polls Douyin, so no
+    RapidAPI quota is spent in the background. Inventory is refreshed only by
+    an admin action (see app.douyin_import).
     """
+    if not getattr(settings, "douyin_auto_scan_enabled", False):
+        logger.info(
+            "Douyin auto-scan disabled (DOUYIN_AUTO_SCAN_ENABLED=false); "
+            "monitor cycle is a no-op"
+        )
+        return
+
     now = utcnow()
     with SessionLocal() as db:
         sources = db.execute(

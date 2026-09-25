@@ -226,6 +226,18 @@ class DouyinSourceOut(DouyinSourceBase):
     borderline_policy: str = "hold"
     mismatch_policy: str = "reject"
     order: str = "oldest_first"
+    # Manual-inventory mode (admin-driven Douyin discovery).
+    feed_provider: str = "rapidapi_justone"
+    initial_import_status: str = "pending"
+    initial_import_cursor: str | None = None
+    initial_import_pages: int = 0
+    initial_import_videos: int = 0
+    initial_import_last_error: str | None = None
+    initial_import_started_at: datetime | None = None
+    initial_import_completed_at: datetime | None = None
+    last_refresh_at: datetime | None = None
+    provider_status: str = "ok"
+    provider_status_detail: str | None = None
 
 
 class SourceWithCookieOut(DouyinSourceOut):
@@ -635,6 +647,44 @@ class SourceSyncResponse(BaseModel):
     status: str
     new: int = 0
     updated: int = 0
+
+
+class DouyinQuotaOut(BaseModel):
+    """RapidAPI quota view. Never contains the API key."""
+
+    limit: int = 0
+    remaining: int = 0
+    used: int = 0
+    month: str | None = None
+    reset_at: str | None = None
+    status: str = "ok"
+    exhausted: bool = False
+    safety_margin: int = 1
+    source: str | None = None
+    last_error: str | None = None
+    updated_at: str | None = None
+
+
+class SourceImportResponse(BaseModel):
+    """Result of an admin-triggered initial import or manual refresh."""
+
+    source_id: str
+    status: str
+    new: int = 0
+    updated: int = 0
+    pages: int = 0
+    videos: int = 0
+    cursor: str | None = None
+    error: str | None = None
+    quota: DouyinQuotaOut | None = None
+
+
+class SourceInventoryResponse(BaseModel):
+    source_id: str
+    total: int = 0
+    limit: int = 100
+    offset: int = 0
+    videos: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChannelItem(BaseModel):

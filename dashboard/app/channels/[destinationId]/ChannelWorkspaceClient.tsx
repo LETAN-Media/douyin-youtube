@@ -23,6 +23,7 @@ import type {
   ChannelAutoStatus,
   ChannelDetail,
   ChannelInventoryItem,
+  DouyinQuotaStatus,
   ManualMetadataResult,
   ManualPublicationItem,
   ManualPublishPayload,
@@ -380,6 +381,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [syncingSourceId, setSyncingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [workspaceSources, setWorkspaceSources] = useState<WorkspaceSourceItem[]>([]);
+  const [importingSourceId, setImportingSourceId] = useState<string | null>(null);
+  const [quota, setQuota] = useState<DouyinQuotaStatus | null>(null);
   const [autoStatus, setAutoStatus] = useState<ChannelAutoStatus | null>(null);
   const [autoStatusLoading, setAutoStatusLoading] = useState(false);
   const [globalAccounts, setGlobalAccounts] = useState<{ platform: string; status: string; connected: boolean; used_by_sources?: number; last_verified_at?: string | null }[]>([]);
@@ -397,6 +400,15 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       console.error("Failed to load workspace sources:", e);
     }
   }, [channel.destination_id]);
+
+  const fetchQuota = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/douyin/quota`);
+      if (res.ok) setQuota(await res.json());
+    } catch (e) {
+      console.error("Failed to load RapidAPI quota:", e);
+    }
+  }, []);
 
   const fetchGlobalAccounts = useCallback(async () => {
     try {
@@ -420,7 +432,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   useEffect(() => {
     fetchWorkspaceSources();
     fetchGlobalAccounts();
-  }, [fetchWorkspaceSources, fetchGlobalAccounts]);
+    fetchQuota();
+  }, [fetchWorkspaceSources, fetchGlobalAccounts, fetchQuota]);
 
   useEffect(() => {
     if (activeTab === "auto") fetchAutoStatus();
@@ -463,17 +476,42 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const handleSyncSource = async (sourceId: string) => {
     setSyncingSourceId(sourceId);
     try {
-      const res = await fetch(`/api/sources/${sourceId}/scan`, { method: "POST" });
+      // Manual-inventory mode: refresh = page 1 newest-first, stop at the
+      // first known aweme_id. One RapidAPI request when nothing is new.
+      const res = await fetch(`/api/sources/${sourceId}/refresh`, { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || err.error || "Đồng bộ thất bại");
+        throw new Error(err.detail || err.error || "Cập nhật thất bại");
       }
       reloadDetail();
       fetchWorkspaceSources();
+      fetchQuota();
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Đồng bộ thất bại");
+      alert(err instanceof Error ? err.message : "Cập nhật thất bại");
     } finally {
       setSyncingSourceId(null);
+    }
+  };
+
+  // Admin-driven initial backlog import (resumable on quota stop).
+  const handleInitialImport = async (sourceId: string, resume = false) => {
+    setImportingSourceId(sourceId);
+    try {
+      const url = resume
+        ? `/api/sources/${sourceId}/initial-import/resume`
+        : `/api/sources/${sourceId}/initial-import`;
+      const res = await fetch(url, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || data.error || "Import thất bại");
+      }
+      reloadDetail();
+      fetchWorkspaceSources();
+      fetchQuota();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Import thất bại");
+    } finally {
+      setImportingSourceId(null);
     }
   };
 
@@ -1591,11 +1629,28 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
 
           {/* Sources List — per-source cookie + scan controls */}
           <Card className="p-5 sm:p-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h3 className="text-sm font-extrabold text-slate-900">Danh sách tác giả trong workspace ({workspaceSources.length || detail.sources?.length || 0})</h3>
-              <button type="button" onClick={() => { fetchWorkspaceSources(); reloadDetail(); }} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50">
-                <IconRefresh size={11} /> Làm mới
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {quota && (
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-bold ${
+                      quota.status === "quota_exhausted"
+                        ? "bg-rose-50 text-rose-700"
+                        : quota.status === "low"
+                          ? "bg-amber-50 text-amber-700"
+                          : "bg-emerald-50 text-emerald-700"
+                    }`}
+                    title="Hạn mức RapidAPI (1 trang = 1 request)"
+                  >
+                    Quota RapidAPI: {quota.remaining}/{quota.limit}
+                    {quota.month ? ` · ${quota.month}` : ""}
+                  </span>
+                )}
+                <button type="button" onClick={() => { fetchWorkspaceSources(); fetchQuota(); reloadDetail(); }} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50">
+                  <IconRefresh size={11} /> Làm mới
+                </button>
+              </div>
             </div>
             {(workspaceSources.length === 0 && (!detail.sources || detail.sources.length === 0)) ? (
               <p className="mt-4 text-xs text-slate-500">Chưa có tác giả nào. Hãy thêm link Douyin ở trên.</p>
@@ -1607,6 +1662,22 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   const platform = (source as unknown as { platform?: string }).platform || "douyin";
                   const douyinAccount = globalAccounts.find((a) => a.platform === "douyin");
                   const needsGlobalAuth = platform === "douyin" && douyinAccount && !douyinAccount.connected;
+                  const importStatus = (source.initial_import_status || "pending").toLowerCase();
+                  const importBusy = importingSourceId === source.id;
+                  const canResume = (importStatus === "paused_quota" || importStatus === "paused") && !!source.initial_import_cursor;
+                  const showRefresh = importStatus === "completed";
+                  const importLabel =
+                    importStatus === "completed" ? "Đã import"
+                    : importStatus === "running" ? "Đang import…"
+                    : importStatus === "paused_quota" ? "Hết quota — có thể chạy tiếp"
+                    : importStatus === "paused" ? "Tạm dừng — có thể chạy tiếp"
+                    : importStatus === "failed" ? "Import lỗi"
+                    : "Chưa import";
+                  const importTone =
+                    importStatus === "completed" ? "green"
+                    : importStatus === "failed" ? "red"
+                    : importStatus === "running" || importStatus === "paused_quota" || importStatus === "paused" ? "amber"
+                    : "slate";
                   return (
                     <div key={source.id} className="flex flex-col gap-2 py-3.5 text-xs">
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -1618,16 +1689,32 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                           <p className="mt-0.5 font-mono text-[11px] text-slate-400 truncate max-w-md">{source.profile_url}</p>
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
                             <span>Kho: <strong className="text-slate-800">{source.video_count ?? 0}</strong> video</span>
-                            <span>· Trạng thái: <Badge tone={source.status === "syncing" || source.status === "running" ? "amber" : source.status === "auth_required" ? "rose" : "slate"}>{source.status}</Badge></span>
+                            <span>· Trạng thái: <Badge tone={source.status === "syncing" || source.status === "running" ? "amber" : source.status === "auth_required" ? "red" : "slate"}>{source.status}</Badge></span>
+                            <span>· Import: <Badge tone={importTone}>{importLabel}</Badge></span>
+                            {platform === "douyin" && (
+                              <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700">
+                                {(source.feed_provider || "rapidapi_justone") === "rapidapi_justone" ? "RapidAPI JustOne" : source.feed_provider}
+                              </span>
+                            )}
+                            {(importStatus === "running" || importStatus === "paused_quota" || importStatus === "paused") && (
+                              <span>· Đã đọc <strong className="text-slate-800">{source.initial_import_pages ?? 0}</strong> trang / <strong className="text-slate-800">{source.initial_import_videos ?? 0}</strong> video</span>
+                            )}
                             {needsGlobalAuth && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-700">Douyin account needs login (global)</span>}
                             {isPaused && <Badge tone="amber">Paused</Badge>}
                           </div>
-                          {source.inventory_sync_error && <p className="mt-1 text-[11px] font-semibold text-rose-600 line-clamp-2">{source.inventory_sync_error}</p>}
+                          {(source.initial_import_last_error || source.inventory_sync_error) && <p className="mt-1 text-[11px] font-semibold text-rose-600 line-clamp-2">{source.initial_import_last_error || source.inventory_sync_error}</p>}
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <button type="button" onClick={() => handleSyncSource(source.id)} disabled={syncingSourceId === source.id || !!needsGlobalAuth} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-                            <IconRefresh size={13} /> {syncingSourceId === source.id ? "Đang đồng bộ…" : "Scan Now"}
-                          </button>
+                          {!showRefresh && (
+                            <button type="button" onClick={() => handleInitialImport(source.id, canResume)} disabled={importBusy || importStatus === "running"} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50">
+                              <IconUpload size={13} /> {importBusy ? "Đang chạy…" : canResume ? "Chạy tiếp import" : "Import ban đầu"}
+                            </button>
+                          )}
+                          {showRefresh && (
+                            <button type="button" onClick={() => handleSyncSource(source.id)} disabled={syncingSourceId === source.id} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                              <IconRefresh size={13} /> {syncingSourceId === source.id ? "Đang cập nhật…" : "Cập nhật video mới"}
+                            </button>
+                          )}
                           <button type="button" onClick={() => handlePauseSource(source.id, !isPaused)} className={`inline-flex min-h-[36px] items-center rounded-lg border px-3 py-1.5 text-xs font-bold ${isPaused ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
                             {isPaused ? "Resume" : "Pause"}
                           </button>

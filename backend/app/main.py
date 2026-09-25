@@ -50,6 +50,7 @@ from app.schemas import (
     DestinationOut,
     DestinationUpdate,
     DouyinSourceCreate,
+    DouyinQuotaOut,
     DouyinSourceOut,
     DouyinSourceUpdate,
     DouyinVideoOut,
@@ -74,6 +75,8 @@ from app.schemas import (
     SourceCookieSave,
     SourceCookieStatus,
     SourceCookieTestResponse,
+    SourceImportResponse,
+    SourceInventoryResponse,
     SourceWithCookieOut,
     SourceSyncResponse,
 )
@@ -1190,37 +1193,20 @@ def create_pipeline_source(
         douyin_user_id=p_user_id,
         enabled=bool(p_enabled),
         platform="douyin",
-        inventory_sync_status="queued",
+        inventory_sync_status="idle",
         inventory_count=0,
         inventory_sync_error=None,
+        feed_provider=getattr(settings, "douyin_creator_provider", "rapidapi_justone") or "rapidapi_justone",
+        initial_import_status="pending",
     )
 
     db.add(source)
     db.commit()
     db.refresh(source)
 
-    # Non-blocking initial scan: return 201 immediately with status=queued.
-    # Background thread drives queued -> running -> completed/auth_required/failed.
-    # Dashboard polls GET /api/sources/{id} every few seconds.
-    try:
-        import threading as _threading
-
-        _source_id = source.id
-
-        def _bg_initial_sync() -> None:
-            try:
-                from app.inventory import sync_source_inventory
-
-                sync_source_inventory(_source_id, mode="full")
-            except Exception:
-                logger.exception(
-                    "Background inventory sync failed for source %s", _source_id
-                )
-
-        _threading.Thread(target=_bg_initial_sync, daemon=True).start()
-    except Exception:
-        logger.exception("Failed to queue background sync for source %s", source.id)
-
+    # Manual-inventory mode: creating a source does NOT spend a RapidAPI
+    # request. The admin starts the one-off import from the dashboard
+    # (POST /api/sources/{id}/initial-import).
     return source
 
 
@@ -2628,21 +2614,190 @@ def sync_source_now(
 
     import threading as _threading
 
-    def _bg_sync() -> None:
-        try:
-            from app.inventory import sync_source_inventory
-
-            sync_source_inventory(source_id, mode="full")
-        except Exception:
-            logger.exception("Manual inventory sync failed for source %s", source_id)
-
-    _threading.Thread(target=_bg_sync, daemon=True).start()
+    _threading.Thread(
+        target=trigger_inventory_sync_job, args=(source_id, "full"), daemon=True
+    ).start()
     return SourceSyncResponse(
         source_id=source.id,
         status="queued",
         new=0,
         updated=0,
     )
+
+
+@app.post(
+    "/api/sources/{source_id}/initial-import",
+    response_model=SourceImportResponse,
+    status_code=202,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def start_initial_import(
+    source_id: str,
+    db: Session = Depends(get_db),
+) -> SourceImportResponse:
+    """Start the one-off full backlog import (pages until has_more=false).
+
+    Runs in the background; dashboard polls GET /api/sources/{id} and can read
+    progress from initial_import_status/initial_import_pages. No RapidAPI
+    request is spent if quota is already at the safety floor.
+    """
+    from app import douyin_import
+
+    source = db.get(DouyinSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+
+    quota = douyin_import.quota_status()
+    if not douyin_quota_can_start():
+        raise HTTPException(
+            status_code=429,
+            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
+        )
+
+    source.initial_import_status = "running"
+    source.initial_import_last_error = None
+    source.inventory_sync_status = "queued"
+    source.inventory_sync_error = None
+    db.commit()
+
+    import threading as _threading
+
+    _threading.Thread(
+        target=trigger_inventory_sync_job, args=(source_id, "full"), daemon=True
+    ).start()
+    return SourceImportResponse(
+        source_id=source_id, status="queued", quota=DouyinQuotaOut(**quota)
+    )
+
+
+@app.post(
+    "/api/sources/{source_id}/initial-import/resume",
+    response_model=SourceImportResponse,
+    status_code=202,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def resume_initial_import(
+    source_id: str,
+    db: Session = Depends(get_db),
+) -> SourceImportResponse:
+    """Resume a paused import from the stored cursor instead of page 1."""
+    from app import douyin_import
+
+    source = db.get(DouyinSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    if not source.initial_import_cursor:
+        raise HTTPException(
+            status_code=409,
+            detail="Không có cursor để chạy tiếp — chạy import từ đầu",
+        )
+
+    quota = douyin_import.quota_status()
+    if not douyin_quota_can_start():
+        raise HTTPException(
+            status_code=429,
+            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
+        )
+
+    source.initial_import_status = "running"
+    source.initial_import_last_error = None
+    source.inventory_sync_status = "queued"
+    source.inventory_sync_error = None
+    db.commit()
+
+    import threading as _threading
+
+    _threading.Thread(
+        target=trigger_inventory_sync_job, args=(source_id, "resume"), daemon=True
+    ).start()
+    return SourceImportResponse(
+        source_id=source_id, status="queued", cursor=source.initial_import_cursor,
+        quota=DouyinQuotaOut(**quota),
+    )
+
+
+@app.post(
+    "/api/sources/{source_id}/refresh",
+    response_model=SourceImportResponse,
+    status_code=202,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def refresh_source_now(
+    source_id: str,
+    db: Session = Depends(get_db),
+) -> SourceImportResponse:
+    """Manual refresh: page 1 newest-first, stop at the first known video."""
+    from app import douyin_import
+
+    source = db.get(DouyinSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+
+    quota = douyin_import.quota_status()
+    if not douyin_quota_can_start():
+        raise HTTPException(
+            status_code=429,
+            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
+        )
+
+    source.inventory_sync_status = "queued"
+    source.inventory_sync_error = None
+    db.commit()
+
+    import threading as _threading
+
+    _threading.Thread(
+        target=trigger_inventory_sync_job, args=(source_id, "latest"), daemon=True
+    ).start()
+    return SourceImportResponse(
+        source_id=source_id, status="queued", quota=DouyinQuotaOut(**quota)
+    )
+
+
+@app.get(
+    "/api/sources/{source_id}/inventory",
+    response_model=SourceInventoryResponse,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def get_source_inventory(
+    source_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+) -> SourceInventoryResponse:
+    """Inventory rows for one source (admin import result)."""
+    source = db.get(DouyinSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+
+    from app import douyin_import
+
+    data = douyin_import.list_source_inventory(
+        source_id, limit=limit, offset=offset
+    )
+    return SourceInventoryResponse(**data)
+
+
+@app.get(
+    "/api/douyin/quota",
+    response_model=DouyinQuotaOut,
+    dependencies=[
+        Depends(require_admin)
+    ],
+)
+def get_douyin_quota() -> DouyinQuotaOut:
+    """RapidAPI quota snapshot for the dashboard. Contains no secrets."""
+    from app import douyin_import
+
+    return DouyinQuotaOut(**douyin_import.quota_status())
 
 
 @app.post(
@@ -4130,16 +4285,35 @@ def update_channel_endpoint(
     return get_channel_detail_endpoint(destination_id=destination_id, db=db)
 
 
-def trigger_inventory_sync_job(source_id: str, mode: str = "full") -> None:
-    """Background inventory sync runner (also fixes the previously missing
-    helper referenced by the channel source endpoints)."""
-    try:
-        from app.inventory import sync_source_inventory
+def douyin_quota_can_start() -> bool:
+    """True when one more RapidAPI request is allowed above the safety floor."""
+    from app import douyin_quota
 
-        sync_source_inventory(source_id, mode=mode)
+    try:
+        return bool(douyin_quota.can_spend(1))
+    except Exception:
+        return True
+
+
+def trigger_inventory_sync_job(source_id: str, mode: str = "full") -> None:
+    """Background Douyin discovery runner.
+
+    Manual-inventory mode: discovery only happens because an admin asked for
+    it, so this routes to the quota-aware engine instead of the old
+    cookie/browser inventory sync.
+      * mode='latest'  -> manual refresh (page 1, stop at first known video)
+      * anything else  -> initial full import (resumable backlog walk)
+    """
+    try:
+        from app import douyin_import
+
+        if mode == "latest":
+            douyin_import.refresh_source(source_id)
+        else:
+            douyin_import.initial_import(source_id, resume=mode == "resume")
     except Exception:
         logger.exception(
-            "Background inventory sync failed for source %s", source_id
+            "Background Douyin discovery failed for source %s", source_id
         )
 
 
@@ -4221,11 +4395,10 @@ def add_channel_source_endpoint(
     db.commit()
     db.refresh(source)
 
-    # NEW_ONLY establishes a cheap latest baseline first; LAST_N/full
-    # discovers history (kept newest N active, rest baselined).
-    initial_mode = "latest" if source.start_mode == "new_only" else "full"
-    background_tasks.add_task(trigger_inventory_sync_job, source.id, initial_mode)
-
+    # Manual-inventory mode: no automatic scan on creation. The source starts
+    # with initial_import_status='pending' and the admin triggers the one-off
+    # backlog import (POST /api/sources/{id}/initial-import) so RapidAPI quota
+    # is only spent on demand.
     return {
         "id": source.id,
         "name": source.name,
@@ -4233,6 +4406,8 @@ def add_channel_source_endpoint(
         "status": source.inventory_sync_status,
         "video_count": 0,
         "platform": "douyin",
+        "initial_import_status": source.initial_import_status,
+        "feed_provider": source.feed_provider,
     }
 
 
@@ -4355,6 +4530,18 @@ def _source_with_cookie_out(s: DouyinSource) -> dict:
         "cookie_configured": False,
         "status": s.inventory_sync_status,
         "video_count": s.inventory_count,
+        # Manual-inventory mode (admin-driven discovery).
+        "feed_provider": getattr(s, "feed_provider", "rapidapi_justone"),
+        "initial_import_status": getattr(s, "initial_import_status", "pending"),
+        "initial_import_cursor": getattr(s, "initial_import_cursor", None),
+        "initial_import_pages": int(getattr(s, "initial_import_pages", 0) or 0),
+        "initial_import_videos": int(getattr(s, "initial_import_videos", 0) or 0),
+        "initial_import_last_error": getattr(s, "initial_import_last_error", None),
+        "initial_import_started_at": getattr(s, "initial_import_started_at", None),
+        "initial_import_completed_at": getattr(s, "initial_import_completed_at", None),
+        "last_refresh_at": getattr(s, "last_refresh_at", None),
+        "provider_status": getattr(s, "provider_status", "ok"),
+        "provider_status_detail": getattr(s, "provider_status_detail", None),
     }
 
 
