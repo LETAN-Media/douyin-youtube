@@ -54,6 +54,19 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Public routes for Google OAuth verification (no login required):
+  // legal pages are fully public; "/" renders a public landing page for
+  // guests and the dashboard for authenticated users (decided in page.tsx).
+  if (
+    pathname === "/" ||
+    pathname === "/privacy" ||
+    pathname.startsWith("/privacy/") ||
+    pathname === "/terms" ||
+    pathname.startsWith("/terms/")
+  ) {
+    return NextResponse.next();
+  }
+
   const secret = process.env.DASHBOARD_SECRET ?? "";
   const token = request.cookies.get("dy_session")?.value;
   const authenticated = await verifyToken(token, secret);
