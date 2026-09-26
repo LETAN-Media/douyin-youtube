@@ -31,7 +31,12 @@ def _ai_conf() -> tuple[bool, str, str, str]:
     return enabled, api_key, base_url, model
 
 
-def _chat(system: str, user: str, max_tokens: int = 1500) -> str | None:
+def _chat(
+    system: str,
+    user: str,
+    max_tokens: int = 1500,
+    temperature: float = 0.2,
+) -> str | None:
     enabled, api_key, base_url, model = _ai_conf()
     if not enabled or not api_key:
         return None
@@ -48,7 +53,7 @@ def _chat(system: str, user: str, max_tokens: int = 1500) -> str | None:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.4,
+                "temperature": temperature,
                 "max_tokens": max_tokens,
             },
             timeout=60.0,
@@ -238,7 +243,16 @@ def analyze_trends(
     )
     raw = _chat(system, user)
     data = _extract_json(raw)
+    if data is None and raw:
+        # One strict retry: models sometimes answer in prose first.
+        logger.info("ai research retrying with JSON-only nudge (len=%d)", len(raw))
+        raw = _chat(
+            system + " Reply with ONLY the JSON object, no prose before or after.",
+            user,
+        )
+        data = _extract_json(raw)
     if data is None:
+        logger.info("ai research fallback (no parseable JSON)")
         return {
             "fallback": True,
             "channel_niche": ", ".join((niche.get("keywords") or [])[:8]),
