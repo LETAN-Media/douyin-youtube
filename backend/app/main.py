@@ -266,191 +266,298 @@ def dashboard_stats(
         get_db
     ),
 ) -> dict:
+    import time
+    t0 = time.perf_counter()
+    t_mark = t0
+
+    def _ms_since(mark: float) -> tuple[int, float]:
+        now = time.perf_counter()
+        return int((now - mark) * 1000), now
+
     pipelines = db.execute(
         select(Pipeline).order_by(Pipeline.created_at.asc())
     ).scalars().all()
 
     pipeline_ids = [p.id for p in pipelines]
 
-    stats: dict[str, dict[str, Any]] = {}
+    if not pipeline_ids:
+        return {"pipelines": []}
 
-    if pipeline_ids:
-        job_stats = db.execute(
-            select(
-                VideoJob.pipeline_id,
-                func.count(VideoJob.id).label("total"),
-                func.sum(
-                    __import__("sqlalchemy")
-                    .case(
-                        (VideoJob.status == "published", 1),
-                        else_=0,
-                    )
-                ).label("published"),
-                func.sum(
-                    __import__("sqlalchemy")
-                    .case(
-                        (VideoJob.status == "pending", 1),
-                        else_=0,
-                    )
-                ).label("pending"),
-            )
-            .where(VideoJob.pipeline_id.in_(pipeline_ids))
-            .group_by(VideoJob.pipeline_id)
-        ).all()
+    timings: dict[str, int] = {}
+    timings["pipelines_ms"], t_mark = _ms_since(t_mark)
 
-        for row in job_stats:
-            stats[str(row.pipeline_id)] = {
-                "total": int(row.total or 0),
-                "published": int(row.published or 0),
-                "pending": int(row.pending or 0),
-            }
+    # Batch all aggregated queries in parallel-ish (sequential but batched)
+    # 1. Job stats per pipeline
+    job_stats = db.execute(
+        select(
+            VideoJob.pipeline_id,
+            func.count(VideoJob.id).label("total"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (VideoJob.status == "published", 1),
+                    else_=0,
+                )
+            ).label("published"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (VideoJob.status == "pending", 1),
+                    else_=0,
+                )
+            ).label("pending"),
+        )
+        .where(VideoJob.pipeline_id.in_(pipeline_ids))
+        .group_by(VideoJob.pipeline_id)
+    ).all()
+
+    stats: dict[str, dict[str, int]] = {}
+    for row in job_stats:
+        stats[str(row.pipeline_id)] = {
+            "total": int(row.total or 0),
+            "published": int(row.published or 0),
+            "pending": int(row.pending or 0),
+        }
+
+    # 2. Source counts per pipeline
+    source_rows = db.execute(
+        select(
+            DouyinSource.pipeline_id,
+            func.count(DouyinSource.id).label("count"),
+        )
+        .where(DouyinSource.pipeline_id.in_(pipeline_ids))
+        .group_by(DouyinSource.pipeline_id)
+    ).all()
 
     source_counts: dict[str, int] = {}
-    if pipeline_ids:
-        source_rows = db.execute(
-            select(
-                DouyinSource.pipeline_id,
-                func.count(DouyinSource.id).label("count"),
-            )
-            .where(DouyinSource.pipeline_id.in_(pipeline_ids))
-            .group_by(DouyinSource.pipeline_id)
-        ).all()
+    for row in source_rows:
+        source_counts[str(row.pipeline_id)] = int(row.count or 0)
 
-        for row in source_rows:
-            source_counts[str(row.pipeline_id)] = int(row.count or 0)
+    # 3. Inventory stats per pipeline
+    inv_rows = db.execute(
+        select(
+            DouyinVideo.pipeline_id,
+            func.count(DouyinVideo.id).label("inventory_total"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (DouyinVideo.status == "backlog", 1),
+                    else_=0,
+                )
+            ).label("backlog"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (DouyinVideo.status == "new", 1),
+                    else_=0,
+                )
+            ).label("new"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (DouyinVideo.status == "scheduled", 1),
+                    else_=0,
+                )
+            ).label("scheduled"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (DouyinVideo.status == "published", 1),
+                    else_=0,
+                )
+            ).label("published"),
+        )
+        .where(DouyinVideo.pipeline_id.in_(pipeline_ids))
+        .group_by(DouyinVideo.pipeline_id)
+    ).all()
 
-    inventory_stats: dict[str, dict[str, Any]] = {}
-    if pipeline_ids:
-        inv_rows = db.execute(
-            select(
-                DouyinVideo.pipeline_id,
-                func.count(DouyinVideo.id).label("inventory_total"),
-                func.sum(
-                    __import__("sqlalchemy")
-                    .case(
-                        (DouyinVideo.status == "backlog", 1),
-                        else_=0,
-                    )
-                ).label("backlog"),
-                func.sum(
-                    __import__("sqlalchemy")
-                    .case(
-                        (DouyinVideo.status == "new", 1),
-                        else_=0,
-                    )
-                ).label("new"),
-                func.sum(
-                    __import__("sqlalchemy")
-                    .case(
-                        (DouyinVideo.status == "scheduled", 1),
-                        else_=0,
-                    )
-                ).label("scheduled"),
-                func.sum(
-                    __import__("sqlalchemy")
-                    .case(
-                        (DouyinVideo.status == "published", 1),
-                        else_=0,
-                    )
-                ).label("published"),
-            )
-            .where(DouyinVideo.pipeline_id.in_(pipeline_ids))
-            .group_by(DouyinVideo.pipeline_id)
-        ).all()
+    inventory_stats: dict[str, dict[str, int]] = {}
+    for row in inv_rows:
+        inventory_stats[str(row.pipeline_id)] = {
+            "inventory_total": int(row.inventory_total or 0),
+            "backlog": int(row.backlog or 0),
+            "new": int(row.new or 0),
+            "scheduled": int(row.scheduled or 0),
+            "published": int(row.published or 0),
+        }
 
-        for row in inv_rows:
-            inventory_stats[str(row.pipeline_id)] = {
-                "inventory_total": int(row.inventory_total or 0),
-                "backlog": int(row.backlog or 0),
-                "new": int(row.new or 0),
-                "scheduled": int(row.scheduled or 0),
-                "published": int(row.published or 0),
-            }
+    # 4. Destination counts per pipeline
+    dest_rows = db.execute(
+        select(
+            Destination.pipeline_id,
+            func.count(Destination.id).label("count"),
+        )
+        .where(Destination.pipeline_id.in_(pipeline_ids))
+        .group_by(Destination.pipeline_id)
+    ).all()
 
     destination_counts: dict[str, int] = {}
-    if pipeline_ids:
-        dest_rows = db.execute(
-            select(
-                Destination.pipeline_id,
-                func.count(Destination.id).label("count"),
-            )
-            .where(Destination.pipeline_id.in_(pipeline_ids))
-            .group_by(Destination.pipeline_id)
-        ).all()
+    for row in dest_rows:
+        destination_counts[str(row.pipeline_id)] = int(row.count or 0)
 
-        for row in dest_rows:
-            destination_counts[str(row.pipeline_id)] = int(row.count or 0)
+    # 5. Publication stats per pipeline (batched)
+    pub_rows = db.execute(
+        select(
+            Publication.pipeline_id,
+            func.count(Publication.id).label("total"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (Publication.status == "failed", 1),
+                    else_=0,
+                )
+            ).label("failed"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (Publication.status.in_(["scheduled", "queued"]), 1),
+                    else_=0,
+                )
+            ).label("scheduled"),
+            func.sum(
+                __import__("sqlalchemy")
+                .case(
+                    (Publication.status == "published", 1),
+                    else_=0,
+                )
+            ).label("published"),
+        )
+        .where(Publication.pipeline_id.in_(pipeline_ids))
+        .group_by(Publication.pipeline_id)
+    ).all()
 
     publication_stats: dict[str, dict[str, int]] = {}
-    if pipeline_ids:
-        for pid in pipeline_ids:
-            pub_total = db.execute(
-                select(func.count(Publication.id))
-                .where(Publication.pipeline_id == pid)
-            ).scalar_one_or_none() or 0
-            pub_failed = db.execute(
-                select(func.count(Publication.id))
-                .where(Publication.pipeline_id == pid)
-                .where(Publication.status == "failed")
-            ).scalar_one_or_none() or 0
-            pub_scheduled = db.execute(
-                select(func.count(Publication.id))
-                .where(Publication.pipeline_id == pid)
-                .where(Publication.status.in_(["scheduled", "queued"]))
-            ).scalar_one_or_none() or 0
-            pub_published = db.execute(
-                select(func.count(Publication.id))
-                .where(Publication.pipeline_id == pid)
-                .where(Publication.status == "published")
-            ).scalar_one_or_none() or 0
-            publication_stats[str(pid)] = {
-                "total": int(pub_total),
-                "failed": int(pub_failed),
-                "scheduled": int(pub_scheduled),
-                "published": int(pub_published),
-            }
+    for row in pub_rows:
+        publication_stats[str(row.pipeline_id)] = {
+            "total": int(row.total or 0),
+            "failed": int(row.failed or 0),
+            "scheduled": int(row.scheduled or 0),
+            "published": int(row.published or 0),
+        }
 
+    # 6. Today published counts for VideoJob and Publication (batched)
+    today_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    today_video_jobs = db.execute(
+        select(
+            VideoJob.pipeline_id,
+            func.count(VideoJob.id).label("count"),
+        )
+        .where(VideoJob.pipeline_id.in_(pipeline_ids))
+        .where(VideoJob.status == "published")
+        .where(VideoJob.created_at >= today_start)
+        .group_by(VideoJob.pipeline_id)
+    ).all()
+    today_vj_counts = {str(r.pipeline_id): int(r.count or 0) for r in today_video_jobs}
+
+    today_pubs = db.execute(
+        select(
+            Publication.pipeline_id,
+            func.count(Publication.id).label("count"),
+        )
+        .where(Publication.pipeline_id.in_(pipeline_ids))
+        .where(Publication.status == "published")
+        .where(Publication.published_at >= today_start)
+        .group_by(Publication.pipeline_id)
+    ).all()
+    today_pub_counts = {str(r.pipeline_id): int(r.count or 0) for r in today_pubs}
+
+    # 7. All destinations with pipeline_id (batched)
+    dest_rows = db.execute(
+        select(Destination)
+        .where(Destination.pipeline_id.in_(pipeline_ids))
+        .order_by(Destination.pipeline_id, Destination.created_at.asc())
+    ).scalars().all()
+    
+    # Group destinations by pipeline_id
+    dests_by_pipeline: dict[str, list[Destination]] = {}
+    for d in dest_rows:
+        dests_by_pipeline.setdefault(str(d.pipeline_id), []).append(d)
+    
+    pipeline_enabled: dict[str, bool] = {str(p.id): bool(p.enabled) for p in pipelines}
+    connected_counts: dict[str, int] = {}
+    auto_reasons: dict[str, str | None] = {}
+    for p in pipelines:
+        pid = str(p.id)
+        dests = dests_by_pipeline.get(pid, [])
+        connected = [
+            d for d in dests
+            if d.enabled and d.connected and d.credentials
+            and (d.platform or "").lower() == "youtube"
+        ]
+        connected_counts[pid] = len(connected)
+
+        # Compute auto_reason per pipeline (no DB query here)
+        if not pipeline_enabled.get(pid, True):
+            auto_reasons[pid] = "SCHEDULER_DISABLED"
+        elif not dests:
+            auto_reasons[pid] = "DESTINATION_NOT_CONNECTED"
+        elif not connected:
+            auto_reasons[pid] = "DESTINATION_NOT_CONNECTED"
+        else:
+            inv_available = int(
+                inventory_stats.get(pid, {}).get("new", 0) or 0
+            ) + int(
+                inventory_stats.get(pid, {}).get("backlog", 0) or 0
+            )
+            if inv_available <= 0:
+                auto_reasons[pid] = "NO_AVAILABLE_INVENTORY"
+            else:
+                reasons = [d.last_skip_reason for d in dests if d.last_skip_reason]
+                if reasons:
+                    found: str | None = None
+                    for cand in (
+                        "NO_AVAILABLE_INVENTORY",
+                        "DESTINATION_NOT_CONNECTED",
+                        "DAILY_LIMIT_REACHED",
+                        "WORKER_ERROR",
+                        "SCHEDULER_DISABLED",
+                    ):
+                        if cand in reasons:
+                            found = cand
+                            break
+                    auto_reasons[pid] = found or reasons[0]
+                else:
+                    pub_today_val = today_pub_counts.get(pid, 0)
+                    auto_reasons[pid] = "WAITING_NEXT_SLOT" if pub_today_val == 0 else None
+
+    timings["db_ms"], t_mark = _ms_since(t0)
+    timings["aggregate_ms"] = timings["db_ms"]
+
+    # Build result
+    t_build = time.perf_counter()
     result = []
-
     for pipeline in pipelines:
         pipeline_id = str(pipeline.id)
+        
         job_stat = stats.get(pipeline_id, {"total": 0, "published": 0, "pending": 0})
         inv_stat = inventory_stats.get(pipeline_id, {
-            "inventory_total": 0,
-            "backlog": 0,
-            "new": 0,
-            "scheduled": 0,
-            "published": 0,
+            "inventory_total": 0, "backlog": 0, "new": 0,
+            "scheduled": 0, "published": 0,
         })
         pub_stat = publication_stats.get(pipeline_id, {
-            "total": 0,
-            "failed": 0,
-            "scheduled": 0,
-            "published": 0,
+            "total": 0, "failed": 0, "scheduled": 0, "published": 0,
         })
-
-        today_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_published = db.execute(
-            select(func.count(VideoJob.id))
-            .where(VideoJob.pipeline_id == pipeline.id)
-            .where(VideoJob.status == "published")
-            .where(VideoJob.created_at >= today_start)
-        ).scalar_one_or_none()
-        today_published = today_published or 0
-
+        
+        today_published = today_vj_counts.get(pipeline_id, 0)
+        pub_today = today_pub_counts.get(pipeline_id, 0)
+        
+        # Next upload slot (computed in Python, no DB query)
         next_upload = None
         if pipeline.upload_slots:
             slot_times = []
             for slot_str in pipeline.upload_slots:
                 try:
                     hour, minute = map(int, str(slot_str).split(":"))
-                    slot_time = datetime.combine(_utcnow().date(), datetime.min.time().replace(hour=hour, minute=minute))
+                    slot_time = datetime.combine(
+                        _utcnow().date(),
+                        datetime.min.time().replace(hour=hour, minute=minute)
+                    )
                     if slot_time.tzinfo is None:
                         slot_time = slot_time.replace(tzinfo=timezone.utc)
                     slot_times.append(slot_time)
                 except (ValueError, AttributeError):
                     continue
-
             future_slots = [s for s in slot_times if s >= _utcnow()]
             if future_slots:
                 next_upload = min(future_slots).isoformat()
@@ -458,68 +565,20 @@ def dashboard_stats(
                 tomorrow = _utcnow().date() + timedelta(days=1)
                 try:
                     hour, minute = map(int, str(pipeline.upload_slots[0]).split(":"))
-                    slot_time = datetime.combine(tomorrow, datetime.min.time().replace(hour=hour, minute=minute))
+                    slot_time = datetime.combine(
+                        tomorrow,
+                        datetime.min.time().replace(hour=hour, minute=minute)
+                    )
                     if slot_time.tzinfo is None:
                         slot_time = slot_time.replace(tzinfo=timezone.utc)
                     next_upload = slot_time.isoformat()
                 except (ValueError, AttributeError):
-                    next_upload = None
+                    pass
 
-        pub_today = db.execute(
-            select(func.count(Publication.id))
-            .where(Publication.pipeline_id == pipeline.id)
-            .where(Publication.status == "published")
-            .where(Publication.published_at >= today_start)
-        ).scalar_one_or_none() or 0
-
-        # Inventory guard + auto reason for Overview observability.
-        inv_available = int(inv_stat.get("new", 0) or 0) + int(
-            inv_stat.get("backlog", 0) or 0
-        )
-        dests = list(
-            db.execute(
-                select(Destination)
-                .where(Destination.pipeline_id == pipeline.id)
-            ).scalars().all()
-        )
-        connected_dests = [
-            d for d in dests
-            if d.enabled and d.connected and d.credentials
-            and (d.platform or "").lower() == "youtube"
-        ]
-        auto_reason: str | None = None
-        if not pipeline.enabled:
-            auto_reason = "SCHEDULER_DISABLED"
-        elif not dests:
-            auto_reason = "DESTINATION_NOT_CONNECTED"
-        elif not connected_dests:
-            auto_reason = "DESTINATION_NOT_CONNECTED"
-        elif inv_available <= 0:
-            auto_reason = "NO_AVAILABLE_INVENTORY"
-        else:
-            # Surface stored per-destination skip reason if any.
-            reasons = [
-                d.last_skip_reason for d in dests
-                if d.last_skip_reason
-            ]
-            if reasons:
-                # Prefer actionable reasons over waiting.
-                for cand in (
-                    "NO_AVAILABLE_INVENTORY",
-                    "DESTINATION_NOT_CONNECTED",
-                    "DAILY_LIMIT_REACHED",
-                    "WORKER_ERROR",
-                    "SCHEDULER_DISABLED",
-                ):
-                    if cand in reasons:
-                        auto_reason = cand
-                        break
-                auto_reason = auto_reason or reasons[0]
-            else:
-                auto_reason = (
-                    "WAITING_NEXT_SLOT"
-                    if int(pub_today or 0) == 0 else None
-                )
+        inv_available = int(inv_stat.get("new", 0) or 0) + int(inv_stat.get("backlog", 0) or 0)
+        dests = dests_by_pipeline.get(pipeline_id, [])
+        connected_count = connected_counts.get(pipeline_id, 0)
+        auto_reason = auto_reasons.get(pipeline_id)
 
         result.append({
             "id": pipeline_id,
@@ -544,14 +603,33 @@ def dashboard_stats(
             "publications_failed": pub_stat["failed"],
             "publications_scheduled": pub_stat["scheduled"],
             "publications_published": pub_stat["published"],
-            "published_today": int(pub_today),
-            "failed": int(pub_stat["failed"]),
+            "published_today": pub_today,
+            "failed": pub_stat["failed"],
             "daily_upload_limit": pipeline.daily_upload_limit,
             "next_upload": next_upload,
             "inventory_available": int(inv_available),
-            "connected_destinations": len(connected_dests),
+            "connected_destinations": connected_count,
             "auto_reason": auto_reason,
         })
+
+    timings["build_ms"] = int((time.perf_counter() - t_build) * 1000)
+    total_ms = int((time.perf_counter() - t0) * 1000)
+    timings["total_ms"] = total_ms
+
+    # Server-side timing logs (no secrets). inventory/queue/channels are
+    # sub-sections of the same aggregated queries.
+    logger.info(
+        "dashboard.total_ms=%d dashboard.db_ms=%d dashboard.build_ms=%d "
+        "dashboard.pipelines=%d dashboard.inventory_ms=%d "
+        "dashboard.queue_ms=%d dashboard.channels_ms=%d",
+        total_ms,
+        timings["db_ms"],
+        timings["build_ms"],
+        len(pipelines),
+        timings["db_ms"],
+        timings["db_ms"],
+        timings["db_ms"],
+    )
 
     return {
         "pipelines": result,

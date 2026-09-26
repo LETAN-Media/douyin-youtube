@@ -644,6 +644,25 @@ def run_migrations() -> None:
         except Exception:
             logger.info("youtube publish mode backfill skipped")
 
+        # Dashboard latency: per-pipeline GROUP BY needs pipeline_id indexes.
+        # Additive only, IF NOT EXISTS, safe on small tables.
+        for _idx, _tbl, _col in [
+            ("ix_video_jobs_pipeline_id", "video_jobs", "pipeline_id"),
+            ("ix_publications_pipeline_id", "publications", "pipeline_id"),
+            ("ix_douyin_videos_pipeline_id", "douyin_videos", "pipeline_id"),
+            ("ix_douyin_sources_pipeline_id", "douyin_sources", "pipeline_id"),
+            ("ix_destinations_pipeline_id", "destinations", "pipeline_id"),
+        ]:
+            try:
+                connection.execute(
+                    text(
+                        f"CREATE INDEX IF NOT EXISTS {_idx} "
+                        f"ON {_tbl} ({_col})"
+                    )
+                )
+            except Exception:
+                logger.info("index %s skipped", _idx)
+
         default_pipeline_id = ensure_default_pipeline(connection)
 
         if default_pipeline_id is not None:

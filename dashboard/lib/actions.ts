@@ -233,7 +233,7 @@ export async function actionGetFlowState(
   }
 }
 
-// Polling helper for background sync: no revalidation, tiny GET (8s timeout).
+// Polling helper for background sync: no revalidation, tiny GET.
 export async function actionGetSourceStatus(
   id: string,
 ): Promise<ActionResult & { status?: string; errorDetail?: string }> {

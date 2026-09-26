@@ -48,8 +48,11 @@ function friendlyMessage(status: number, detail: string): string {
   }
 }
 
-const GET_TIMEOUT_MS = 8000;
-const MUTATION_TIMEOUT_MS = 15000;
+// Raised from 8s: backend /api/dashboard p50 was ~14-20s due to N+1
+// queries (now batched, target <2s). 25s is a safety net only —
+// the real fix is backend batching, not this timeout.
+const GET_TIMEOUT_MS = 25000;
+const MUTATION_TIMEOUT_MS = 30000;
 
 function timeoutFor(init: RequestInit): number {
   const m = (init.method ?? "GET").toUpperCase();
