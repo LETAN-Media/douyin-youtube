@@ -54,17 +54,38 @@ def _chat(system: str, user: str, max_tokens: int = 1500) -> str | None:
             timeout=60.0,
         )
         resp.raise_for_status()
-        # The gateway may return the OpenAI envelope or raw text; never
-        # assume JSON here (resp.json() raises on plain-text bodies).
+        # The gateway may return the OpenAI envelope (sometimes with
+        # trailing junk that breaks resp.json()) or raw text; never assume
+        # a clean JSON body here.
+        body = resp.text or ""
         try:
-            data = json.loads(resp.text)
+            data = json.loads(body)
+            if isinstance(data, dict):
+                content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+                if content:
+                    return content
         except (json.JSONDecodeError, ValueError):
-            return resp.text.strip() or None
-        if isinstance(data, dict):
-            return ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
-        return resp.text.strip() or None
+            pass
+        # Fall back to the message content inside a (possibly trailed)
+        # envelope before treating the whole body as model text.
+        content = _envelope_content(body)
+        if content:
+            return content
+        return body.strip() or None
     except Exception as exc:
         logger.warning("AI research call failed: %s", exc)
+        return None
+
+
+def _envelope_content(body: str) -> str | None:
+    """Extract choices[0].message.content from a possibly-trailing envelope."""
+    try:
+        match = re.search(r'"content"\s*:\s*"', body)
+        if not match:
+            return None
+        value, _ = json.JSONDecoder().raw_decode(body, match.end() - 1)
+        return value if isinstance(value, str) and value.strip() else None
+    except (json.JSONDecodeError, ValueError):
         return None
 
 
