@@ -6026,9 +6026,14 @@ def get_channel_analytics_endpoint(
     )
     from app.youtube_analytics import resolve_range, summarize_daily
 
+    import time as _time
+
+    _at0 = _time.perf_counter()
+    _at = {}
     d = _require_yt_channel(db, destination_id)
     status = analytics_status(db, d)
     s, e = resolve_range(range, start, end)
+    _at["base_ms"] = int((_time.perf_counter() - _at0) * 1000)
     rows = list(
         db.execute(
             select(YouTubeChannelAnalyticsDaily)
@@ -6051,6 +6056,9 @@ def get_channel_analytics_endpoint(
         }
         for r in rows
     ]
+    import time as _time2
+
+    _t = _time2.perf_counter()
     tops = list(
         db.execute(
             select(YouTubeVideoAnalyticsDaily)
@@ -6062,7 +6070,10 @@ def get_channel_analytics_endpoint(
         .scalars()
         .all()
     )
+    _at["tops_ms"] = int((_time2.perf_counter() - _t) * 1000)
     # Enrich top videos with titles/thumbnails from own publications.
+    # Batched: one publications query + one videos IN query (no per-row get).
+    _t = _time2.perf_counter()
     pubs = {
         (p.external_post_id or ""): p
         for p in db.execute(
@@ -6073,14 +6084,22 @@ def get_channel_analytics_endpoint(
         .scalars()
         .all()
     }
+    from app.models import DouyinVideo as _DV
+
+    _need_vids = list({
+        p.douyin_video_id for p in pubs.values() if p.douyin_video_id
+    })
+    _videos: dict[str, Any] = {}
+    if _need_vids:
+        for _v in db.execute(
+            select(_DV).where(_DV.id.in_(_need_vids))
+        ).scalars().all():
+            _videos[str(_v.id)] = _v
+    _at["enrich_ms"] = int((_time2.perf_counter() - _t) * 1000)
     top_videos = []
     for t in tops[:50]:
         pub = pubs.get(t.video_id or "")
-        video = None
-        if pub is not None:
-            from app.models import DouyinVideo as _DV
-
-            video = db.get(_DV, pub.douyin_video_id)
+        video = _videos.get(str(pub.douyin_video_id)) if pub is not None else None
         top_videos.append(
             {
                 "video_id": t.video_id,
@@ -6108,6 +6127,15 @@ def get_channel_analytics_endpoint(
         maybe_background_analytics_refresh(db, d)
     except Exception:
         pass
+    import time as _time3
+
+    _total = int((_time3.perf_counter() - _at0) * 1000)
+    logger.info(
+        "analytics.total_ms=%d analytics.base_ms=%d analytics.tops_ms=%d "
+        "analytics.enrich_ms=%d analytics.days=%d analytics.tops=%d",
+        _total, _at.get("base_ms", 0), _at.get("tops_ms", 0),
+        _at.get("enrich_ms", 0), len(daily), len(top_videos),
+    )
     return {
         "destination_id": destination_id,
         "range": range, "start": s, "end": e,
@@ -6154,9 +6182,12 @@ def get_channel_research_endpoint(
     db: Session = Depends(get_db),
 ):
     """Latest research run + items from DB. Never calls YouTube/AI on load."""
+    import time as _rtime
+
     from app.models import YouTubeResearchItem, YouTubeResearchRun
     from app.research_service import get_latest_run
 
+    _rt0 = _rtime.perf_counter()
     _require_yt_channel(db, destination_id)
     run = get_latest_run(db, destination_id)
     if run is None:
@@ -6193,6 +6224,14 @@ def get_channel_research_endpoint(
         }
         for i in items if i.kind == "hashtag"
     ]
+    import time as _rtime2
+
+    logger.info(
+        "research.total_ms=%d research.items=%d research.ai_kb=%d",
+        int((_rtime2.perf_counter() - _rt0) * 1000),
+        len(items),
+        len(str(run.ai_output or "")) // 1024,
+    )
     return {
         "destination_id": destination_id, "status": run.status,
         "run": {
