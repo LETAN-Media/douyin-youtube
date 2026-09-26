@@ -315,7 +315,9 @@ def analyze_trends(
         },
         ensure_ascii=False,
     )
-    raw = _chat(system, user)
+    # Full-schema analysis needs headroom: prose-first replies get cut
+    # at low caps and become unparseable.
+    raw = _chat(system, user, max_tokens=3000)
     data = _extract_json(raw)
     if data is None and raw:
         # Strict retry as a CONVERSION task (much easier for the model
@@ -326,6 +328,7 @@ def analyze_trends(
             + " Convert the previous analysis below into ONLY the JSON object. "
             "START with { and END with }. No prose.",
             "Previous analysis to convert:\n" + raw[:4000],
+            max_tokens=3000,
         )
         data = _extract_json(raw)
     if data is None:
