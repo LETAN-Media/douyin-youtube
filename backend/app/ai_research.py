@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -60,23 +61,66 @@ def _chat(system: str, user: str, max_tokens: int = 1500) -> str | None:
         return None
 
 
+def _balanced_objects(text: str) -> list[str]:
+    """Yield top-level {...} spans via brace matching (string-aware)."""
+    spans: list[str] = []
+    depth = 0
+    start: int | None = None
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    spans.append(text[start : i + 1])
+                    start = None
+    return spans
+
+
 def _extract_json(text: str | None) -> dict[str, Any] | None:
     if not text:
         return None
     cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re_sub_fence(cleaned)
+    # Prefer fenced code blocks (may be several).
+    if "```" in cleaned:
+        blocks = re.findall(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
+        for b in blocks:
+            try:
+                parsed = json.loads(b.strip())
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                continue
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
     except (json.JSONDecodeError, ValueError):
         pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start >= 0 and end > start:
+    # Fall back to first balanced object that parses (models often emit
+    # prose + JSON or multiple JSON blocks).
+    for span in _balanced_objects(cleaned):
         try:
-            return json.loads(cleaned[start : end + 1])
+            parsed = json.loads(span)
+            if isinstance(parsed, dict):
+                return parsed
         except (json.JSONDecodeError, ValueError):
-            return None
+            continue
     return None
 
 
