@@ -27,7 +27,12 @@ def _ai_conf() -> tuple[bool, str, str, str]:
     base_url = (
         settings.ai_base_url or os.getenv("AI_BASE_URL", "https://api.toolnet.tech/v1")
     ).rstrip("/")
-    model = settings.ai_model or os.getenv("AI_MODEL", "youtube-douyin")
+    model = (
+        getattr(settings, "ai_research_model", "")
+        or os.getenv("AI_RESEARCH_MODEL", "")
+        or settings.ai_model
+        or os.getenv("AI_MODEL", "youtube-douyin")
+    )
     return enabled, api_key, base_url, model
 
 

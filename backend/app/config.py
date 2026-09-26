@@ -140,6 +140,11 @@ class Settings(BaseSettings):
     comment_scan_videos_per_channel: int = 5
     comment_threads_max_pages: int = 2
 
+    # Dedicated model for AI trend research. Empty = fall back to ai_model.
+    # The metadata fine-tune does not follow research JSON schemas; a
+    # general instruction model (e.g. groq/qwen/qwen3.8-27b) does.
+    ai_research_model: str = ""
+
     # ---- YouTube Trend Research quota safety ----
     # Page loads only read DB/cache. Manual Refresh triggers research only
     # when cache is expired (unless force=true for admin).
