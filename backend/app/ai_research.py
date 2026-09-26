@@ -54,8 +54,15 @@ def _chat(system: str, user: str, max_tokens: int = 1500) -> str | None:
             timeout=60.0,
         )
         resp.raise_for_status()
-        data = resp.json()
-        return ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+        # The gateway may return the OpenAI envelope or raw text; never
+        # assume JSON here (resp.json() raises on plain-text bodies).
+        try:
+            data = json.loads(resp.text)
+        except (json.JSONDecodeError, ValueError):
+            return resp.text.strip() or None
+        if isinstance(data, dict):
+            return ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+        return resp.text.strip() or None
     except Exception as exc:
         logger.warning("AI research call failed: %s", exc)
         return None
