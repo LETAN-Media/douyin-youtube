@@ -130,6 +130,29 @@ def run_migrations() -> None:
                     )
         except Exception as exc:
             logger.warning("Analytics tables create skipped: %s", exc)
+        # YouTube counts can exceed int32 (viral videos > 2.1B views).
+        for _tbl, _col in [
+            ("youtube_channel_analytics_daily", "views"),
+            ("youtube_channel_analytics_daily", "likes"),
+            ("youtube_channel_analytics_daily", "comments"),
+            ("youtube_channel_analytics_daily", "shares"),
+            ("youtube_channel_analytics_daily", "subs_gained"),
+            ("youtube_channel_analytics_daily", "subs_lost"),
+            ("youtube_video_analytics_daily", "views"),
+            ("youtube_video_analytics_daily", "likes"),
+            ("youtube_video_analytics_daily", "comments"),
+            ("youtube_video_analytics_daily", "subs_gained"),
+            ("youtube_research_items", "views"),
+        ]:
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE {_tbl} ALTER COLUMN {_col} TYPE BIGINT"
+                        )
+                    )
+            except Exception:
+                logger.info("bigint %s.%s skipped", _tbl, _col)
         for _tbl, _col, _typ in [
             ("destinations", "research_region", "VARCHAR(10) DEFAULT 'VN'"),
         ]:

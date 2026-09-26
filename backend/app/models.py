@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -1673,15 +1674,15 @@ class YouTubeChannelAnalyticsDaily(Base):
     )
     channel_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
-    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     watch_minutes: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     avg_view_duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     avg_view_percentage: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    likes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    comments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    shares: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    subs_gained: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    subs_lost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    likes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    comments: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    shares: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    subs_gained: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    subs_lost: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -1710,12 +1711,12 @@ class YouTubeVideoAnalyticsDaily(Base):
     date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     title: Mapped[str | None] = mapped_column(String(400), nullable=True)
     thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     watch_minutes: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     avg_view_duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    likes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    comments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    subs_gained: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    likes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    comments: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    subs_gained: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -1780,7 +1781,7 @@ class YouTubeResearchItem(Base):
     title: Mapped[str | None] = mapped_column(String(400), nullable=True)
     channel_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
     thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     views_per_hour: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     age_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
     trend_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
