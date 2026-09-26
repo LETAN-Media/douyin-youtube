@@ -1790,3 +1790,125 @@ class YouTubeResearchItem(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
+
+
+class YouTubeChannelDNA(Base):
+    """Per-destination Content DNA. NEVER shared across channels.
+
+    locked_hashtags/locked_tags are admin-owned: AI must preserve them
+    verbatim and may only PROPOSE changes via suggestions.
+    """
+
+    __tablename__ = "youtube_channel_dna"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True,
+    )
+    primary_niche: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    secondary_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    audience_profile: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_language: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    target_regions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    content_style: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_style: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_patterns: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    core_keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    locked_hashtags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    locked_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    winning_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    weak_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    avoid_topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class YouTubeContentFingerprint(Base):
+    """Normalized content understanding per publication (pre-title step)."""
+
+    __tablename__ = "youtube_content_fingerprints"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    publication_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("publications.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True,
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    fingerprint: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class YouTubePerformanceSnapshot(Base):
+    """Performance checkpoints per video: 1h/6h/24h/72h/7d."""
+
+    __tablename__ = "youtube_performance_snapshots"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    video_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    checkpoint: Mapped[str] = mapped_column(String(10), nullable=False)
+    views: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    watch_minutes: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_view_duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    likes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    comments: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    subs_gained: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    traffic_source: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "destination_id", "video_id", "checkpoint",
+            name="uq_yt_perf_dest_video_checkpoint",
+        ),
+    )
+
+
+class YouTubeDNASuggestion(Base):
+    """Admin-confirm-only proposals (locked fields NEVER auto-mutate)."""
+
+    __tablename__ = "youtube_dna_suggestions"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # suggest_core_hashtag | suggest_core_tag | winning_topic | weak_topic
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # pending | applied | dismissed
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )

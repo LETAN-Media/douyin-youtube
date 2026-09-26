@@ -108,10 +108,14 @@ def run_migrations() -> None:
         except Exception as exc:
             logger.warning("Platform tables create skipped: %s", exc)
 
-        # YouTube Analytics + Trend Research tables (additive only)
+        # YouTube Analytics + Trend Research + Content DNA tables (additive only)
         try:
             from app.models import (
                 YouTubeChannelAnalyticsDaily,
+                YouTubeChannelDNA,
+                YouTubeContentFingerprint,
+                YouTubeDNASuggestion,
+                YouTubePerformanceSnapshot,
                 YouTubeResearchItem,
                 YouTubeResearchRun,
                 YouTubeVideoAnalyticsDaily,
@@ -122,6 +126,10 @@ def run_migrations() -> None:
                 YouTubeVideoAnalyticsDaily,
                 YouTubeResearchRun,
                 YouTubeResearchItem,
+                YouTubeChannelDNA,
+                YouTubeContentFingerprint,
+                YouTubePerformanceSnapshot,
+                YouTubeDNASuggestion,
             ):
                 if not table_exists(connection, _model.__table__.name):
                     logger.info("Creating %s table", _model.__table__.name)

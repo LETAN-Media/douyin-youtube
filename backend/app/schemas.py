@@ -592,6 +592,10 @@ class ManualMetadataItem(BaseModel):
     content_match: bool | None = None
     content_match_reason: str | None = None
     match_level: Literal["match", "borderline", "mismatch"] | None = None
+    # Additive Content DNA fields (empty when channel has no DNA).
+    content_fingerprint: dict[str, Any] | None = None
+    core_hashtags: list[str] = Field(default_factory=list)
+    dynamic_hashtags: list[str] = Field(default_factory=list)
 
 
 class ManualMetadataRequest(BaseModel):

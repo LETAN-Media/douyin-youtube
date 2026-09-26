@@ -3580,6 +3580,9 @@ def manual_metadata_endpoint(
                     content_match=gen.get("content_match"),
                     content_match_reason=gen.get("content_match_reason"),
                     match_level=gen.get("match_level"),
+                    content_fingerprint=gen.get("content_fingerprint"),
+                    core_hashtags=gen.get("core_hashtags") or [],
+                    dynamic_hashtags=gen.get("dynamic_hashtags") or [],
                 )
         return ManualMetadataResponse(
             metadata_mode="separate",
@@ -3607,6 +3610,9 @@ def manual_metadata_endpoint(
             content_match=gen.get("content_match"),
             content_match_reason=gen.get("content_match_reason"),
             match_level=gen.get("match_level"),
+            content_fingerprint=gen.get("content_fingerprint"),
+            core_hashtags=gen.get("core_hashtags") or [],
+            dynamic_hashtags=gen.get("dynamic_hashtags") or [],
         )
 
     return ManualMetadataResponse(
@@ -3754,6 +3760,21 @@ def manual_publish_endpoint(
             pub.title = title
             pub.description = description
             db.flush()
+
+        # ---- Content DNA fingerprint (pre-title understanding, per video) ----
+        try:
+            from app.channel_dna import build_fingerprint_heuristic, save_fingerprint
+
+            _lang = (
+                (dest.metadata_language if dest else None)
+                or (pipeline.language if pipeline else "en")
+            )
+            save_fingerprint(
+                db, pub.id, dest.id,
+                build_fingerprint_heuristic(title, description, _lang),
+            )
+        except Exception:
+            logger.warning("fingerprint save skipped pub=%s", pub.id, exc_info=True)
 
         # ---- Native YouTube publishing intent ----
         from app.youtube_scheduling import (
@@ -6272,6 +6293,353 @@ def generate_research_hashtags_endpoint(
         "destination_id": destination_id, "language": lang,
         "hashtags": _ai.generate_hashtags(run.niche, stats, lang, count),
     }
+
+
+@app.get(
+    "/api/channels/{destination_id}/dna",
+    dependencies=[Depends(require_admin)],
+)
+def get_channel_dna_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """Per-channel Content DNA (never shared across channels)."""
+    from app.channel_dna import dna_to_dict, get_dna, get_or_create_dna
+
+    d = _require_yt_channel(db, destination_id)
+    dna = get_dna(db, destination_id)
+    if dna is None:
+        dna = get_or_create_dna(db, d)
+        db.commit()
+        db.refresh(dna)
+    return {"destination_id": destination_id, "dna": dna_to_dict(dna)}
+
+
+@app.patch(
+    "/api/channels/{destination_id}/dna",
+    dependencies=[Depends(require_admin)],
+)
+def update_channel_dna_endpoint(
+    destination_id: str,
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+):
+    """Save & Lock: admin-only DNA mutation (locked fields included)."""
+    from app.channel_dna import dna_to_dict, get_or_create_dna, update_dna
+
+    d = _require_yt_channel(db, destination_id)
+    dna = get_or_create_dna(db, d)
+    dna = update_dna(db, dna, payload or {}, admin_confirmed=True)
+    return {"destination_id": destination_id, "dna": dna_to_dict(dna)}
+
+
+@app.post(
+    "/api/channels/{destination_id}/dna/suggest-hashtags",
+    dependencies=[Depends(require_admin)],
+)
+def suggest_dna_hashtags_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """AI-suggest core hashtags from channel history + research (proposal only)."""
+    from app import trend_research as _tr
+    from app.channel_dna import get_or_create_dna
+    from app.models import YouTubeResearchItem, YouTubeResearchRun
+
+    d = _require_yt_channel(db, destination_id)
+    dna = get_or_create_dna(db, d)
+    db.commit()
+    run = db.execute(
+        select(YouTubeResearchRun)
+        .where(YouTubeResearchRun.destination_id == destination_id)
+        .where(YouTubeResearchRun.status == "completed")
+        .order_by(YouTubeResearchRun.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    stats: list[dict[str, Any]] = []
+    if run is not None:
+        items = list(
+            db.execute(
+                select(YouTubeResearchItem)
+                .where(YouTubeResearchItem.run_id == run.id)
+                .where(YouTubeResearchItem.kind == "hashtag")
+                .order_by(YouTubeResearchItem.trend_score.desc())
+                .limit(15)
+            )
+            .scalars()
+            .all()
+        )
+        stats = [
+            {
+                "tag": i.title, "frequency": (i.evidence_json or {}).get("frequency", 0),
+                "recent_frequency": (i.evidence_json or {}).get("recent_frequency", 0),
+                "trend_score": i.trend_score,
+                "channel_fit_score": i.channel_fit_score,
+            }
+            for i in items
+        ]
+    if not stats:
+        pubs = db.execute(
+            select(Publication)
+            .where(Publication.destination_id == destination_id)
+            .where(Publication.status == "published")
+            .order_by(Publication.published_at.desc().nullslast())
+            .limit(30)
+        ).scalars().all()
+        counter: dict[str, int] = {}
+        for p in pubs:
+            for h in _tr.extract_hashtags(f"{p.title or ''} {p.description or ''}"):
+                counter[h] = counter.get(h, 0) + 1
+        stats = [
+            {"tag": t, "frequency": c, "recent_frequency": 0, "trend_score": 0, "channel_fit_score": 50}
+            for t, c in sorted(counter.items(), key=lambda kv: kv[1], reverse=True)[:15]
+        ]
+    from app.models import YouTubeChannelDNA as _DNA
+
+    _ = _DNA
+    return {
+        "destination_id": destination_id,
+        "suggestions": stats[:10],
+        "locked": list((dna.locked_hashtags if dna else []) or []),
+    }
+
+
+@app.post(
+    "/api/channels/{destination_id}/dna/suggest-tags",
+    dependencies=[Depends(require_admin)],
+)
+def suggest_dna_tags_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """AI-suggest core YouTube tags from niche + history (proposal only)."""
+    from app import trend_research as _tr
+    from app.channel_dna import get_or_create_dna
+
+    d = _require_yt_channel(db, destination_id)
+    dna = get_or_create_dna(db, d)
+    db.commit()
+    pubs = db.execute(
+        select(Publication)
+        .where(Publication.destination_id == destination_id)
+        .where(Publication.status == "published")
+        .order_by(Publication.published_at.desc().nullslast())
+        .limit(30)
+    ).scalars().all()
+    counter: dict[str, int] = {}
+    for p in pubs:
+        for tok in _tr.tokenize(f"{p.title or ''}"):
+            counter[tok] = counter.get(tok, 0) + 1
+    niche = list((dna.core_keywords if dna else []) or [])
+    ranked = sorted(counter.items(), key=lambda kv: kv[1], reverse=True)
+    suggestions = [t for t, _ in ranked[:15] if t not in {k.lower() for k in niche}]
+    return {
+        "destination_id": destination_id,
+        "suggestions": suggestions,
+        "locked": list((dna.locked_tags if dna else []) or []),
+    }
+
+
+@app.post(
+    "/api/channels/{destination_id}/dna/titles",
+    dependencies=[Depends(require_admin)],
+)
+def dna_title_candidates_endpoint(
+    destination_id: str,
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+):
+    """5 title candidates grounded in fingerprint + DNA + trends."""
+    from app.channel_dna import dna_to_dict, generate_title_candidates, get_or_create_dna
+
+    d = _require_yt_channel(db, destination_id)
+    dna = get_or_create_dna(db, d)
+    db.commit()
+    fingerprint = payload.get("fingerprint") or {}
+    if not isinstance(fingerprint, dict):
+        fingerprint = {}
+    trends = payload.get("trends") or []
+    titles = generate_title_candidates(
+        fingerprint, dna_to_dict(dna), trends if isinstance(trends, list) else [], count=5
+    )
+    return {"destination_id": destination_id, "titles": titles}
+
+
+@app.get(
+    "/api/channels/{destination_id}/dna/suggestions",
+    dependencies=[Depends(require_admin)],
+)
+def list_dna_suggestions_endpoint(
+    destination_id: str,
+    status: str = Query(default="pending"),
+    db: Session = Depends(get_db),
+):
+    from app.models import YouTubeDNASuggestion
+
+    _require_yt_channel(db, destination_id)
+    q = select(YouTubeDNASuggestion).where(
+        YouTubeDNASuggestion.destination_id == destination_id
+    )
+    if status and status != "all":
+        q = q.where(YouTubeDNASuggestion.status == status)
+    rows = list(
+        db.execute(q.order_by(YouTubeDNASuggestion.created_at.desc()).limit(100))
+        .scalars()
+        .all()
+    )
+    return {
+        "destination_id": destination_id,
+        "items": [
+            {
+                "id": r.id, "kind": r.kind, "payload": r.payload or {},
+                "reason": r.reason, "status": r.status,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post(
+    "/api/channels/{destination_id}/dna/suggestions/{suggestion_id}/apply",
+    dependencies=[Depends(require_admin)],
+)
+def apply_dna_suggestion_endpoint(
+    destination_id: str,
+    suggestion_id: str,
+    db: Session = Depends(get_db),
+):
+    """Admin confirms a suggestion — the ONLY learning→DNA mutation path."""
+    from app.channel_dna import apply_suggestion
+
+    _require_yt_channel(db, destination_id)
+    try:
+        return apply_suggestion(db, suggestion_id, destination_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/channels/{destination_id}/dna/suggestions/{suggestion_id}/dismiss",
+    dependencies=[Depends(require_admin)],
+)
+def dismiss_dna_suggestion_endpoint(
+    destination_id: str,
+    suggestion_id: str,
+    db: Session = Depends(get_db),
+):
+    from app.models import YouTubeDNASuggestion
+
+    _require_yt_channel(db, destination_id)
+    sug = db.get(YouTubeDNASuggestion, suggestion_id)
+    if sug is None or sug.destination_id != destination_id:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    sug.status = "dismissed"
+    db.commit()
+    return {"ok": True}
+
+
+@app.post(
+    "/api/channels/{destination_id}/dna/performance/collect",
+    status_code=202,
+    dependencies=[Depends(require_admin)],
+)
+def collect_dna_performance_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """Snapshot published-video performance at due checkpoints (background)."""
+    from app.youtube import destination_analytics_scope_status
+
+    d = _require_yt_channel(db, destination_id)
+    ok, reason = destination_analytics_scope_status(d)
+    if not ok:
+        raise HTTPException(status_code=409, detail=reason or "RECONNECT_REQUIRED")
+    import threading as _th
+
+    _th.Thread(
+        target=_dna_performance_job, args=(destination_id,), daemon=True
+    ).start()
+    return {"ok": True, "destination_id": destination_id, "status": "queued"}
+
+
+def _dna_performance_job(destination_id: str) -> None:
+    from app.channel_dna import PERF_CHECKPOINTS, record_performance_snapshot
+    from app.db import SessionLocal
+    from app.youtube import build_destination_client
+    from app.youtube_analytics import build_analytics_client
+
+    try:
+        with SessionLocal() as db:
+            dest = db.get(Destination, destination_id)
+            if dest is None:
+                return
+            pubs = db.execute(
+                select(Publication)
+                .where(Publication.destination_id == destination_id)
+                .where(Publication.status == "published")
+                .where(Publication.external_post_id.is_not(None))
+                .where(Publication.published_at.is_not(None))
+            ).scalars().all()
+            if not pubs:
+                return
+            creds, _yt = build_destination_client(db, destination_id)
+            aclient = build_analytics_client(creds)
+            now = utcnow()
+            for p in pubs:
+                vid = p.external_post_id or ""
+                age_h = (now - p.published_at).total_seconds() / 3600.0 if p.published_at else 0
+                due = [c for c, h in (
+                    ("1h", 1), ("6h", 6), ("24h", 24), ("72h", 72), ("7d", 168),
+                ) if age_h >= h]
+                if not due:
+                    continue
+                try:
+                    resp = aclient.reports().query(
+                        ids=f"channel=={dest.external_account_id}",
+                        startDate="2020-01-01",
+                        endDate=now.date().isoformat(),
+                        metrics="views,estimatedMinutesWatched,averageViewDuration,likes,comments,subscribersGained",
+                        dimensions="video",
+                        filters=f"video=={vid}",
+                        sort="-views",
+                        maxResults=1,
+                    ).execute()
+                    headers = [h.get("name") for h in (resp.get("columnHeaders") or [])]
+                    rows = resp.get("rows") or []
+                    if not rows:
+                        continue
+                    row = dict(zip(headers, rows[0]))
+                except Exception as exc:
+                    logger.warning("perf snapshot video=%s failed: %s", vid, exc)
+                    continue
+                metrics = {
+                    "views": int(row.get("views") or 0),
+                    "watch_minutes": float(row.get("estimatedMinutesWatched") or 0.0),
+                    "avg_view_duration": float(row.get("averageViewDuration") or 0.0),
+                    "likes": int(row.get("likes") or 0),
+                    "comments": int(row.get("comments") or 0),
+                    "subs_gained": int(row.get("subscribersGained") or 0),
+                }
+                for cp in due:
+                    try:
+                        record_performance_snapshot(db, destination_id, vid, cp, metrics)
+                    except ValueError:
+                        continue
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+            try:
+                from app.channel_dna import suggest_from_performance
+
+                suggest_from_performance(db, destination_id)
+            except Exception:
+                logger.warning("dna suggestions failed dest=%s", destination_id, exc_info=True)
+    except Exception:
+        logger.exception("dna performance job failed dest=%s", destination_id)
 
 
 @app.post(

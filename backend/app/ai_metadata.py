@@ -519,10 +519,51 @@ def generate_metadata_structured(
         prompt_override=prompt_val,
     )
 
+    # ---- Channel Content DNA (additive, per-destination) ----
+    # Fingerprint is computed BEFORE any title exists; locked hashtags/tags
+    # are enforced AFTER generation. When no DNA exists, behavior is unchanged.
+    fingerprint: dict[str, Any] = {}
+    dna_ctx: dict[str, Any] | None = None
+    try:
+        if destination is not None and getattr(destination, "id", None):
+            from app.channel_dna import build_fingerprint_heuristic, dna_to_dict, get_dna
+            from app.db import SessionLocal as _DnaSession
+
+            _lang = (
+                destination.metadata_language
+                or (pipeline.language if pipeline else "en")
+            )
+            fingerprint = build_fingerprint_heuristic(
+                context_text[:500], context_text, _lang
+            )
+            with _DnaSession() as _ddb:
+                _dna = get_dna(_ddb, destination.id)
+                if _dna is not None:
+                    dna_ctx = dna_to_dict(_dna)
+    except Exception:
+        logger.warning("DNA context skipped", exc_info=True)
+        fingerprint, dna_ctx = {}, None
+    dna_section = ""
+    if fingerprint or dna_ctx:
+        dna_section = (
+            "\n\nCONTENT FINGERPRINT (understand this content first, "
+            "then write the title from it — never title before understanding):\n"
+            + json.dumps(
+                {**(fingerprint or {}), "channel_dna": dna_ctx or {}},
+                ensure_ascii=False,
+            )[:3000]
+        )
+        if dna_ctx and dna_ctx.get("locked_hashtags"):
+            dna_section += (
+                "\nLOCKED CORE HASHTAGS (must appear verbatim, never "
+                "remove/replace/translate/rewrite): "
+                + ", ".join(dna_ctx["locked_hashtags"])
+            )
     user_content = (
         "ORIGINAL DOUYIN CONTEXT/SHARE TEXT:\n\n"
         + context_text
         + profile_section
+        + dna_section
         + (
             f"\n\nCONTENT RELEVANCE (advisory verdict={pre_level}): "
             f"{match_reason}. Always generate YouTube title, description, "
@@ -727,6 +768,23 @@ def generate_metadata_structured(
                     if len(hashtags) == 5:
                         break
 
+        # ---- Locked core hashtags enforcement (DNA channels only) ----
+        core_hashtags: list[str] = []
+        dynamic_hashtags: list[str] = list(hashtags)
+        if dna_ctx and dna_ctx.get("locked_hashtags"):
+            try:
+                from app.channel_dna import merge_final_hashtags
+
+                merged, kept, added = merge_final_hashtags(
+                    dna_ctx.get("locked_hashtags"), hashtags
+                )
+                # AI contract is exactly 5 hashtags: locked first, then dynamic.
+                hashtags = (kept + added)[:5]
+                core_hashtags = [h for h in kept if h in hashtags]
+                dynamic_hashtags = [h for h in hashtags if h not in core_hashtags]
+            except ImportError:
+                pass
+
         hashtag_text = " ".join(hashtags)
 
         final_description = (
@@ -749,6 +807,10 @@ def generate_metadata_structured(
             "content_match": final_level != "mismatch",
             "content_match_reason": final_reason,
             "match_level": final_level,
+            # Additive DNA fields (empty when no DNA).
+            "content_fingerprint": fingerprint or {},
+            "core_hashtags": core_hashtags,
+            "dynamic_hashtags": dynamic_hashtags,
         }
 
     except Exception:

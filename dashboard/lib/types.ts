@@ -310,6 +310,10 @@ export interface ManualMetadataItem {
   content_match?: boolean | null;
   content_match_reason?: string | null;
   match_level?: "match" | "borderline" | "mismatch" | null;
+  // Content DNA split (empty when channel has no DNA).
+  content_fingerprint?: Record<string, unknown> | null;
+  core_hashtags?: string[];
+  dynamic_hashtags?: string[];
 }
 
 export interface ManualMetadataResult {

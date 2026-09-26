@@ -39,6 +39,7 @@ import { YouTubePublishSelector } from "@/components/YouTubePublishSelector";
 import { UpcomingScheduled } from "@/components/UpcomingScheduled";
 import { ChannelAnalytics } from "@/components/ChannelAnalytics";
 import { ChannelResearch } from "@/components/ChannelResearch";
+import { ChannelDNA } from "@/components/ChannelDNA";
 
 function formatDuration(sec?: number | null): string {
   if (sec == null || sec <= 0) return "00:00";
@@ -68,6 +69,7 @@ type TabType =
   | "published"
   | "analytics"
   | "research"
+  | "dna"
   | "comments"
   | "ai_profile"
   | "settings";
@@ -116,6 +118,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [hashtags, setHashtags] = useState("");
+  const [coreHashtags, setCoreHashtags] = useState<string[]>([]);
+  const [dynamicHashtags, setDynamicHashtags] = useState<string[]>([]);
   const [generatingMetadata, setGeneratingMetadata] = useState(false);
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [contentMatchNotice, setContentMatchNotice] = useState<{ match: boolean; level: "match" | "borderline" | "mismatch"; reason: string } | null>(null);
@@ -158,6 +162,8 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
           setTitle(meta.title);
           setDescription(meta.description);
           setHashtags(meta.hashtags.join(" "));
+          setCoreHashtags(meta.core_hashtags ?? []);
+          setDynamicHashtags(meta.dynamic_hashtags ?? []);
           const level = (meta as { match_level?: string }).match_level ?? (meta.content_match === false ? "mismatch" : "match");
           if (level === "mismatch") {
             setContentMatchNotice({ match: false, level: "mismatch", reason: meta.content_match_reason || "Video không khớp với niche của kênh này — vẫn đăng được, bạn kiểm tra lại nhé" });
@@ -1322,6 +1328,19 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
 
         <button
           type="button"
+          onClick={() => setActiveTab("dna")}
+          className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
+            activeTab === "dna"
+              ? "border-indigo-600 text-indigo-700"
+              : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
+          }`}
+        >
+          <IconSparkles size={15} />
+          DNA
+        </button>
+
+        <button
+          type="button"
           onClick={() => setActiveTab("comments")}
           className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
             activeTab === "comments"
@@ -1753,6 +1772,36 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                       className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none"
                     />
                   </div>
+
+                  {(coreHashtags.length > 0 || dynamicHashtags.length > 0) ? (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                      <p className="text-[11px] font-extrabold text-slate-600">Hashtag split (Channel DNA)</p>
+                      {coreHashtags.length > 0 ? (
+                        <div className="mt-1.5">
+                          <p className="text-[10px] font-bold text-slate-500">CORE → inherited from channel (locked)</p>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {coreHashtags.map((h) => (
+                              <span key={h} className="rounded-full bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-bold text-white">
+                                {h} 🔒
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      {dynamicHashtags.length > 0 ? (
+                        <div className="mt-1.5">
+                          <p className="text-[10px] font-bold text-slate-500">DYNAMIC → generated for this video</p>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {dynamicHashtags.map((h) => (
+                              <span key={h} className="rounded-full bg-indigo-100 px-2 py-0.5 font-mono text-[10px] font-bold text-indigo-700">
+                                {h}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div>
                     <label className="text-xs font-bold text-slate-600">Hashtags (5 hashtags):</label>
@@ -2334,6 +2383,15 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               setActiveTab("manual");
             }}
           />
+        </Card>
+      )}
+
+      {/* ============================================================ */}
+      {/* TAB: CHANNEL DNA (AI Growth → Channel DNA)                   */}
+      {/* ============================================================ */}
+      {activeTab === "dna" && (
+        <Card className="p-5 sm:p-6">
+          <ChannelDNA destinationId={channel.destination_id} />
         </Card>
       )}
 

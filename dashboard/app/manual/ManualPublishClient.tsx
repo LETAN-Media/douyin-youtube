@@ -74,6 +74,8 @@ export function ManualPublishClient({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [hashtags, setHashtags] = useState("");
+  const [coreHashtags, setCoreHashtags] = useState<string[]>([]);
+  const [dynamicHashtags, setDynamicHashtags] = useState<string[]>([]);
 
   // Metadata form state (separate mode: by dest id)
   const [separateMetadata, setSeparateMetadata] = useState<
@@ -176,6 +178,8 @@ export function ManualPublishClient({
           setTitle(data.same.title);
           setDescription(data.same.description);
           setHashtags(data.same.hashtags.join(" "));
+          setCoreHashtags(data.same.core_hashtags ?? []);
+          setDynamicHashtags(data.same.dynamic_hashtags ?? []);
         }
       } catch (err: unknown) {
         setMetadataError(err instanceof Error ? err.message : "Tạo metadata AI thất bại");
@@ -957,6 +961,36 @@ export function ManualPublishClient({
                       className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                     />
                   </div>
+
+                  {(coreHashtags.length > 0 || dynamicHashtags.length > 0) ? (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                      <p className="text-[11px] font-extrabold text-slate-600">Hashtag split (Channel DNA)</p>
+                      {coreHashtags.length > 0 ? (
+                        <div className="mt-1.5">
+                          <p className="text-[10px] font-bold text-slate-500">CORE → inherited from channel (locked)</p>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {coreHashtags.map((h) => (
+                              <span key={h} className="rounded-full bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-bold text-white">
+                                {h} 🔒
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      {dynamicHashtags.length > 0 ? (
+                        <div className="mt-1.5">
+                          <p className="text-[10px] font-bold text-slate-500">DYNAMIC → generated for this video</p>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {dynamicHashtags.map((h) => (
+                              <span key={h} className="rounded-full bg-indigo-100 px-2 py-0.5 font-mono text-[10px] font-bold text-indigo-700">
+                                {h}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div>
                     <label className="text-xs font-bold text-slate-700">Hashtags (Exactly 5)</label>
