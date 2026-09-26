@@ -67,8 +67,8 @@ def analytics_status(db, destination: Destination) -> dict[str, Any]:
     from app.youtube import destination_analytics_scope_status
 
     ok, reason = destination_analytics_scope_status(destination)
-    latest = db.execute(
-        select(YouTubeChannelAnalyticsDaily)
+    latest_date = db.execute(
+        select(YouTubeChannelAnalyticsDaily.date)
         .where(YouTubeChannelAnalyticsDaily.destination_id == destination.id)
         .order_by(YouTubeChannelAnalyticsDaily.date.desc())
         .limit(1)
@@ -82,7 +82,7 @@ def analytics_status(db, destination: Destination) -> dict[str, Any]:
         "oauth_ready": ok,
         "oauth_reason": reason,
         "reconnect_required": (not ok) and reason == "RECONNECT_REQUIRED",
-        "latest_date": latest.date if latest else None,
+        "latest_date": latest_date,
         "last_refresh_at": None,
     }
 

@@ -6072,39 +6072,40 @@ def get_channel_analytics_endpoint(
     )
     _at["tops_ms"] = int((_time2.perf_counter() - _t) * 1000)
     # Enrich top videos with titles/thumbnails from own publications.
-    # Batched: one publications query + one videos IN query (no per-row get).
+    # Column-only selects (no TEXT blobs, no ORM relationships).
     _t = _time2.perf_counter()
-    pubs = {
-        (p.external_post_id or ""): p
-        for p in db.execute(
-            select(Publication)
-            .where(Publication.destination_id == destination_id)
-            .where(Publication.external_post_id.is_not(None))
+    _pub_rows = db.execute(
+        select(
+            Publication.external_post_id,
+            Publication.douyin_video_id,
+            Publication.title,
         )
-        .scalars()
-        .all()
+        .where(Publication.destination_id == destination_id)
+        .where(Publication.external_post_id.is_not(None))
+    ).all()
+    pubs = {
+        str(r[0] or ""): {"douyin_video_id": r[1], "title": r[2]}
+        for r in _pub_rows if r[0]
     }
     from app.models import DouyinVideo as _DV
 
-    _need_vids = list({
-        p.douyin_video_id for p in pubs.values() if p.douyin_video_id
-    })
+    _need_vids = list({v["douyin_video_id"] for v in pubs.values() if v["douyin_video_id"]})
     _videos: dict[str, Any] = {}
     if _need_vids:
-        for _v in db.execute(
-            select(_DV).where(_DV.id.in_(_need_vids))
-        ).scalars().all():
-            _videos[str(_v.id)] = _v
+        for _r in db.execute(
+            select(_DV.id, _DV.title, _DV.thumbnail_url).where(_DV.id.in_(_need_vids))
+        ).all():
+            _videos[str(_r[0])] = {"title": _r[1], "thumbnail_url": _r[2]}
     _at["enrich_ms"] = int((_time2.perf_counter() - _t) * 1000)
     top_videos = []
     for t in tops[:50]:
         pub = pubs.get(t.video_id or "")
-        video = _videos.get(str(pub.douyin_video_id)) if pub is not None else None
+        video = _videos.get(str(pub["douyin_video_id"])) if pub is not None else None
         top_videos.append(
             {
                 "video_id": t.video_id,
-                "title": t.title or (pub.title if pub else None) or (video.title if video else None),
-                "thumbnail": t.thumbnail_url or (video.thumbnail_url if video else None),
+                "title": t.title or (pub["title"] if pub else None) or (video["title"] if video else None),
+                "thumbnail": t.thumbnail_url or (video["thumbnail_url"] if video else None),
                 "views": t.views, "watch_minutes": t.watch_minutes,
                 "avg_view_duration": t.avg_view_duration,
                 "likes": t.likes, "comments": t.comments,
@@ -6189,22 +6190,38 @@ def get_channel_research_endpoint(
 
     _rt0 = _rtime.perf_counter()
     _require_yt_channel(db, destination_id)
-    run = get_latest_run(db, destination_id)
+    # Single roundtrip: latest run LEFT JOIN items (run repeats per row).
+    from app.models import YouTubeResearchRun as _Run
+
+    _latest_id = db.execute(
+        select(_Run.id)
+        .where(_Run.destination_id == destination_id)
+        .order_by(_Run.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if _latest_id is None:
+        return {
+            "destination_id": destination_id, "status": "empty",
+            "run": None, "videos": [], "hashtags": [],
+            "ai": None, "niche": None,
+        }
+    _rows = db.execute(
+        select(_Run, YouTubeResearchItem)
+        .outerjoin(
+            YouTubeResearchItem,
+            YouTubeResearchItem.run_id == _Run.id,
+        )
+        .where(_Run.id == _latest_id)
+        .order_by(YouTubeResearchItem.trend_score.desc())
+    ).all()
+    run = _rows[0][0] if _rows else None
     if run is None:
         return {
             "destination_id": destination_id, "status": "empty",
             "run": None, "videos": [], "hashtags": [],
             "ai": None, "niche": None,
         }
-    items = list(
-        db.execute(
-            select(YouTubeResearchItem)
-            .where(YouTubeResearchItem.run_id == run.id)
-            .order_by(YouTubeResearchItem.trend_score.desc())
-        )
-        .scalars()
-        .all()
-    )
+    items = [r[1] for r in _rows if r[1] is not None]
     videos = [
         {
             "video_id": i.video_id, "title": i.title,
