@@ -280,17 +280,13 @@ def analyze_trends(
 ) -> dict[str, Any]:
     """Deterministic-first AI analysis with validated JSON + fallback."""
     compact = []
-    for v in (ranked_videos or [])[:max_videos]:
+    for v in (ranked_videos or [])[: min(max_videos, 12)]:
         compact.append(
             {
                 "id": v.get("video_id"),
-                "title": (v.get("title") or "")[:120],
-                "channel": v.get("channel_title"),
+                "title": (v.get("title") or "")[:80],
                 "views": v.get("views"),
-                "vph": v.get("views_per_hour"),
-                "age_h": v.get("age_hours"),
                 "score": v.get("trend_score"),
-                "tags": (v.get("hashtags") or [])[:8],
             }
         )
     lang_name = {"en": "English", "vi": "Vietnamese", "zh": "Chinese"}.get(
@@ -301,19 +297,21 @@ def analyze_trends(
         "(deterministic 0-100 scores with evidence). Never invent metrics, "
         "view counts, or scores. Every claim must cite video ids from the "
         f"evidence set. Output language: {lang_name}. "
-        "Return ONLY valid JSON with keys: channel_niche, trend_summary, "
-        "hot_topics[{topic, score, why, video_ids[]}], keywords[], "
-        "hashtags[{tag, why}], title_ideas[{title, angle, hook, "
-        "primary_keyword, secondary_keywords[], channel_fit_score, "
-        "trend_relevance_score, reason}] (5-10 items, no misleading "
-        "clickbait), hooks[], channel_fit_analysis[{topic, fit_score, "
-        "note}], avoid_topics[], evidence[{video_id, note}]."
+        "START your response with the character { and END with }. No prose "
+        "before or after the JSON. JSON keys: channel_niche, trend_summary "
+        "(2 sentences), hot_topics[{topic, score, why, video_ids[]}] "
+        "(max 5), keywords[] (max 12), hashtags[{tag, why}] (max 8), "
+        "title_ideas[{title, angle, hook, primary_keyword, "
+        "secondary_keywords[], channel_fit_score, trend_relevance_score, "
+        "reason}] (5 items, no misleading clickbait), hooks[] (max 5), "
+        "channel_fit_analysis[{topic, fit_score, note}] (max 5), "
+        "avoid_topics[] (max 5), evidence[{video_id, note}] (max 8)."
     )
     user = json.dumps(
         {
-            "niche": niche,
+            "niche_kw": (niche.get("keywords") or [])[:10],
             "videos": compact,
-            "hashtags": hashtag_stats[:15],
+            "tags": [h.get("tag") for h in (hashtag_stats or [])[:8]],
         },
         ensure_ascii=False,
     )
@@ -369,8 +367,9 @@ def generate_titles(
     )
     system = (
         f"Write {count} YouTube Shorts titles in {lang_name}. No misleading "
-        "clickbait; each must fit the channel niche. Return ONLY a JSON "
-        "array of objects with keys: title, angle, hook, primary_keyword, "
+        "clickbait; each must fit the channel niche. START your response "
+        "with [ and END with ]. No prose before or after the JSON array. "
+        "Array of objects with keys: title, angle, hook, primary_keyword, "
         "secondary_keywords[], channel_fit_score (0-100), "
         "trend_relevance_score (0-100), reason."
     )
@@ -410,7 +409,8 @@ def generate_hashtags(
     system = (
         "Cluster the given hashtag statistics into a final suggestion list. "
         "Only suggest tags grounded in the evidence stats (no invented viral "
-        "tags). Return ONLY a JSON array of {tag, why, channel_fit_score}."
+        "tags). START your response with [ and END with ]. No prose before "
+        "or after the JSON array of {tag, why, channel_fit_score}."
     )
     user = json.dumps(
         {"niche": niche, "stats": hashtag_stats[:25], "language": language, "count": count},
