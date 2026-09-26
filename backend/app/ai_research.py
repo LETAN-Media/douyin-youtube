@@ -99,8 +99,8 @@ def _envelope_content(body: str) -> str | None:
         return None
 
 
-def _balanced_objects(text: str) -> list[str]:
-    """Yield top-level {...} spans via brace matching (string-aware)."""
+def _balanced_spans(text: str, open_ch: str, close_ch: str) -> list[str]:
+    """Yield top-level balanced spans via bracket matching (string-aware)."""
     spans: list[str] = []
     depth = 0
     start: int | None = None
@@ -117,11 +117,11 @@ def _balanced_objects(text: str) -> list[str]:
             continue
         if ch == '"':
             in_str = True
-        elif ch == "{":
+        elif ch == open_ch:
             if depth == 0:
                 start = i
             depth += 1
-        elif ch == "}":
+        elif ch == close_ch:
             if depth > 0:
                 depth -= 1
                 if depth == 0 and start is not None:
@@ -130,13 +130,34 @@ def _balanced_objects(text: str) -> list[str]:
     return spans
 
 
+def _balanced_objects(text: str) -> list[str]:
+    return _balanced_spans(text, "{", "}")
+
+
+def _schema_score(data: dict) -> int:
+    return sum(1 for k in RESEARCH_SCHEMA_KEYS if k in data)
+
+
 def _extract_json(text: str | None) -> dict[str, Any] | None:
     if not text:
         return None
     cleaned = text.strip()
-    # Prefer fenced code blocks (may be several).
+    # Prefer fenced code blocks (may be several); schema-matching first.
     if "```" in cleaned:
         blocks = re.findall(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
+        best: dict[str, Any] | None = None
+        best_score = 0
+        for b in blocks:
+            try:
+                parsed = json.loads(b.strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                score = _schema_score(parsed)
+                if score > best_score:
+                    best, best_score = parsed, score
+        if best is not None and best_score > 0:
+            return best
         for b in blocks:
             try:
                 parsed = json.loads(b.strip())
@@ -150,16 +171,66 @@ def _extract_json(text: str | None) -> dict[str, Any] | None:
             return parsed
     except (json.JSONDecodeError, ValueError):
         pass
-    # Fall back to first balanced object that parses (models often emit
-    # prose + JSON or multiple JSON blocks).
+    # Fall back to the balanced object with the most schema keys (models
+    # often emit prose + JSON; the API envelope scores 0 and is skipped).
+    best = None
+    best_score = 0
+    fallback = None
     for span in _balanced_objects(cleaned):
         try:
             parsed = json.loads(span)
-            if isinstance(parsed, dict):
-                return parsed
         except (json.JSONDecodeError, ValueError):
             continue
+        if isinstance(parsed, dict):
+            if fallback is None:
+                fallback = parsed
+            score = _schema_score(parsed)
+            if score > best_score:
+                best, best_score = parsed, score
+    if best is not None and best_score > 0:
+        return best
     return None
+
+
+def _extract_json_list(text: str | None, item_key: str) -> list[Any]:
+    """Best balanced [...] whose items carry item_key (title/tag)."""
+    if not text:
+        return []
+    cleaned = text.strip()
+    if "```" in cleaned:
+        for b in re.findall(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL):
+            try:
+                parsed = json.loads(b.strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(parsed, list) and parsed:
+                return parsed
+            if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
+                return parsed["items"]
+    best: list[Any] = []
+    best_score = -1
+    for span in _balanced_spans(cleaned, "[", "]"):
+        try:
+            parsed = json.loads(span)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(parsed, list) or not parsed:
+            continue
+        score = sum(
+            1 for it in parsed
+            if isinstance(it, dict) and it.get(item_key)
+        )
+        if score > best_score:
+            best, best_score = parsed, score
+    if best_score > 0:
+        return best
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return []
 
 
 def re_sub_fence(text: str) -> str:
@@ -305,8 +376,10 @@ def generate_titles(
     )
     user = json.dumps({"niche": niche, "hot_topics": hot_topics[:10]}, ensure_ascii=False)
     raw = _chat(system, user)
-    data = _extract_json(raw)
-    items = data if isinstance(data, list) else (data.get("items") if isinstance(data, dict) else None)
+    items = _extract_json_list(raw, "title")
+    if not items:
+        data = _extract_json(raw)
+        items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
         return []
     out = []
@@ -344,8 +417,10 @@ def generate_hashtags(
         ensure_ascii=False,
     )
     raw = _chat(system, user)
-    data = _extract_json(raw)
-    items = data if isinstance(data, list) else (data.get("items") if isinstance(data, dict) else None)
+    items = _extract_json_list(raw, "tag")
+    if not items:
+        data = _extract_json(raw)
+        items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
         # Deterministic fallback: top evidence stats as-is.
         return [
