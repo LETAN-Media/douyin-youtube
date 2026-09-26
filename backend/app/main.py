@@ -6072,30 +6072,32 @@ def get_channel_analytics_endpoint(
     )
     _at["tops_ms"] = int((_time2.perf_counter() - _t) * 1000)
     # Enrich top videos with titles/thumbnails from own publications.
-    # Column-only selects (no TEXT blobs, no ORM relationships).
+    # Column-only selects; skipped entirely when no tops (common empty state).
     _t = _time2.perf_counter()
-    _pub_rows = db.execute(
-        select(
-            Publication.external_post_id,
-            Publication.douyin_video_id,
-            Publication.title,
-        )
-        .where(Publication.destination_id == destination_id)
-        .where(Publication.external_post_id.is_not(None))
-    ).all()
-    pubs = {
-        str(r[0] or ""): {"douyin_video_id": r[1], "title": r[2]}
-        for r in _pub_rows if r[0]
-    }
-    from app.models import DouyinVideo as _DV
-
-    _need_vids = list({v["douyin_video_id"] for v in pubs.values() if v["douyin_video_id"]})
+    pubs: dict[str, Any] = {}
     _videos: dict[str, Any] = {}
-    if _need_vids:
-        for _r in db.execute(
-            select(_DV.id, _DV.title, _DV.thumbnail_url).where(_DV.id.in_(_need_vids))
-        ).all():
-            _videos[str(_r[0])] = {"title": _r[1], "thumbnail_url": _r[2]}
+    if tops:
+        _pub_rows = db.execute(
+            select(
+                Publication.external_post_id,
+                Publication.douyin_video_id,
+                Publication.title,
+            )
+            .where(Publication.destination_id == destination_id)
+            .where(Publication.external_post_id.is_not(None))
+        ).all()
+        pubs = {
+            str(r[0] or ""): {"douyin_video_id": r[1], "title": r[2]}
+            for r in _pub_rows if r[0]
+        }
+        from app.models import DouyinVideo as _DV
+
+        _need_vids = list({v["douyin_video_id"] for v in pubs.values() if v["douyin_video_id"]})
+        if _need_vids:
+            for _r in db.execute(
+                select(_DV.id, _DV.title, _DV.thumbnail_url).where(_DV.id.in_(_need_vids))
+            ).all():
+                _videos[str(_r[0])] = {"title": _r[1], "thumbnail_url": _r[2]}
     _at["enrich_ms"] = int((_time2.perf_counter() - _t) * 1000)
     top_videos = []
     for t in tops[:50]:
@@ -6124,8 +6126,9 @@ def get_channel_analytics_endpoint(
         except (ValueError, TypeError):
             insights = None
     # Stale-cache background refresh (fire-and-forget, returns cached now).
+    # Reuses last_refresh_at from analytics_status: no extra DB read.
     try:
-        maybe_background_analytics_refresh(db, d)
+        maybe_background_analytics_refresh(db, d, status.get("last_refresh_at"))
     except Exception:
         pass
     import time as _time3
@@ -6190,30 +6193,31 @@ def get_channel_research_endpoint(
 
     _rt0 = _rtime.perf_counter()
     _require_yt_channel(db, destination_id)
-    # Single roundtrip: latest run LEFT JOIN items (run repeats per row).
+    # Single roundtrip: latest run LEFT JOIN items via scalar subquery.
     from app.models import YouTubeResearchRun as _Run
 
-    _latest_id = db.execute(
-        select(_Run.id)
-        .where(_Run.destination_id == destination_id)
-        .order_by(_Run.created_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if _latest_id is None:
-        return {
-            "destination_id": destination_id, "status": "empty",
-            "run": None, "videos": [], "hashtags": [],
-            "ai": None, "niche": None,
-        }
     _rows = db.execute(
         select(_Run, YouTubeResearchItem)
         .outerjoin(
             YouTubeResearchItem,
             YouTubeResearchItem.run_id == _Run.id,
         )
-        .where(_Run.id == _latest_id)
+        .where(
+            _Run.id
+            == select(_Run.id)
+            .where(_Run.destination_id == destination_id)
+            .order_by(_Run.created_at.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
         .order_by(YouTubeResearchItem.trend_score.desc())
     ).all()
+    if not _rows:
+        return {
+            "destination_id": destination_id, "status": "empty",
+            "run": None, "videos": [], "hashtags": [],
+            "ai": None, "niche": None,
+        }
     run = _rows[0][0] if _rows else None
     if run is None:
         return {

@@ -73,17 +73,19 @@ def analytics_status(db, destination: Destination) -> dict[str, Any]:
         .order_by(YouTubeChannelAnalyticsDaily.date.desc())
         .limit(1)
     ).scalar_one_or_none()
-    last_refresh = db.execute(
-        select(AppSetting).where(
-            AppSetting.key == f"yt_analytics_last_refresh:{destination.id}"
-        )
-    ).scalar_one_or_none()
+    refresh_row = db.get(AppSetting, f"yt_analytics_last_refresh:{destination.id}")
+    last_refresh_at = None
+    if refresh_row is not None:
+        try:
+            last_refresh_at = json.loads(refresh_row.value).get("at")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            last_refresh_at = None
     return {
         "oauth_ready": ok,
         "oauth_reason": reason,
         "reconnect_required": (not ok) and reason == "RECONNECT_REQUIRED",
         "latest_date": latest_date,
-        "last_refresh_at": None,
+        "last_refresh_at": last_refresh_at,
     }
 
 
@@ -210,22 +212,30 @@ def _upsert_top_videos(db, dest: Destination, date_key: str, tops: list[dict]) -
         db.flush()
 
 
-def maybe_background_analytics_refresh(db, destination: Destination) -> None:
+def maybe_background_analytics_refresh(
+    db, destination: Destination, last_refresh_at: str | None = None
+) -> None:
     """Trigger a background refresh if stale (> 24/per_day h). Fire-and-forget."""
     try:
         per_day = max(1, min(4, int(getattr(settings, "youtube_analytics_refresh_per_day", 2) or 2)))
     except (TypeError, ValueError):
         per_day = 2
     interval = timedelta(hours=24.0 / per_day)
-    row = db.get(AppSetting, f"yt_analytics_last_refresh:{destination.id}")
-    if row is not None:
+    if last_refresh_at is None:
+        row = db.get(AppSetting, f"yt_analytics_last_refresh:{destination.id}")
+        if row is not None:
+            try:
+                last_refresh_at = json.loads(row.value).get("at")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                last_refresh_at = None
+    if last_refresh_at is not None:
         try:
-            last = datetime.fromisoformat(json.loads(row.value).get("at", ""))
+            last = datetime.fromisoformat(last_refresh_at)
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             if utcnow() - last < interval:
                 return
-        except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+        except (TypeError, ValueError):
             pass
     queue_analytics_refresh(destination.id)
 
