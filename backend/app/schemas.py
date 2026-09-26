@@ -47,6 +47,7 @@ class PipelineBase(BaseModel):
     source_selection_strategy: Literal["round_robin"] = "round_robin"
     backlog_threshold_days: int = 7
     timezone: str = "UTC"
+    youtube_default_publish_mode: Literal["immediate", "scheduled"] = "immediate"
 
 
 class PipelineCreate(PipelineBase):
@@ -113,6 +114,9 @@ class PipelineUpdate(BaseModel):
     backlog_threshold_days: int | None = Field(
         default=None,
         ge=1,
+    )
+    youtube_default_publish_mode: Literal["immediate", "scheduled"] | None = Field(
+        default=None,
     )
     timezone: str | None = Field(
         default=None,
@@ -365,7 +369,8 @@ class DestinationBase(BaseModel):
     )
     enabled: bool = True
     daily_upload_limit: int = 6
-    timezone: str = "UTC"
+    timezone: str = "Asia/Ho_Chi_Minh"
+    youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] = "immediate"
     upload_slots: list[str] | None = Field(
         default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
     )
@@ -417,7 +422,8 @@ class DestinationCreate(BaseModel):
     )
     enabled: bool = True
     daily_upload_limit: int = Field(default=6, ge=1, le=50)
-    timezone: str = Field(default="UTC", max_length=50)
+    timezone: str = Field(default="Asia/Ho_Chi_Minh", max_length=50)
+    youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] = "immediate"
     upload_slots: list[str] | None = Field(
         default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
     )
@@ -462,6 +468,9 @@ class DestinationUpdate(BaseModel):
     daily_upload_limit: int | None = Field(
         default=None,
         ge=1,
+    )
+    youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] | None = Field(
+        default=None,
     )
     timezone: str | None = Field(
         default=None,
@@ -525,6 +534,13 @@ class PublicationOut(BaseModel):
     error: str | None
     created_at: datetime
     updated_at: datetime
+    # Native scheduling fields (optional on old rows).
+    youtube_publish_mode: str | None = None
+    youtube_publish_at: datetime | None = None
+    youtube_schedule_timezone: str | None = None
+    youtube_scheduled: bool | None = None
+    youtube_actual_published_at: datetime | None = None
+    youtube_privacy_status: str | None = None
 
 
 class DouyinVideoOut(BaseModel):
@@ -609,6 +625,12 @@ class ManualPublishRequest(BaseModel):
     destinations_metadata: dict[str, ManualDestinationMetadataInput] = Field(default_factory=dict)
     privacy_status: Literal["public", "unlisted", "private"] = "public"
     force_duplicate: bool = False
+    # Native YouTube scheduled publishing (optional; privacy_status kept for compat).
+    youtube_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] | None = None
+    youtube_publish_at: datetime | None = None
+    youtube_publish_date: str | None = None
+    youtube_publish_time: str | None = None
+    youtube_schedule_timezone: str | None = None
 
 
 class ManualPublicationItem(BaseModel):
@@ -650,6 +672,33 @@ class PublicationRescheduleRequest(BaseModel):
 
 class PublicationPublishRequest(BaseModel):
     destination_id: str = Field(max_length=36)
+
+
+class YouTubeScheduleUpdateRequest(BaseModel):
+    """Change time for a native-scheduled video.
+
+    Accepts either canonical UTC publish_at or local date+time+timezone.
+    """
+
+    publish_at: datetime | None = None
+    publish_date: str | None = None
+    publish_time: str | None = None
+    timezone: str | None = None
+
+
+class UpcomingItem(BaseModel):
+    publication_id: str
+    destination_id: str
+    video_title: str | None = None
+    thumbnail: str | None = None
+    youtube_video_id: str | None = None
+    external_url: str | None = None
+    status: str
+    youtube_publish_mode: str | None = None
+    youtube_publish_at: datetime | None = None
+    youtube_schedule_timezone: str | None = None
+    youtube_scheduled: bool | None = None
+    preview: str | None = None
 
 
 class SourceSyncResponse(BaseModel):
@@ -720,7 +769,9 @@ class ChannelDetailResponse(BaseModel):
     fixed_hashtags: list[str] | None = None
     adaptive_hashtags: list[str] | None = None
     prompt_override: str | None = None
-    timezone: str = "UTC"
+    timezone: str = "Asia/Ho_Chi_Minh"
+    youtube_default_publish_mode: str = "immediate"
+    upload_slots: list[str] | None = None
     pipeline: dict[str, Any]
     sources: list[dict[str, Any]] = Field(default_factory=list)
     queue: list[ManualPublicationItem] = Field(default_factory=list)
@@ -764,6 +815,8 @@ class ChannelUpdateRequest(BaseModel):
     upload_slots: list[str] | None = None
     enabled: bool | None = None
     default_privacy: str | None = None
+    youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] | None = None
+    publishing_strategy: Literal["immediate", "scheduled"] | None = None
 
 
 class ChannelAddSourceRequest(BaseModel):

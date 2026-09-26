@@ -727,6 +727,50 @@ def schedule_for_destination(
             )
             continue
 
+        # Resolve native YouTube publish intent (per-channel default wins,
+        # pipeline strategy is fallback). Auto scheduler never hardcodes UTC:
+        # it uses the destination timezone for slot math.
+        dest_mode = (getattr(destination, "youtube_default_publish_mode", None) or "immediate").lower()
+        pipe_mode = (getattr(pipeline, "youtube_default_publish_mode", None) or "immediate").lower()
+        if dest_mode not in ("immediate", "scheduled", "private", "unlisted"):
+            dest_mode = "immediate"
+        if pipe_mode not in ("immediate", "scheduled", "private", "unlisted"):
+            pipe_mode = "immediate"
+        effective_mode = dest_mode if dest_mode != "immediate" else pipe_mode
+        sched_tz = destination.timezone or "UTC"
+        yt_publish_at = None
+        yt_privacy = pipeline.default_privacy or "public"
+        if effective_mode == "scheduled":
+            from app.youtube_scheduling import find_next_free_slot as _find_slot
+
+            try:
+                existing_pub_ats = db.execute(
+                    select(Publication.youtube_publish_at)
+                    .where(Publication.destination_id == destination.id)
+                    .where(Publication.youtube_publish_at.is_not(None))
+                    .where(Publication.status.in_(["scheduled", "queued", "uploading", "processing"]))
+                ).all()
+                used = {r[0].isoformat() for r in existing_pub_ats if r[0] is not None}
+            except Exception:
+                used = set()
+            yt_publish_at = _find_slot(
+                slots, sched_tz, used, now=now, allow_collision=False
+            )
+            if yt_publish_at is None:
+                logger.warning(
+                    "No free YouTube slot for destination=%s, skipping",
+                    destination.id,
+                )
+                _mark_destination_cycle(db, destination, now, REASON_WAITING_SLOT)
+                return
+            yt_privacy = "private"
+        elif effective_mode == "private":
+            yt_privacy = "private"
+        elif effective_mode == "unlisted":
+            yt_privacy = "unlisted"
+        else:
+            yt_privacy = "public"
+
         publication = Publication(
             pipeline_id=pipeline.id,
             douyin_video_id=video.id,
@@ -735,6 +779,19 @@ def schedule_for_destination(
             status="scheduled",
             scheduled_at=slot,
         )
+        # Native scheduling intent (additive columns may not exist on old SQLite
+        # test DBs — set defensively).
+        for _k, _v in {
+            "youtube_publish_mode": effective_mode,
+            "youtube_publish_at": yt_publish_at,
+            "youtube_schedule_timezone": sched_tz,
+            "youtube_scheduled": False,
+            "youtube_privacy_status": yt_privacy,
+        }.items():
+            try:
+                setattr(publication, _k, _v)
+            except Exception:
+                pass
         db.add(publication)
         try:
             db.flush()  # assign publication.id for job link
@@ -752,7 +809,7 @@ def schedule_for_destination(
             source_title=video.title,
             title=None,
             description=video.description,
-            privacy_status=pipeline.default_privacy,
+            privacy_status=yt_privacy,
             status="pending",
             pipeline_id=pipeline.id,
             source_video_id=video.video_id,
@@ -760,6 +817,16 @@ def schedule_for_destination(
             publication_id=publication.id,
             schedule_slot_key=slot_key,
         )
+        for _k, _v in {
+            "youtube_publish_mode": effective_mode,
+            "youtube_publish_at": yt_publish_at,
+            "youtube_schedule_timezone": sched_tz,
+            "youtube_scheduled": False,
+        }.items():
+            try:
+                setattr(job, _k, _v)
+            except Exception:
+                pass
         db.add(job)
 
         video.status = "scheduled"

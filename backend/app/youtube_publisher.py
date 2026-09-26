@@ -52,16 +52,35 @@ class YouTubePublisher(PublisherAdapter):
         title: str,
         description: str,
         publish_at: Any = None,
+        publish_mode: str | None = None,
+        privacy_status: str | None = None,
     ) -> dict[str, Any] | None:
         path = Path(file_path)
+        mode = (publish_mode or "").lower() or None
+        if mode is None and publish_at is not None:
+            mode = "scheduled"
+        if mode is None:
+            # Infer from explicit privacy or channel default.
+            default_mode = (getattr(self.destination, "youtube_default_publish_mode", None) or "immediate").lower()
+            if privacy_status:
+                mode = {"public": "immediate", "private": "private", "unlisted": "unlisted"}.get(
+                    privacy_status.lower(), default_mode
+                )
+            else:
+                mode = default_mode if default_mode in ("immediate", "scheduled", "private", "unlisted") else "immediate"
+        from app.youtube_scheduling import MODE_TO_PRIVACY
+
+        privacy = privacy_status or MODE_TO_PRIVACY.get(mode or "immediate", "public")
         with SessionLocal() as db:
             video_id = upload_video(
                 db=db,
                 file_path=path,
                 title=title,
                 description=description,
-                privacy_status="public",
+                privacy_status=privacy,
                 destination_id=self.destination.id,
+                publish_at=publish_at,
+                publish_mode=mode,
             )
 
         return {

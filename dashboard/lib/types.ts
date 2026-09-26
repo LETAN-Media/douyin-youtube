@@ -140,6 +140,8 @@ export interface VideoWithPublications extends InventoryVideo {
   publications: Publication[];
 }
 
+export type YouTubePublishMode = "immediate" | "scheduled" | "private" | "unlisted";
+
 export interface Destination {
   id: string;
   pipeline_id: string;
@@ -151,6 +153,7 @@ export interface Destination {
   connected: boolean;
   daily_upload_limit: number;
   timezone: string;
+  youtube_default_publish_mode?: YouTubePublishMode | null;
   upload_slots?: string[] | null;
   publish_strategy: string;
   metadata_language?: string | null;
@@ -328,6 +331,26 @@ export interface ManualPublishPayload {
   destinations_metadata?: Record<string, { title: string; description: string }>;
   privacy_status: "public" | "unlisted" | "private";
   force_duplicate?: boolean;
+  youtube_publish_mode?: YouTubePublishMode | null;
+  youtube_publish_at?: string | null;
+  youtube_publish_date?: string | null;
+  youtube_publish_time?: string | null;
+  youtube_schedule_timezone?: string | null;
+}
+
+export interface UpcomingItem {
+  publication_id: string;
+  destination_id: string;
+  video_title?: string | null;
+  thumbnail?: string | null;
+  youtube_video_id?: string | null;
+  external_url?: string | null;
+  status: string;
+  youtube_publish_mode?: string | null;
+  youtube_publish_at?: string | null;
+  youtube_schedule_timezone?: string | null;
+  youtube_scheduled?: boolean | null;
+  preview?: string | null;
 }
 
 export interface ManualPublicationItem {
@@ -489,6 +512,8 @@ export interface ChannelDetail {
   adaptive_hashtags?: string[] | boolean | null;
   prompt_override?: string | null;
   timezone: string;
+  youtube_default_publish_mode?: YouTubePublishMode | string | null;
+  upload_slots?: string[] | null;
   pipeline: ChannelPipelineInfo;
   sources: ChannelSourceItem[];
   queue: ManualPublicationItem[];

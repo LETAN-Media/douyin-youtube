@@ -190,6 +190,15 @@ class Pipeline(Base):
         default="UTC",
     )
 
+    # Publishing strategy for auto pipeline: immediate | scheduled.
+    # When scheduled, backlog videos are assigned into upload_slots.
+    youtube_default_publish_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="immediate",
+        server_default="immediate",
+    )
+
 
 class PlatformAccount(Base):
     """Global platform login shared across all pipelines/sources."""
@@ -1020,6 +1029,15 @@ class Destination(Base):
         nullable=True,
     )
 
+    # ---- Native YouTube Scheduled Publishing (per-channel defaults) ----
+    # immediate | scheduled | private | unlisted
+    youtube_default_publish_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="immediate",
+        server_default="immediate",
+    )
+
 
 class YouTubeComment(Base):
     """A comment fetched from a channel's own published videos.
@@ -1307,6 +1325,46 @@ class Publication(Base):
         nullable=False,
     )
 
+    # ---- Native YouTube Scheduled Publishing ----
+    # immediate | scheduled | private | unlisted
+    youtube_publish_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="immediate",
+        server_default="immediate",
+    )
+
+    # Canonical UTC datetime for YouTube status.publishAt.
+    youtube_publish_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    youtube_schedule_timezone: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="Asia/Ho_Chi_Minh",
+        server_default="Asia/Ho_Chi_Minh",
+    )
+
+    youtube_scheduled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+
+    youtube_actual_published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Exact privacyStatus sent to YouTube (public/private/unlisted).
+    youtube_privacy_status: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
     jobs: Mapped[list["VideoJob"]] = relationship(
         back_populates="publication",
         foreign_keys="VideoJob.publication_id",
@@ -1421,6 +1479,38 @@ class VideoJob(Base):
 
     schedule_slot_key: Mapped[str | None] = mapped_column(
         String(100),
+        nullable=True,
+    )
+
+    # ---- Native YouTube Scheduled Publishing (mirrors Publication intent) ----
+    youtube_publish_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="immediate",
+        server_default="immediate",
+    )
+
+    youtube_publish_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    youtube_schedule_timezone: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="Asia/Ho_Chi_Minh",
+        server_default="Asia/Ho_Chi_Minh",
+    )
+
+    youtube_scheduled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+
+    youtube_actual_published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
     )
 

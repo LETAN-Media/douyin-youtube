@@ -92,7 +92,15 @@ export default function NewPipelinePage() {
             </div>
             <div>
               <label className={labelCls} htmlFor="upload_slots">Upload slots (cách nhau bằng dấu phẩy)</label>
-              <input id="upload_slots" name="upload_slots" defaultValue="08:00,11:00,14:00,17:00,20:00,23:00" className={inputCls} />
+              <input id="upload_slots" name="upload_slots" defaultValue="09:00,12:00,18:00,21:00" className={inputCls} />
+              <p className="mt-1 text-[11px] text-slate-500">Ví dụ backlog 20 video với slots 09:00,18:00 → video1 Sep 26 09:00, video2 Sep 26 18:00, video3 Sep 27 09:00…</p>
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="publishing_strategy">Publishing strategy</label>
+              <select id="publishing_strategy" name="publishing_strategy" defaultValue="immediate" className={inputCls}>
+                <option value="immediate">A. Upload immediately</option>
+                <option value="scheduled">B. YouTube scheduled publishing</option>
+              </select>
             </div>
             <div className="flex gap-2 pt-2">
               <Link href="/" className={`${btnSecondary} flex-1`}>Hủy</Link>

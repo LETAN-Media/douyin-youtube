@@ -35,6 +35,8 @@ import type {
   YouTubeComment,
 } from "@/lib/types";
 import { actionGetOauthUrl, actionToggleDestination, actionUpdateDestination } from "@/lib/actions";
+import { YouTubePublishSelector } from "@/components/YouTubePublishSelector";
+import { UpcomingScheduled } from "@/components/UpcomingScheduled";
 
 function formatDuration(sec?: number | null): string {
   if (sec == null || sec <= 0) return "00:00";
@@ -60,6 +62,7 @@ type TabType =
   | "sources"
   | "inventory"
   | "queue"
+  | "upcoming"
   | "published"
   | "comments"
   | "ai_profile"
@@ -100,6 +103,10 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [profileDetected, setProfileDetected] = useState<ManualResolveResult | null>(null);
 
   const [privacy, setPrivacy] = useState<"public" | "unlisted" | "private">("public");
+  const [publishMode, setPublishMode] = useState<"immediate" | "scheduled" | "private" | "unlisted">("immediate");
+  const [schedDate, setSchedDate] = useState("");
+  const [schedTime, setSchedTime] = useState("");
+  const [schedTz, setSchedTz] = useState("Asia/Ho_Chi_Minh");
   const [generateAi, setGenerateAi] = useState(true);
 
   const [title, setTitle] = useState("");
@@ -221,6 +228,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
     try {
       const fullDesc = `${description}\n\n${hashtags}`.trim();
 
+      const effPrivacy = publishMode === "immediate" ? "public" : publishMode === "scheduled" ? "private" : publishMode;
       const payload: ManualPublishPayload = {
         source_url: resolvedVideo.source_url,
         source_title: resolvedVideo.caption || resolvedVideo.video_id || "Douyin Video",
@@ -231,8 +239,12 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         metadata_mode: "same",
         title: title || resolvedVideo.caption || "",
         description: fullDesc,
-        privacy_status: privacy,
+        privacy_status: effPrivacy as "public" | "unlisted" | "private",
         force_duplicate: forceDuplicate,
+        youtube_publish_mode: publishMode,
+        youtube_publish_date: publishMode === "scheduled" && schedDate ? schedDate : undefined,
+        youtube_publish_time: publishMode === "scheduled" && schedTime ? schedTime : undefined,
+        youtube_schedule_timezone: schedTz,
       };
 
       const res = await fetch(`/api/channels/${channel.destination_id}/publish`, {
@@ -635,10 +647,13 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   // TAB: AUTO SETTINGS STATE
   // ==========================================
   const [autoSlots, setAutoSlots] = useState(
-    (detail.pipeline?.upload_slots || ["09:00", "13:00", "17:00", "21:00"]).join(", ")
+    ((detail as unknown as { upload_slots?: string[] }).upload_slots || detail.pipeline?.upload_slots || ["09:00", "12:00", "18:00", "21:00"]).join(", ")
   );
   const [autoLimit, setAutoLimit] = useState(detail.daily_upload_limit || 4);
-  const [autoTimezone, setAutoTimezone] = useState(detail.timezone || "UTC");
+  const [autoTimezone, setAutoTimezone] = useState(detail.timezone || "Asia/Ho_Chi_Minh");
+  const [autoPublishMode, setAutoPublishMode] = useState<"immediate" | "scheduled" | "private" | "unlisted">(
+    ((detail as unknown as { youtube_default_publish_mode?: string }).youtube_default_publish_mode as "immediate" | "scheduled" | "private" | "unlisted") || "immediate",
+  );
   const [savingAuto, setSavingAuto] = useState(false);
   const [autoSuccess, setAutoSuccess] = useState(false);
 
@@ -658,6 +673,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
           daily_upload_limit: Number(autoLimit),
           upload_slots: slotList,
           timezone: autoTimezone,
+          youtube_default_publish_mode: autoPublishMode,
         }),
       });
       if (!res.ok) {
@@ -995,7 +1011,10 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [settingsName, setSettingsName] = useState(channel.channel_title || "");
   const [settingsLimit, setSettingsLimit] = useState(detail.daily_upload_limit || 4);
   const [settingsPrivacy, setSettingsPrivacy] = useState(detail.pipeline?.default_privacy || "public");
-  const [settingsTz, setSettingsTz] = useState(detail.timezone || "UTC");
+  const [settingsTz, setSettingsTz] = useState(detail.timezone || "Asia/Ho_Chi_Minh");
+  const [settingsPublishMode, setSettingsPublishMode] = useState(
+    ((detail as unknown as { youtube_default_publish_mode?: string }).youtube_default_publish_mode as string) || "immediate",
+  );
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
 
@@ -1014,6 +1033,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
           daily_upload_limit: Number(settingsLimit),
           default_privacy: settingsPrivacy,
           timezone: settingsTz,
+          youtube_default_publish_mode: settingsPublishMode,
         }),
       });
       if (res.ok) {
@@ -1239,6 +1259,19 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               {detail.queue.length}
             </span>
           ) : null}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab("upcoming")}
+          className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
+            activeTab === "upcoming"
+              ? "border-indigo-600 text-indigo-700"
+              : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
+          }`}
+        >
+          <IconClock size={15} />
+          Upcoming
         </button>
 
         <button
@@ -1701,12 +1734,34 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                     />
                   </div>
 
+                  <div className="mt-1">
+                    <YouTubePublishSelector
+                      mode={publishMode}
+                      onModeChange={(m) => {
+                        setPublishMode(m);
+                        if (m === "immediate") setPrivacy("public");
+                        else if (m === "scheduled") setPrivacy("private");
+                        else setPrivacy(m);
+                      }}
+                      date={schedDate}
+                      time={schedTime}
+                      timezone={schedTz}
+                      onDateChange={setSchedDate}
+                      onTimeChange={setSchedTime}
+                      onTimezoneChange={setSchedTz}
+                    />
+                  </div>
+
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
                     <div className="flex items-center gap-2 text-xs font-bold text-slate-600">
                       <span>Quyền riêng tư:</span>
                       <select
                         value={privacy}
-                        onChange={(e) => setPrivacy(e.target.value as any)}
+                        onChange={(e) => {
+                          setPrivacy(e.target.value as any);
+                          const v = e.target.value;
+                          setPublishMode(v === "public" ? "immediate" : (v as any));
+                        }}
                         className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 shadow-sm"
                       >
                         <option value="public">Public (Công khai)</option>
@@ -1722,7 +1777,11 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                       className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-red-600 px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-red-500 disabled:opacity-50"
                     >
                       <IconUpload size={16} />
-                      {publishing ? "Đang đẩy lên YouTube…" : `Publish Now lên ${channel.channel_title}`}
+                      {publishing
+                        ? "Đang đẩy lên YouTube…"
+                        : publishMode === "scheduled"
+                          ? `Schedule lên ${channel.channel_title}`
+                          : `Publish Now lên ${channel.channel_title}`}
                     </button>
                   </div>
 
@@ -1851,8 +1910,40 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               </div>
               {autoSuccess && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-800">✓ Đã lưu cài đặt Auto Mode thành công!</div>}
               <div><label className="text-xs font-bold text-slate-700">Daily Upload Limit (videos/ngày)</label><input type="number" min={1} max={50} value={autoLimit} onChange={(e) => setAutoLimit(Number(e.target.value) || 1)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" /></div>
-              <div><label className="text-xs font-bold text-slate-700">Upload Slots (Giờ xuất bản, phân cách bằng dấu phẩy)</label><input type="text" value={autoSlots} onChange={(e) => setAutoSlots(e.target.value)} placeholder="09:00, 13:00, 17:00, 21:00" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 font-mono text-sm font-bold text-indigo-600 shadow-sm focus:border-indigo-500 focus:outline-none" /><p className="mt-1 text-[11px] text-slate-500">Định dạng 24h: <code>09:00, 13:00, 17:00, 21:00</code></p></div>
-              <div><label className="text-xs font-bold text-slate-700">Múi giờ (Timezone)</label><input type="text" value={autoTimezone} onChange={(e) => setAutoTimezone(e.target.value)} placeholder="America/New_York hoặc Asia/Ho_Chi_Minh" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" /></div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs font-extrabold text-slate-700">Publishing strategy</p>
+                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {[
+                    { v: "immediate", t: "A. Upload immediately", d: "Public ngay khi worker xong" },
+                    { v: "scheduled", t: "B. YouTube scheduled", d: "Private + publishAt theo slots" },
+                  ].map((o) => (
+                    <button
+                      key={o.v}
+                      type="button"
+                      onClick={() => setAutoPublishMode(o.v as "immediate" | "scheduled")}
+                      className={`rounded-xl border px-3 py-2 text-left ${autoPublishMode === o.v ? "border-indigo-500 bg-white ring-2 ring-indigo-500/20" : "border-slate-200 bg-white"}`}
+                    >
+                      <span className="block text-xs font-bold text-slate-900">{o.t}</span>
+                      <span className="block text-[11px] text-slate-500">{o.d}</span>
+                    </button>
+                  ))}
+                </div>
+                <label className="mt-2 block text-[11px] font-bold text-slate-600">
+                  Default publish mode (kênh này)
+                  <select
+                    value={autoPublishMode}
+                    onChange={(e) => setAutoPublishMode(e.target.value as "immediate" | "scheduled" | "private" | "unlisted")}
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold"
+                  >
+                    <option value="immediate">Publish immediately</option>
+                    <option value="scheduled">Schedule</option>
+                    <option value="private">Private</option>
+                    <option value="unlisted">Unlisted</option>
+                  </select>
+                </label>
+              </div>
+              <div><label className="text-xs font-bold text-slate-700">Upload Slots (Giờ xuất bản, phân cách bằng dấu phẩy)</label><input type="text" value={autoSlots} onChange={(e) => setAutoSlots(e.target.value)} placeholder="09:00, 12:00, 18:00, 21:00" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 font-mono text-sm font-bold text-indigo-600 shadow-sm focus:border-indigo-500 focus:outline-none" /><p className="mt-1 text-[11px] text-slate-500">Định dạng 24h: <code>09:00, 12:00, 18:00, 21:00</code> — mỗi kênh lịch riêng</p></div>
+              <div><label className="text-xs font-bold text-slate-700">Múi giờ (Timezone)</label><input type="text" value={autoTimezone} onChange={(e) => setAutoTimezone(e.target.value)} placeholder="Asia/Ho_Chi_Minh" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" /></div>
               <div className="pt-2"><button type="submit" disabled={savingAuto} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-indigo-500 disabled:opacity-50">{savingAuto ? "Đang lưu…" : "Lưu cài đặt Auto"}</button></div>
             </form>
           </Card>
@@ -2172,6 +2263,15 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             </div>
           )}
         </Card>
+      )}
+
+      {/* ============================================================ */}
+      {/* TAB: UPCOMING / SCHEDULED (native YouTube publishAt)          */}
+      {/* ============================================================ */}
+      {activeTab === "upcoming" && (
+        <div className="space-y-4">
+          <UpcomingScheduled destinationId={channel.destination_id} />
+        </div>
       )}
 
       {/* ============================================================ */}
@@ -2625,8 +2725,26 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 type="text"
                 value={settingsTz}
                 onChange={(e) => setSettingsTz(e.target.value)}
+                placeholder="Asia/Ho_Chi_Minh"
                 className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none"
               />
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-slate-700">Default publish mode (kênh này)</label>
+              <select
+                value={settingsPublishMode}
+                onChange={(e) => setSettingsPublishMode(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 shadow-sm"
+              >
+                <option value="immediate">Publish immediately</option>
+                <option value="scheduled">Schedule</option>
+                <option value="private">Private</option>
+                <option value="unlisted">Unlisted</option>
+              </select>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Nếu chọn Schedule, cấu hình timezone + slots ở tab Auto. Upload sẽ private + publishAt native.
+              </p>
             </div>
 
             {/* ============================================================ */}

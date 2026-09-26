@@ -48,16 +48,18 @@ export async function actionCreatePipeline(
     const slugRaw = String(form.get("slug") ?? "").trim();
     const slug = slugRaw ? slugify(slugRaw) : slugify(name);
     if (!slug) return { ok: false, error: "Slug không hợp lệ." };
+    const strat = String(form.get("publishing_strategy") ?? "immediate").trim();
     const pipeline = await createPipeline({
       name,
       slug,
       niche: String(form.get("niche") ?? "").trim() || undefined,
       language: String(form.get("language") ?? "").trim() || undefined,
       default_privacy: String(form.get("default_privacy") ?? "public"),
-      timezone: String(form.get("timezone") ?? "UTC").trim() || "UTC",
+      timezone: String(form.get("timezone") ?? "Asia/Ho_Chi_Minh").trim() || "Asia/Ho_Chi_Minh",
       daily_upload_limit: Number(form.get("daily_upload_limit") ?? 6) || 6,
-      upload_slots: parseSlots(String(form.get("upload_slots") ?? "08:00,11:00,14:00,17:00,20:00,23:00")),
-    });
+      upload_slots: parseSlots(String(form.get("upload_slots") ?? "09:00,12:00,18:00,21:00")),
+      youtube_default_publish_mode: strat === "scheduled" ? "scheduled" : "immediate",
+    } as never);
     revalidatePath("/");
     return { ok: true, id: pipeline.id };
   } catch (e) {

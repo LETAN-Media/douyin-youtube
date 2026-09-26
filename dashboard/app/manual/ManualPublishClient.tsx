@@ -20,6 +20,7 @@ import type {
   ManualResolveResult,
 } from "@/lib/types";
 import { platformLabel } from "@/lib/format";
+import { YouTubePublishSelector } from "@/components/YouTubePublishSelector";
 
 function formatDuration(sec?: number | null): string {
   if (sec == null || sec <= 0) return "00:00";
@@ -60,8 +61,12 @@ export function ManualPublishClient({
     return firstConnected ? firstConnected.id : "";
   });
 
-  // Publish settings
+  // Publish settings (native YouTube scheduling)
   const [privacy, setPrivacy] = useState<"public" | "unlisted" | "private">("public");
+  const [publishMode, setPublishMode] = useState<"immediate" | "scheduled" | "private" | "unlisted">("immediate");
+  const [schedDate, setSchedDate] = useState("");
+  const [schedTime, setSchedTime] = useState("");
+  const [schedTz, setSchedTz] = useState("Asia/Ho_Chi_Minh");
   const [generateAi, setGenerateAi] = useState(true);
   const [metadataMode, setMetadataMode] = useState<"same" | "separate">("same");
 
@@ -316,6 +321,8 @@ export function ManualPublishClient({
 
       const fullSameDesc = `${description}\n\n${hashtags}`.trim();
 
+      const effMode = publishMode;
+      const effPrivacy = effMode === "immediate" ? "public" : effMode === "scheduled" ? "private" : effMode;
       const payload: ManualPublishPayload = {
         source_url: resolvedVideo.source_url,
         source_title: resolvedVideo.caption || resolvedVideo.video_id || "Douyin Video",
@@ -327,8 +334,12 @@ export function ManualPublishClient({
         title: title || resolvedVideo.caption || "",
         description: fullSameDesc,
         destinations_metadata: destMetaPayload,
-        privacy_status: privacy,
+        privacy_status: effPrivacy as "public" | "unlisted" | "private",
         force_duplicate: forceDuplicate,
+        youtube_publish_mode: effMode,
+        youtube_publish_date: effMode === "scheduled" && schedDate ? schedDate : undefined,
+        youtube_publish_time: effMode === "scheduled" && schedTime ? schedTime : undefined,
+        youtube_schedule_timezone: schedTz,
       };
 
       const res = await fetch("/api/manual/publish", {
@@ -660,16 +671,19 @@ export function ManualPublishClient({
                 </p>
               </div>
 
-              {/* Privacy Override Selector (Requirement 17) */}
+              {/* Privacy kept for compat; native mode selector below */}
               <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 p-1">
                 <span className="px-2 text-xs font-semibold text-slate-500">Privacy:</span>
                 {(["public", "unlisted", "private"] as const).map((p) => (
                   <button
                     key={p}
                     type="button"
-                    onClick={() => setPrivacy(p)}
+                    onClick={() => {
+                      setPrivacy(p);
+                      setPublishMode(p === "public" ? "immediate" : p);
+                    }}
                     className={`rounded-lg px-2.5 py-1 text-xs font-bold capitalize transition ${
-                      privacy === p
+                      (publishMode === "immediate" ? "public" : publishMode) === p
                         ? "bg-white text-indigo-700 shadow-sm"
                         : "text-slate-600 hover:text-slate-900"
                     }`}
@@ -792,6 +806,23 @@ export function ManualPublishClient({
                 ))}
               </div>
             )}
+            <div className="mt-4">
+              <YouTubePublishSelector
+                mode={publishMode}
+                onModeChange={(m) => {
+                  setPublishMode(m);
+                  if (m === "immediate") setPrivacy("public");
+                  else if (m === "scheduled") setPrivacy("private");
+                  else setPrivacy(m);
+                }}
+                date={schedDate}
+                time={schedTime}
+                timezone={schedTz}
+                onDateChange={setSchedDate}
+                onTimeChange={setSchedTime}
+                onTimezoneChange={setSchedTz}
+              />
+            </div>
           </Card>
         ) : null}
 

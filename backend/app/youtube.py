@@ -638,7 +638,15 @@ def upload_video(
     privacy_status: str,
     pipeline_id: str | None = None,
     destination_id: str | None = None,
+    publish_at: datetime | str | None = None,
+    publish_mode: str | None = None,
 ) -> str:
+    """Upload with native YouTube scheduling support.
+
+    publish_mode: immediate | scheduled | private | unlisted.
+    When scheduled, privacy_status is forced to private and publishAt (RFC3339
+    UTC) is sent. publishAt is never sent for public/unlisted/private.
+    """
     if not file_path.exists():
         raise RuntimeError(
             f"Không tìm thấy video: {file_path}"
@@ -657,6 +665,37 @@ def upload_video(
         cache_discovery=False,
     )
 
+    # Resolve native scheduling status (never mutate caller args).
+    from app.youtube_scheduling import (
+        build_insert_status,
+        ensure_utc,
+        normalize_youtube_error,
+        parse_publish_at,
+        validate_scheduled_mode,
+    )
+
+    mode = (publish_mode or "").lower() or None
+    if mode is None:
+        # Backwards compat: infer from privacy_status.
+        mode = {"public": "immediate", "private": "private", "unlisted": "unlisted"}.get(
+            (privacy_status or "public").lower(), "immediate"
+        )
+    publish_at_utc = None
+    if publish_at is not None:
+        try:
+            publish_at_utc = parse_publish_at(publish_at)
+        except Exception as exc:
+            raise RuntimeError(f"INVALID_PUBLISH_AT: {exc}") from exc
+    try:
+        validate_scheduled_mode(mode, publish_at_utc)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    try:
+        status_body = build_insert_status(mode, publish_at_utc)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
     body = {
         "snippet": {
             "title": title[:100],
@@ -666,9 +705,7 @@ def upload_video(
             "categoryId": "22",
         },
         "status": {
-            "privacyStatus": (
-                privacy_status
-            ),
+            **status_body,
             "selfDeclaredMadeForKids": False,
         },
     }
@@ -726,9 +763,14 @@ def upload_video(
             }
 
             if not retryable:
+                from app.youtube_scheduling import normalize_youtube_error as _norm
+
                 raise RuntimeError(
-                    f"YouTube API error "
-                    f"{status_code}: {exc}"
+                    _norm(exc)
+                    or (
+                        f"YouTube API error "
+                        f"{status_code}: {exc}"
+                    )
                 ) from exc
 
             retry_count += 1
@@ -764,3 +806,120 @@ def upload_video(
                     30,
                 )
             )
+
+
+def _youtube_client_for_destination(db: Session, destination_id: str):
+    _, youtube = build_destination_client(db, destination_id)
+    return youtube
+
+
+def update_video_schedule(
+    db: Session,
+    destination_id: str,
+    youtube_video_id: str,
+    new_publish_at: datetime | str,
+) -> dict:
+    """Change schedule: videos.update with privacyStatus=private + publishAt."""
+    from app.youtube_scheduling import (
+        build_reschedule_status,
+        normalize_youtube_error,
+        parse_publish_at,
+        validate_publish_at,
+    )
+
+    publish_at_utc = parse_publish_at(new_publish_at)
+    if publish_at_utc is None:
+        raise RuntimeError("INVALID_PUBLISH_AT: new publish_at is required")
+    try:
+        validate_publish_at(publish_at_utc)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    youtube = _youtube_client_for_destination(db, destination_id)
+    body = {"id": youtube_video_id, "status": build_reschedule_status(publish_at_utc)}
+    try:
+        return (
+            youtube.videos()
+            .update(part="status", body=body)
+            .execute()
+        )
+    except HttpError as exc:
+        raise RuntimeError(normalize_youtube_error(exc)) from exc
+
+
+def publish_video_now(
+    db: Session,
+    destination_id: str,
+    youtube_video_id: str,
+) -> dict:
+    """Scheduled -> Publish now: videos.update privacyStatus=public."""
+    from app.youtube_scheduling import build_publish_now_status, normalize_youtube_error
+
+    youtube = _youtube_client_for_destination(db, destination_id)
+    body = {"id": youtube_video_id, "status": build_publish_now_status()}
+    try:
+        return (
+            youtube.videos()
+            .update(part="status", body=body)
+            .execute()
+        )
+    except HttpError as exc:
+        raise RuntimeError(normalize_youtube_error(exc)) from exc
+
+
+def cancel_video_schedule(
+    db: Session,
+    destination_id: str,
+    youtube_video_id: str,
+) -> dict:
+    """Cancel schedule: keep video private, clear publishAt.
+
+    Safe behavior: videos.update with privacyStatus=private and NO publishAt.
+    YouTube treats omission as clearing the scheduled publish (video stays
+    private). Never deletes the video. Callers must preserve other status
+    fields by only sending status part.
+    """
+    from app.youtube_scheduling import normalize_youtube_error
+
+    youtube = _youtube_client_for_destination(db, destination_id)
+    body = {"id": youtube_video_id, "status": {"privacyStatus": "private"}}
+    try:
+        return (
+            youtube.videos()
+            .update(part="status", body=body)
+            .execute()
+        )
+    except HttpError as exc:
+        raise RuntimeError(normalize_youtube_error(exc)) from exc
+
+
+def get_video_status(
+    db: Session,
+    destination_id: str,
+    youtube_video_id: str,
+) -> dict:
+    """Read privacyStatus / publishedAt / scheduled publishAt via videos.list."""
+    from app.youtube_scheduling import normalize_youtube_error
+
+    youtube = _youtube_client_for_destination(db, destination_id)
+    try:
+        resp = (
+            youtube.videos()
+            .list(part="status,snippet", id=youtube_video_id)
+            .execute()
+        )
+    except HttpError as exc:
+        raise RuntimeError(normalize_youtube_error(exc)) from exc
+    items = (resp or {}).get("items", [])
+    if not items:
+        raise RuntimeError(f"YouTube video not found: {youtube_video_id}")
+    item = items[0]
+    status = item.get("status", {}) or {}
+    snippet = item.get("snippet", {}) or {}
+    return {
+        "video_id": youtube_video_id,
+        "privacyStatus": status.get("privacyStatus"),
+        "publishAt": status.get("publishAt"),
+        "uploadStatus": status.get("uploadStatus"),
+        "publishedAt": snippet.get("publishedAt"),
+        "raw": item,
+    }

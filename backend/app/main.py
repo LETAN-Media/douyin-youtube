@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from datetime import (
     datetime,
@@ -1001,7 +1002,18 @@ def create_pipeline(
         prompt_profile=payload.prompt_profile,
         default_privacy=payload.default_privacy,
         enabled=payload.enabled,
+        daily_upload_limit=payload.daily_upload_limit,
+        upload_slots=payload.upload_slots,
+        backlog_slots_per_day=payload.backlog_slots_per_day,
+        new_slots_per_day=payload.new_slots_per_day,
+        backlog_order=payload.backlog_order,
+        backlog_threshold_days=payload.backlog_threshold_days,
+        timezone=payload.timezone,
     )
+    try:
+        pipeline.youtube_default_publish_mode = payload.youtube_default_publish_mode or "immediate"
+    except Exception:
+        pass
 
     db.add(pipeline)
     db.commit()
@@ -1404,7 +1416,8 @@ def create_pipeline_destination(
         external_account_name=payload.external_account_name,
         enabled=payload.enabled,
         daily_upload_limit=payload.daily_upload_limit,
-        timezone=payload.timezone,
+        timezone=payload.timezone or "Asia/Ho_Chi_Minh",
+        youtube_default_publish_mode=getattr(payload, "youtube_default_publish_mode", "immediate") or "immediate",
         upload_slots=payload.upload_slots,
         publish_strategy=payload.publish_strategy,
         metadata_language=payload.metadata_language,
@@ -3738,7 +3751,116 @@ def manual_publish_endpoint(
             pub.description = description
             db.flush()
 
-        privacy = payload.privacy_status or pipeline.default_privacy
+        # ---- Native YouTube publishing intent ----
+        from app.youtube_scheduling import (
+            MODE_TO_PRIVACY,
+            local_to_utc,
+            parse_publish_at,
+            validate_scheduled_mode,
+        )
+
+        raw_mode = (payload.youtube_publish_mode or "").lower() or None
+        if raw_mode is None:
+            _priv = (payload.privacy_status or "public").lower()
+            raw_mode = {"public": "immediate", "private": "private", "unlisted": "unlisted"}.get(
+                _priv, "immediate"
+            )
+        if raw_mode not in ("immediate", "scheduled", "private", "unlisted"):
+            raise HTTPException(status_code=400, detail="INVALID_PUBLISH_MODE")
+        sched_tz = (
+            payload.youtube_schedule_timezone
+            or getattr(dest, "timezone", None)
+            or "Asia/Ho_Chi_Minh"
+        )
+        publish_at_utc = None
+        if raw_mode == "scheduled":
+            if payload.youtube_publish_at is not None:
+                try:
+                    publish_at_utc = parse_publish_at(payload.youtube_publish_at, sched_tz)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+            elif payload.youtube_publish_date and payload.youtube_publish_time:
+                try:
+                    publish_at_utc = local_to_utc(
+                        payload.youtube_publish_date,
+                        payload.youtube_publish_time,
+                        sched_tz,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+            else:
+                # Fall back to channel default auto-slot when user picks
+                # Schedule without a manual datetime.
+                from app.youtube_scheduling import find_next_free_slot as _find_slot
+
+                try:
+                    _rows = db.execute(
+                        select(Publication.youtube_publish_at)
+                        .where(Publication.destination_id == dest.id)
+                        .where(Publication.youtube_publish_at.is_not(None))
+                        .where(Publication.status.in_(["scheduled", "queued", "uploading", "processing"]))
+                    ).all()
+                    _used = {r[0].isoformat() for r in _rows if r[0] is not None}
+                except Exception:
+                    _used = set()
+                publish_at_utc = _find_slot(
+                    dest.upload_slots or [], sched_tz, _used, now=now
+                )
+                if publish_at_utc is None:
+                    raise HTTPException(status_code=400, detail="INVALID_PUBLISH_AT: no free slot")
+            try:
+                validate_scheduled_mode(raw_mode, publish_at_utc, now=now)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            # Slot collision protection (minute precision, per channel).
+            try:
+                _chk = publish_at_utc.replace(second=0, microsecond=0)
+                _existing = db.execute(
+                    select(Publication.id)
+                    .where(Publication.destination_id == dest.id)
+                    .where(Publication.youtube_publish_at.is_not(None))
+                    .where(Publication.status.in_(["scheduled", "queued", "uploading", "processing"]))
+                    .limit(200)
+                ).scalars().all()
+                # Load full rows for minute comparison (cheap, bounded).
+                _rows2 = db.execute(
+                    select(Publication)
+                    .where(Publication.destination_id == dest.id)
+                    .where(Publication.youtube_publish_at.is_not(None))
+                    .where(Publication.status.in_(["scheduled", "queued", "uploading", "processing"]))
+                    .limit(200)
+                ).scalars().all()
+                for _r in _rows2:
+                    try:
+                        _v = _r.youtube_publish_at
+                        if _v is not None:
+                            if _v.tzinfo is None:
+                                _v = _v.replace(tzinfo=timezone.utc)
+                            if _v.replace(second=0, microsecond=0) == _chk and not payload.force_duplicate:
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail="SLOT_COLLISION: this time slot is already taken for this channel",
+                                )
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        continue
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+        privacy = MODE_TO_PRIVACY.get(raw_mode, "public")
+
+        # Reset scheduling columns on reuse.
+        try:
+            pub.youtube_publish_mode = raw_mode
+            pub.youtube_publish_at = publish_at_utc
+            pub.youtube_schedule_timezone = sched_tz
+            pub.youtube_scheduled = False
+            pub.youtube_actual_published_at = None
+            pub.youtube_privacy_status = privacy
+        except Exception:
+            pass
 
         job = VideoJob(
             source_url=payload.source_url,
@@ -3752,6 +3874,14 @@ def manual_publish_endpoint(
             publication_id=pub.id,
             source_video_id=video.video_id,
         )
+        try:
+            job.youtube_publish_mode = raw_mode
+            job.youtube_publish_at = publish_at_utc
+            job.youtube_schedule_timezone = sched_tz
+            job.youtube_scheduled = False
+            job.youtube_actual_published_at = None
+        except Exception:
+            pass
         db.add(job)
         db.flush()
 
@@ -4273,7 +4403,9 @@ def get_channel_detail_endpoint(
         fixed_hashtags=d.fixed_hashtags,
         adaptive_hashtags=d.adaptive_hashtags,
         prompt_override=d.prompt_override,
-        timezone=d.timezone or "UTC",
+        timezone=d.timezone or "Asia/Ho_Chi_Minh",
+        youtube_default_publish_mode=getattr(d, "youtube_default_publish_mode", "immediate") or "immediate",
+        upload_slots=d.upload_slots or (pipeline.upload_slots if pipeline else []) or [],
         pipeline=pipeline_info,
         sources=sources_data,
         queue=queue_list,
@@ -4341,6 +4473,28 @@ def update_channel_endpoint(
         d.enabled = payload.enabled
     if payload.default_privacy is not None and pipeline:
         pipeline.default_privacy = payload.default_privacy
+    if payload.youtube_default_publish_mode is not None:
+        try:
+            d.youtube_default_publish_mode = payload.youtube_default_publish_mode
+        except Exception:
+            pass
+        # Publishing strategy scheduled maps to per-channel scheduled defaults.
+        if pipeline is not None and payload.youtube_default_publish_mode in ("scheduled", "immediate"):
+            try:
+                pipeline.youtube_default_publish_mode = payload.youtube_default_publish_mode
+            except Exception:
+                pass
+    if payload.publishing_strategy is not None:
+        _mode = "scheduled" if payload.publishing_strategy == "scheduled" else "immediate"
+        try:
+            d.youtube_default_publish_mode = _mode
+        except Exception:
+            pass
+        if pipeline is not None:
+            try:
+                pipeline.youtube_default_publish_mode = _mode
+            except Exception:
+                pass
 
     db.commit()
     return get_channel_detail_endpoint(destination_id=destination_id, db=db)
@@ -5477,3 +5631,322 @@ def skip_comment_endpoint(
     return CommentActionResult(
         ok=True, comment=YouTubeCommentOut.model_validate(comment)
     )
+
+
+# ---------------------------------------------------------------------------
+# Native YouTube Scheduled Publishing
+# ---------------------------------------------------------------------------
+
+
+def _resolve_schedule_datetime(payload, default_tz: str | None) -> tuple[datetime, str]:
+    from app.youtube_scheduling import local_to_utc, parse_publish_at
+
+    tz_name = (getattr(payload, "timezone", None) or default_tz or "Asia/Ho_Chi_Minh")
+    if getattr(payload, "publish_at", None) is not None:
+        dt = parse_publish_at(payload.publish_at, tz_name)
+    elif getattr(payload, "publish_date", None) and getattr(payload, "publish_time", None):
+        dt = local_to_utc(payload.publish_date, payload.publish_time, tz_name)
+    else:
+        raise HTTPException(status_code=400, detail="INVALID_PUBLISH_AT: missing publish_at or date+time")
+    if dt is None:
+        raise HTTPException(status_code=400, detail="INVALID_PUBLISH_AT")
+    return dt, tz_name
+
+
+@app.get(
+    "/api/channels/{destination_id}/upcoming",
+    dependencies=[Depends(require_admin)],
+)
+def get_upcoming_scheduled_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """Upcoming / Scheduled list for a channel workspace."""
+    from app.youtube_scheduling import format_scheduled_preview
+
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    rows = list(
+        db.execute(
+            select(Publication, DouyinVideo)
+            .outerjoin(DouyinVideo, Publication.douyin_video_id == DouyinVideo.id)
+            .where(Publication.destination_id == destination_id)
+            .where(Publication.status.in_(["scheduled", "queued", "uploading", "processing"]))
+            .order_by(Publication.youtube_publish_at.asc().nullslast(), Publication.created_at.asc())
+            .limit(200)
+        ).all()
+    )
+    items = []
+    for pub, video in rows:
+        yt_at = getattr(pub, "youtube_publish_at", None)
+        yt_tz = getattr(pub, "youtube_schedule_timezone", None) or d.timezone or "Asia/Ho_Chi_Minh"
+        preview = None
+        try:
+            if yt_at is not None:
+                preview = format_scheduled_preview(yt_at, yt_tz)
+        except Exception:
+            preview = None
+        items.append(
+            {
+                "publication_id": pub.id,
+                "destination_id": pub.destination_id,
+                "video_title": pub.title or (video.title if video else None),
+                "thumbnail": video.thumbnail_url if video else None,
+                "youtube_video_id": pub.external_post_id,
+                "external_url": pub.external_url,
+                "status": pub.status,
+                "youtube_publish_mode": getattr(pub, "youtube_publish_mode", "immediate"),
+                "youtube_publish_at": yt_at.isoformat() if yt_at is not None else None,
+                "youtube_schedule_timezone": yt_tz,
+                "youtube_scheduled": bool(getattr(pub, "youtube_scheduled", False)),
+                "preview": preview,
+            }
+        )
+    return {"destination_id": destination_id, "total": len(items), "items": items}
+
+
+@app.patch(
+    "/api/publications/{publication_id}/schedule",
+    dependencies=[Depends(require_admin)],
+)
+def change_publication_schedule_endpoint(
+    publication_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Change time for a still-private scheduled video (videos.update)."""
+    from app.schemas import YouTubeScheduleUpdateRequest
+    from app.youtube_scheduling import validate_publish_at
+
+    try:
+        req = YouTubeScheduleUpdateRequest(**(payload or {}))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"INVALID_PUBLISH_AT: {exc}") from exc
+    pub = db.get(Publication, publication_id)
+    if pub is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    if pub.status == "published":
+        raise HTTPException(status_code=409, detail="Video đã published, không thể đổi lịch")
+    dest = db.get(Destination, pub.destination_id)
+    default_tz = (getattr(pub, "youtube_schedule_timezone", None) or (dest.timezone if dest else None) or "Asia/Ho_Chi_Minh")
+    new_at, tz_name = _resolve_schedule_datetime(req, default_tz)
+    try:
+        validate_publish_at(new_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # If already uploaded to YouTube (has video id), update YouTube now.
+    video_id = pub.external_post_id
+    if video_id and pub.status == "scheduled" and bool(getattr(pub, "youtube_scheduled", False)):
+        from app.youtube import update_video_schedule
+
+        try:
+            update_video_schedule(db, pub.destination_id, video_id, new_at)
+        except Exception as exc:
+            try:
+                pub.error = str(exc)[:2000]
+                db.commit()
+            except Exception:
+                pass
+            raise HTTPException(status_code=502, detail=str(exc)[:1000]) from exc
+    # Local state update (for not-yet-uploaded queued rows or successful YT update).
+    try:
+        pub.youtube_publish_at = new_at
+        pub.youtube_schedule_timezone = tz_name
+        pub.youtube_publish_mode = "scheduled"
+        pub.youtube_scheduled = bool(video_id and bool(getattr(pub, "youtube_scheduled", False)))
+        pub.youtube_privacy_status = "private"
+        pub.scheduled_at = new_at
+        pub.status = "scheduled"
+        pub.error = None
+        # Mirror to linked jobs not yet uploaded.
+        from app.models import VideoJob as _VJ
+
+        jobs = list(
+            db.execute(select(_VJ).where(_VJ.publication_id == pub.id)).scalars().all()
+        )
+        for j in jobs:
+            if j.status in ("pending", "failed", "scheduled"):
+                try:
+                    j.youtube_publish_at = new_at
+                    j.youtube_schedule_timezone = tz_name
+                    j.youtube_publish_mode = "scheduled"
+                    j.privacy_status = "private"
+                    if j.status == "failed":
+                        j.status = "pending"
+                        j.error = None
+                except Exception:
+                    pass
+        db.commit()
+        db.refresh(pub)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)[:500]) from exc
+    return {
+        "ok": True,
+        "publication_id": pub.id,
+        "youtube_publish_at": new_at.isoformat(),
+        "youtube_schedule_timezone": tz_name,
+    }
+
+
+@app.post(
+    "/api/publications/{publication_id}/publish-now",
+    dependencies=[Depends(require_admin)],
+)
+def publish_now_endpoint(
+    publication_id: str,
+    db: Session = Depends(get_db),
+):
+    """Scheduled -> Publish now (videos.update privacyStatus=public)."""
+    pub = db.get(Publication, publication_id)
+    if pub is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    video_id = pub.external_post_id
+    if not video_id:
+        # Not yet uploaded: flip intent to immediate so worker publishes public.
+        try:
+            pub.youtube_publish_mode = "immediate"
+            pub.youtube_publish_at = None
+            pub.youtube_scheduled = False
+            pub.youtube_privacy_status = "public"
+            pub.status = "queued"
+            pub.error = None
+            from app.models import VideoJob as _VJ
+
+            jobs = list(
+                db.execute(select(_VJ).where(_VJ.publication_id == pub.id)).scalars().all()
+            )
+            for j in jobs:
+                try:
+                    j.youtube_publish_mode = "immediate"
+                    j.youtube_publish_at = None
+                    j.youtube_scheduled = False
+                    j.privacy_status = "public"
+                    if j.status in ("failed", "scheduled"):
+                        j.status = "pending"
+                        j.error = None
+                except Exception:
+                    pass
+            db.commit()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)[:500]) from exc
+        return {"ok": True, "publication_id": pub.id, "mode": "queued-immediate"}
+    from app.youtube import publish_video_now
+
+    try:
+        publish_video_now(db, pub.destination_id, video_id)
+    except Exception as exc:
+        try:
+            pub.error = str(exc)[:2000]
+            db.commit()
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=str(exc)[:1000]) from exc
+    pub.status = "published"
+    try:
+        pub.youtube_scheduled = False
+        pub.youtube_publish_mode = "immediate"
+        pub.youtube_privacy_status = "public"
+        pub.youtube_actual_published_at = _utcnow()
+        pub.published_at = _utcnow()
+        pub.error = None
+    except Exception:
+        pass
+    db.commit()
+    return {"ok": True, "publication_id": pub.id, "youtube_video_id": video_id}
+
+
+@app.post(
+    "/api/publications/{publication_id}/cancel-schedule",
+    dependencies=[Depends(require_admin)],
+)
+def cancel_schedule_endpoint(
+    publication_id: str,
+    db: Session = Depends(get_db),
+):
+    """Cancel schedule: video stays private, publishAt cleared. Never deletes video."""
+    pub = db.get(Publication, publication_id)
+    if pub is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    video_id = pub.external_post_id
+    if video_id:
+        from app.youtube import cancel_video_schedule
+
+        try:
+            cancel_video_schedule(db, pub.destination_id, video_id)
+        except Exception as exc:
+            try:
+                pub.error = str(exc)[:2000]
+                db.commit()
+            except Exception:
+                pass
+            raise HTTPException(status_code=502, detail=str(exc)[:1000]) from exc
+    try:
+        pub.youtube_publish_mode = "private"
+        pub.youtube_publish_at = None
+        pub.youtube_scheduled = False
+        pub.youtube_privacy_status = "private"
+        pub.status = "published" if video_id else "queued"
+        if video_id and pub.published_at is None:
+            # Private video exists on YouTube; treat as completed/private.
+            pub.published_at = _utcnow()
+        pub.error = None
+    except Exception:
+        pass
+    db.commit()
+    return {"ok": True, "publication_id": pub.id, "mode": "private"}
+
+
+@app.post(
+    "/api/channels/{destination_id}/reconcile-scheduled",
+    dependencies=[Depends(require_admin)],
+)
+def reconcile_scheduled_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """Trigger reconciler for due scheduled videos (manual + periodic)."""
+    from app.youtube_reconciler import reconcile_scheduled_videos
+
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    # Scope reconciler to this destination by filtering afterwards; the core
+    # reconciler is global-lightweight (limit 50, horizon check).
+    summary = reconcile_scheduled_videos(db_session=db)
+    return {"ok": True, "destination_id": destination_id, **summary}
+
+
+@app.get(
+    "/api/channels/{destination_id}/next-slot",
+    dependencies=[Depends(require_admin)],
+)
+def next_free_slot_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """Preview next free auto slot for this channel (per-channel schedule)."""
+    from app.youtube_scheduling import find_next_free_slot
+
+    d = db.get(Destination, destination_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    try:
+        rows = db.execute(
+            select(Publication.youtube_publish_at)
+            .where(Publication.destination_id == destination_id)
+            .where(Publication.youtube_publish_at.is_not(None))
+            .where(Publication.status.in_(["scheduled", "queued", "uploading", "processing"]))
+        ).all()
+        used = {r[0].isoformat() for r in rows if r[0] is not None}
+    except Exception:
+        used = set()
+    nxt = find_next_free_slot(d.upload_slots or [], d.timezone or "Asia/Ho_Chi_Minh", used, now=_utcnow())
+    return {
+        "destination_id": destination_id,
+        "timezone": d.timezone or "Asia/Ho_Chi_Minh",
+        "slots": d.upload_slots or [],
+        "next_slot": nxt.isoformat() if nxt else None,
+    }

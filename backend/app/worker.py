@@ -579,19 +579,67 @@ def process_job(
                         "từ chối upload để tránh sai credential đa kênh"
                     )
 
-            video_id = upload_video(
-                db=db,
-                file_path=(
-                    download.file_path
-                ),
-                title=title,
-                description=description,
-                privacy_status=(
-                    job.privacy_status
-                ),
-                pipeline_id=job.pipeline_id,
-                destination_id=destination_id,
+            # Resolve native scheduling intent: job fields win, else linked
+            # Publication, else infer from legacy privacy_status.
+            from app.youtube_scheduling import (
+                MODE_TO_PRIVACY,
+                normalize_youtube_error,
+                parse_publish_at,
             )
+
+            _pub_for_upload = _find_linked_publication(db, job)
+            publish_mode = (getattr(job, "youtube_publish_mode", None) or "").lower() or None
+            publish_at_utc = getattr(job, "youtube_publish_at", None)
+            sched_tz = getattr(job, "youtube_schedule_timezone", None) or "Asia/Ho_Chi_Minh"
+            if _pub_for_upload is not None:
+                if not publish_mode or publish_mode == "immediate":
+                    _pm = (getattr(_pub_for_upload, "youtube_publish_mode", None) or "").lower()
+                    if _pm:
+                        publish_mode = _pm
+                if publish_at_utc is None:
+                    publish_at_utc = getattr(_pub_for_upload, "youtube_publish_at", None)
+                if getattr(_pub_for_upload, "youtube_schedule_timezone", None):
+                    sched_tz = _pub_for_upload.youtube_schedule_timezone
+            if not publish_mode:
+                priv_lower = (job.privacy_status or "public").lower()
+                publish_mode = {"public": "immediate", "private": "private", "unlisted": "unlisted"}.get(
+                    priv_lower, "immediate"
+                )
+            if isinstance(publish_at_utc, str):
+                try:
+                    publish_at_utc = parse_publish_at(publish_at_utc)
+                except Exception:
+                    publish_at_utc = None
+            # Ensure naive datetimes from SQLite are treated as UTC.
+            if publish_at_utc is not None and getattr(publish_at_utc, "tzinfo", None) is None:
+                publish_at_utc = publish_at_utc.replace(tzinfo=timezone.utc)
+            privacy_for_upload = MODE_TO_PRIVACY.get(publish_mode, "public")
+
+            try:
+                video_id = upload_video(
+                    db=db,
+                    file_path=(
+                        download.file_path
+                    ),
+                    title=title,
+                    description=description,
+                    privacy_status=privacy_for_upload,
+                    pipeline_id=job.pipeline_id,
+                    destination_id=destination_id,
+                    publish_at=publish_at_utc,
+                    publish_mode=publish_mode,
+                )
+            except Exception as exc:
+                # Store exact normalized YouTube error (invalidPublishAt etc.)
+                try:
+                    norm = normalize_youtube_error(exc)
+                    job.error = norm[:5000]
+                    _pub_err = _find_linked_publication(db, job)
+                    if _pub_err is not None:
+                        _pub_err.error = norm[:5000]
+                except Exception:
+                    pass
+                raise
 
         with SessionLocal.begin() as db:
             job = db.get(
@@ -611,22 +659,65 @@ def process_job(
                 + video_id
             )
 
-            job.status = "published"
+            # Native scheduling outcome: scheduled stays scheduled,
+            # everything else is published immediately (incl. private/unlisted).
+            is_scheduled = (publish_mode == "scheduled")
+            if is_scheduled:
+                job.status = "scheduled"
+                job.youtube_scheduled = True
+                job.youtube_publish_at = publish_at_utc
+                try:
+                    job.youtube_schedule_timezone = sched_tz
+                except Exception:
+                    pass
+                job.youtube_publish_mode = "scheduled"
+            else:
+                job.status = "published"
+                job.youtube_scheduled = False
+                job.youtube_publish_mode = publish_mode
+                try:
+                    if publish_at_utc is not None:
+                        job.youtube_publish_at = publish_at_utc
+                except Exception:
+                    pass
             job.progress = 100
             job.error = None
 
             try:
                 pub = _find_linked_publication(db, job)
-                _set_publication_status(
-                    db,
-                    pub,
-                    "published",
-                    external_post_id=video_id,
-                    external_url=f"https://youtu.be/{video_id}",
-                )
+                if is_scheduled:
+                    _set_publication_status(
+                        db,
+                        pub,
+                        "scheduled",
+                        external_post_id=video_id,
+                        external_url=f"https://youtu.be/{video_id}",
+                    )
+                else:
+                    _set_publication_status(
+                        db,
+                        pub,
+                        "published",
+                        external_post_id=video_id,
+                        external_url=f"https://youtu.be/{video_id}",
+                    )
                 if pub is not None:
                     pub.title = job.title
                     pub.description = job.description
+                    try:
+                        pub.youtube_publish_mode = publish_mode
+                        pub.youtube_privacy_status = privacy_for_upload
+                        pub.youtube_schedule_timezone = sched_tz
+                        if is_scheduled:
+                            pub.youtube_publish_at = publish_at_utc
+                            pub.youtube_scheduled = True
+                            pub.scheduled_at = publish_at_utc
+                        else:
+                            pub.youtube_scheduled = False
+                            if publish_at_utc is not None:
+                                pub.youtube_publish_at = publish_at_utc
+                    except Exception:
+                        pass
             except Exception:
                 logger.exception(
                     "Failed to set publication published %s", job_id
@@ -640,8 +731,12 @@ def process_job(
             ).scalar_one_or_none()
 
             if video is not None:
-                video.status = "published"
-                video.published_at = utcnow()
+                if is_scheduled:
+                    video.status = "scheduled"
+                    video.scheduled_at = publish_at_utc or utcnow()
+                else:
+                    video.status = "published"
+                    video.published_at = utcnow()
                 video.youtube_video_id = video_id
                 video.youtube_url = f"https://youtu.be/{video_id}"
 

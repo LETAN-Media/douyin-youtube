@@ -566,6 +566,84 @@ def run_migrations() -> None:
                     )
                 )
 
+        # ---- Native YouTube Scheduled Publishing (additive only) ----
+        for column_name, column_type in [
+            ("youtube_default_publish_mode", "VARCHAR(20) DEFAULT 'immediate'"),
+        ]:
+            if not column_exists(connection, "destinations", column_name):
+                logger.info("Adding %s to destinations", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE destinations "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
+
+        for column_name, column_type in [
+            ("youtube_publish_mode", "VARCHAR(20) DEFAULT 'immediate'"),
+            ("youtube_publish_at", "TIMESTAMPTZ"),
+            ("youtube_schedule_timezone", "VARCHAR(50) DEFAULT 'Asia/Ho_Chi_Minh'"),
+            ("youtube_scheduled", "BOOLEAN DEFAULT FALSE"),
+            ("youtube_actual_published_at", "TIMESTAMPTZ"),
+            ("youtube_privacy_status", "VARCHAR(20)"),
+        ]:
+            if not column_exists(connection, "publications", column_name):
+                logger.info("Adding %s to publications", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE publications "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
+
+        for column_name, column_type in [
+            ("youtube_publish_mode", "VARCHAR(20) DEFAULT 'immediate'"),
+            ("youtube_publish_at", "TIMESTAMPTZ"),
+            ("youtube_schedule_timezone", "VARCHAR(50) DEFAULT 'Asia/Ho_Chi_Minh'"),
+            ("youtube_scheduled", "BOOLEAN DEFAULT FALSE"),
+            ("youtube_actual_published_at", "TIMESTAMPTZ"),
+        ]:
+            if not column_exists(connection, "video_jobs", column_name):
+                logger.info("Adding %s to video_jobs", column_name)
+                connection.execute(
+                    text(
+                        "ALTER TABLE video_jobs "
+                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                    )
+                )
+
+        if not column_exists(connection, "pipelines", "youtube_default_publish_mode"):
+            logger.info("Adding youtube_default_publish_mode to pipelines")
+            connection.execute(
+                text(
+                    "ALTER TABLE pipelines "
+                    "ADD COLUMN IF NOT EXISTS youtube_default_publish_mode VARCHAR(20) DEFAULT 'immediate'"
+                )
+            )
+
+        # Backfill: existing rows keep immediate semantics.
+        try:
+            connection.execute(
+                text(
+                    "UPDATE publications SET youtube_publish_mode='immediate' "
+                    "WHERE youtube_publish_mode IS NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE video_jobs SET youtube_publish_mode='immediate' "
+                    "WHERE youtube_publish_mode IS NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE destinations SET youtube_default_publish_mode='immediate' "
+                    "WHERE youtube_default_publish_mode IS NULL"
+                )
+            )
+        except Exception:
+            logger.info("youtube publish mode backfill skipped")
+
         default_pipeline_id = ensure_default_pipeline(connection)
 
         if default_pipeline_id is not None:
