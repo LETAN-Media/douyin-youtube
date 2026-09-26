@@ -123,10 +123,14 @@ async function apiFetch<T>(
   }
 
   if (!res.ok) {
-    const detail =
+    const rawDetail =
       typeof data === "object" && data !== null && "detail" in data
-        ? String((data as { detail: unknown }).detail)
+        ? (data as { detail: unknown }).detail
         : "";
+    const detail =
+      typeof rawDetail === "object" && rawDetail !== null
+        ? JSON.stringify(rawDetail)
+        : String(rawDetail ?? "");
     throw new ApiError(res.status, friendlyMessage(res.status, detail));
   }
 
@@ -614,6 +618,46 @@ export async function getChannelDetail(
 ): Promise<ChannelDetail> {
   return apiFetch<ChannelDetail>(
     `/api/channels/${encodeURIComponent(destinationId)}`,
+  );
+}
+
+export async function createDailyOverride(
+  destinationId: string,
+  extraAllowed = 1,
+  reason = "user confirmed",
+  source: "user_command" | "ui_confirmation" = "ui_confirmation",
+): Promise<unknown> {
+  return apiFetch(
+    `/api/channels/${encodeURIComponent(destinationId)}/overrides`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        extra_allowed: extraAllowed,
+        reason,
+        source,
+      }),
+    },
+  );
+}
+
+export async function getScheduleCapacity(
+  destinationId: string,
+): Promise<{
+  destination_id: string;
+  daily_limit: number;
+  timezone: string;
+  today: string;
+  published_today: number;
+  scheduled_today: number;
+  used_today: number;
+  remaining_today: number;
+  extra_allowed_today: number;
+  allowed_today: number;
+  queued: number;
+  next_available_slot?: string | null;
+}> {
+  return apiFetch(
+    `/api/channels/${encodeURIComponent(destinationId)}/schedule-capacity`,
   );
 }
 

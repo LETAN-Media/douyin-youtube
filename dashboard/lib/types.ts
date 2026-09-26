@@ -340,6 +340,7 @@ export interface ManualPublishPayload {
   youtube_publish_date?: string | null;
   youtube_publish_time?: string | null;
   youtube_schedule_timezone?: string | null;
+  queue_if_full?: boolean;
 }
 
 export interface UpcomingItem {
@@ -526,6 +527,20 @@ export interface ChannelDetail {
   inventory_count?: number;
   failed_count?: number;
   next_slot?: string | null;
+  shorts_capacity?: {
+    destination_id: string;
+    daily_limit: number;
+    timezone: string;
+    today: string;
+    published_today: number;
+    scheduled_today: number;
+    used_today: number;
+    remaining_today: number;
+    extra_allowed_today: number;
+    allowed_today: number;
+    queued: number;
+    next_available_slot?: string | null;
+  } | null;
 
   // AI Comment Reply — a separate subsystem from all metadata fields above.
   comment_reply_enabled?: boolean;

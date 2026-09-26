@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 import re
@@ -37,9 +37,9 @@ class PipelineBase(BaseModel):
     ] = "public"
     enabled: bool = True
 
-    daily_upload_limit: int = 6
+    daily_upload_limit: int = 4
     upload_slots: list[str] | None = Field(
-        default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+        default=["10:00", "14:00", "18:00", "22:00"],
     )
     backlog_slots_per_day: int = 4
     new_slots_per_day: int = 2
@@ -368,11 +368,11 @@ class DestinationBase(BaseModel):
         max_length=300,
     )
     enabled: bool = True
-    daily_upload_limit: int = 6
+    daily_upload_limit: int = 4
     timezone: str = "Asia/Ho_Chi_Minh"
     youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] = "immediate"
     upload_slots: list[str] | None = Field(
-        default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+        default=["10:00", "14:00", "18:00", "22:00"],
     )
     publish_strategy: Literal["broadcast", "rotate", "selected"] = "broadcast"
     metadata_language: str | None = Field(
@@ -421,11 +421,11 @@ class DestinationCreate(BaseModel):
         max_length=300,
     )
     enabled: bool = True
-    daily_upload_limit: int = Field(default=6, ge=1, le=50)
+    daily_upload_limit: int = Field(default=4, ge=1, le=50)
     timezone: str = Field(default="Asia/Ho_Chi_Minh", max_length=50)
     youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] = "immediate"
     upload_slots: list[str] | None = Field(
-        default=["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+        default=["10:00", "14:00", "18:00", "22:00"],
     )
     publish_strategy: Literal["broadcast", "rotate", "selected"] = "broadcast"
     metadata_language: str | None = Field(
@@ -635,6 +635,67 @@ class ManualPublishRequest(BaseModel):
     youtube_publish_date: str | None = None
     youtube_publish_time: str | None = None
     youtube_schedule_timezone: str | None = None
+    # Shorts 4/day rule: when immediate publish would exceed the daily
+    # quota, queue for the next free slot instead of 409.
+    queue_if_full: bool = False
+
+
+class BatchImportRequest(BaseModel):
+    urls: list[str] = Field(min_length=1, max_length=100)
+
+
+class BatchImportItem(BaseModel):
+    url: str
+    status: str = "queued"
+    scheduled_at: datetime | None = None
+    video_id: str | None = None
+    error: str | None = None
+
+
+class BatchImportResponse(BaseModel):
+    imported: int = 0
+    scheduled_today: int = 0
+    scheduled_future: int = 0
+    rejected: int = 0
+    items: list[BatchImportItem] = Field(default_factory=list)
+    days: dict[str, int] = Field(default_factory=dict)
+    next_available_slot: str | None = None
+
+
+class ScheduleCapacityOut(BaseModel):
+    destination_id: str
+    daily_limit: int
+    timezone: str
+    today: str
+    published_today: int
+    scheduled_today: int
+    used_today: int
+    remaining_today: int
+    extra_allowed_today: int = 0
+    allowed_today: int = 4
+    queued: int
+    next_available_slot: str | None = None
+
+
+class DailyOverrideCreate(BaseModel):
+    extra_allowed: int = Field(default=1, ge=1, le=10)
+    reason: str | None = None
+    approved_by: str | None = None
+    source: Literal["user_command", "ui_confirmation"] = "ui_confirmation"
+
+
+class DailyOverrideOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    destination_id: str
+    date: str
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    reason: str | None = None
+    extra_allowed: int
+    source: str
+    created_at: datetime
 
 
 class ManualPublicationItem(BaseModel):
@@ -676,6 +737,7 @@ class PublicationRescheduleRequest(BaseModel):
 
 class PublicationPublishRequest(BaseModel):
     destination_id: str = Field(max_length=36)
+    queue_if_full: bool = False
 
 
 class YouTubeScheduleUpdateRequest(BaseModel):
@@ -767,7 +829,7 @@ class ChannelItem(BaseModel):
 
 class ChannelDetailResponse(BaseModel):
     channel: ChannelItem
-    daily_upload_limit: int = 6
+    daily_upload_limit: int = 4
     metadata_profile: str | None = None
     metadata_language: str | None = None
     fixed_hashtags: list[str] | None = None
@@ -784,6 +846,8 @@ class ChannelDetailResponse(BaseModel):
     inventory_count: int = 0
     failed_count: int = 0
     next_slot: str | None = None
+    # Shorts 4/day capacity snapshot for the Queue UI card.
+    shorts_capacity: dict[str, Any] | None = None
 
     # AI Comment Reply (separate from every metadata field above).
     comment_reply_enabled: bool = False

@@ -86,6 +86,15 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const channel = detail.channel;
   const isConnected = channel.connected;
 
+  const capacity = detail.shorts_capacity;
+  const dailyLimit = capacity?.daily_limit ?? 4;
+  const publishedToday = capacity?.published_today ?? channel.published_today ?? 0;
+  const scheduledToday = capacity?.scheduled_today ?? 0;
+  const extraAllowed = capacity?.extra_allowed_today ?? 0;
+  const isLimitReached = publishedToday >= (dailyLimit + extraAllowed);
+  const queuePending = channel.queue_count ?? detail.queue?.length ?? 0;
+  const queuedLater = capacity ? Math.max(0, capacity.queued - scheduledToday) : Math.max(0, queuePending - Math.max(0, dailyLimit - publishedToday));
+
   // Refresh full channel detail
   const reloadDetail = useCallback(async () => {
     try {
@@ -129,6 +138,12 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [duplicateWarning, setDuplicateWarning] = useState<{
     message: string;
     external_url?: string;
+  } | null>(null);
+  const [limitModal, setLimitModal] = useState<{
+    destination_id: string;
+    destination_name: string;
+    daily_limit: number;
+    published_today: number;
   } | null>(null);
 
   const [activePublications, setActivePublications] = useState<ManualPublicationItem[]>([]);
@@ -228,7 +243,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   };
 
   // Publish Now to this channel
-  const handlePublish = async (forceDuplicate = false) => {
+  const handlePublish = async (forceDuplicate = false, queueIfFull = false) => {
     if (!resolvedVideo || publishing) return;
 
     setPublishing(true);
@@ -255,6 +270,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         youtube_publish_date: publishMode === "scheduled" && schedDate ? schedDate : undefined,
         youtube_publish_time: publishMode === "scheduled" && schedTime ? schedTime : undefined,
         youtube_schedule_timezone: schedTz,
+        queue_if_full: queueIfFull,
       };
 
       const res = await fetch(`/api/channels/${channel.destination_id}/publish`, {
@@ -273,7 +289,12 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         message?: string;
         external_url?: string;
         error?: string;
-        detail?: string;
+        detail?: unknown;
+        daily_limit?: number;
+        published_today?: number;
+        override_required?: boolean;
+        destination_id?: string;
+        destination_name?: string;
         publications?: ManualPublishResponse["publications"];
       } = {};
       try {
@@ -282,6 +303,22 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         throw new Error(
           `Publish thất bại (HTTP ${res.status}). Server không trả JSON — thử lại.`,
         );
+      }
+
+      const isDailyLimit =
+        data.code === "DAILY_LIMIT_REACHED" ||
+        data.override_required === true ||
+        (data.detail && typeof data.detail === "object" && ((data.detail as Record<string, unknown>).code === "DAILY_LIMIT_REACHED" || (data.detail as Record<string, unknown>).override_required === true));
+
+      if (res.status === 409 && isDailyLimit) {
+        const detailObj = (data.detail && typeof data.detail === "object" ? data.detail : data) as Record<string, unknown>;
+        setLimitModal({
+          destination_id: String(detailObj.destination_id || channel.destination_id),
+          destination_name: String(detailObj.destination_name || channel.channel_title),
+          daily_limit: Number(detailObj.daily_limit || 4),
+          published_today: Number(detailObj.published_today || 4),
+        });
+        return;
       }
 
       if (res.status === 409 && data.code === "DUPLICATE_VIDEO") {
@@ -293,7 +330,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       }
 
       if (!res.ok) {
-        throw new Error(data.error || data.detail || "Đăng video thất bại");
+        throw new Error(data.error || (typeof data.detail === "string" ? data.detail : "") || "Đăng video thất bại");
       }
 
       const result = data as ManualPublishResponse;
@@ -304,6 +341,34 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
     } catch (err: unknown) {
       setPublishError(err instanceof Error ? err.message : "Đăng video thất bại");
     } finally {
+      setPublishing(false);
+    }
+  };
+
+  const handleCancelLimit = async () => {
+    setLimitModal(null);
+    await handlePublish(false, true);
+  };
+
+  const handleConfirmOverride = async () => {
+    if (!limitModal) return;
+    const destId = limitModal.destination_id;
+    setLimitModal(null);
+    setPublishing(true);
+    try {
+      await fetch(`/api/channels/${encodeURIComponent(destId)}/overrides`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          extra_allowed: 1,
+          reason: "User confirmed override via UI",
+          source: "ui_confirmation",
+        }),
+      });
+      await handlePublish(false, false);
+      reloadDetail();
+    } catch (err: unknown) {
+      setPublishError(err instanceof Error ? err.message : "Tạo override thất bại");
       setPublishing(false);
     }
   };
@@ -1392,14 +1457,26 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
           {/* Summary Stats */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <span className="text-[11px] font-bold text-slate-400">Published today</span>
+              <span className="text-[11px] font-bold text-slate-400">Daily Shorts</span>
               <p className="mt-1 text-2xl font-black text-slate-900">
-                {channel.published_today} <span className="text-xs font-semibold text-slate-400">/ {detail.daily_upload_limit}</span>
+                {publishedToday} <span className="text-xs font-semibold text-slate-400">/ {dailyLimit}</span>
               </p>
+              <div className="mt-1">
+                {extraAllowed > 0 ? (
+                  <span className="text-[11px] font-bold text-amber-600">+{extraAllowed} user override</span>
+                ) : isLimitReached ? (
+                  <span className="text-[11px] font-bold text-rose-600">Daily limit reached</span>
+                ) : (
+                  <span className="text-[11px] font-bold text-slate-500">{Math.max(0, (dailyLimit + extraAllowed) - publishedToday)} slots remaining</span>
+                )}
+              </div>
             </div>
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <span className="text-[11px] font-bold text-slate-400">Queue pending</span>
-              <p className="mt-1 text-2xl font-black text-slate-900">{channel.queue_count}</p>
+              <span className="text-[11px] font-bold text-slate-400">Queue</span>
+              <p className="mt-1 text-2xl font-black text-slate-900">{queuePending}</p>
+              <p className="mt-1 text-[11px] font-bold text-slate-500">
+                {queuePending} waiting for next slots
+              </p>
             </div>
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <span className="text-[11px] font-bold text-slate-400">Inventory</span>
@@ -1426,6 +1503,37 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   <span className="text-amber-600">PAUSED</span>
                 )}
               </p>
+            </div>
+          </div>
+
+          {/* Daily Shorts & Queue Summary Strip */}
+          <div className="rounded-2xl border border-indigo-100 bg-indigo-50/40 p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="flex items-center gap-1.5 font-extrabold text-indigo-950">
+                  <IconClock size={15} />
+                  Hôm nay:
+                </span>
+                <span className="rounded-lg bg-white px-2.5 py-1 font-bold text-slate-700 shadow-xs border border-slate-200">
+                  <strong className="text-indigo-600">{publishedToday}/{dailyLimit}</strong> published
+                </span>
+                <span className="rounded-lg bg-white px-2.5 py-1 font-bold text-slate-700 shadow-xs border border-slate-200">
+                  <strong className="text-emerald-600">{scheduledToday}</strong> scheduled/eligible today
+                </span>
+                <span className="rounded-lg bg-white px-2.5 py-1 font-bold text-slate-700 shadow-xs border border-slate-200">
+                  <strong className="text-amber-600">{queuedLater}</strong> queued for later
+                </span>
+              </div>
+              {extraAllowed > 0 && (
+                <span className="rounded-lg bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800 border border-amber-200">
+                  +{extraAllowed} user override hôm nay
+                </span>
+              )}
+              {isLimitReached && extraAllowed === 0 && (
+                <span className="rounded-lg bg-rose-100 px-2.5 py-1 text-xs font-bold text-rose-800 border border-rose-200">
+                  Daily limit reached
+                </span>
+              )}
             </div>
           </div>
 
@@ -3069,6 +3177,49 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             </div>
           </form>
         </Card>
+      )}
+
+      {/* Daily Shorts Limit Confirmation Modal */}
+      {limitModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
+            <div className="flex items-center gap-3 text-rose-600">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-600">
+                <IconAlert size={20} />
+              </span>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900">
+                  Đạt giới hạn Shorts hôm nay
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {limitModal.destination_name}
+                </p>
+              </div>
+            </div>
+            <p className="mt-4 text-sm text-slate-600 leading-relaxed">
+              Channel này đã đạt giới hạn {limitModal.daily_limit} Shorts hôm nay.
+            </p>
+            <p className="mt-2 text-sm text-slate-700 font-semibold">
+              Bạn có muốn vượt giới hạn và đăng thêm video này hôm nay không?
+            </p>
+            <div className="mt-6 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={handleCancelLimit}
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition"
+              >
+                Huỷ
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmOverride}
+                className="rounded-xl bg-rose-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-rose-500 transition"
+              >
+                Vẫn đăng
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

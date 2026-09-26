@@ -229,7 +229,8 @@ class TestScheduler(unittest.TestCase):
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
         self.assertEqual(scheduled, 1)
 
-    def test_six_daily_slots(self):
+    def test_four_shorts_per_day_cap(self):
+        # Fixed rule: max 4 shorts/day/channel even with 6 configured slots.
         pipeline = self._make_pipeline()
         self._make_destination(pipeline)
         source = self._make_source(pipeline)
@@ -245,7 +246,7 @@ class TestScheduler(unittest.TestCase):
             self.db.commit()
 
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
-        self.assertEqual(scheduled, 6)
+        self.assertEqual(scheduled, 4)
 
     def test_one_job_per_slot_poll_10_times(self):
         pipeline = self._make_pipeline()
@@ -426,14 +427,15 @@ class TestScheduler(unittest.TestCase):
         concurrent_engine.dispose()
 
     def test_local_day_daily_limit(self):
+        # limit=3, destination ICT day: slots 08/11/14/17 ICT == 01/04/07/10 UTC.
         pipeline = self._make_pipeline(timezone="Asia/Ho_Chi_Minh", daily_upload_limit=3)
         self._make_destination(pipeline)
         source = self._make_source(pipeline)
 
         slot_utc_times = [
-            datetime.datetime(2026, 9, 14, 10, 5, tzinfo=datetime.timezone.utc),
-            datetime.datetime(2026, 9, 14, 13, 5, tzinfo=datetime.timezone.utc),
-            datetime.datetime(2026, 9, 14, 16, 5, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 9, 14, 1, 5, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 9, 14, 4, 5, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 9, 14, 7, 5, tzinfo=datetime.timezone.utc),
         ]
 
         for i, slot_time in enumerate(slot_utc_times):
@@ -441,14 +443,17 @@ class TestScheduler(unittest.TestCase):
             schedule_for_pipeline(self.db, pipeline, now=slot_time)
             self.db.commit()
 
+        # 4th attempt hits a due slot (17:00 ICT == 10:00 UTC) but the
+        # 3/day cap blocks it.
         video4 = self._make_video(source, pipeline, video_id="v4")
-        schedule_for_pipeline(self.db, pipeline, now=datetime.datetime(2026, 9, 14, 19, 0, tzinfo=datetime.timezone.utc))
+        schedule_for_pipeline(self.db, pipeline, now=datetime.datetime(2026, 9, 14, 10, 5, tzinfo=datetime.timezone.utc))
         self.db.commit()
 
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
         self.assertEqual(scheduled, 3)
 
     def test_backlog_new_ratio(self):
+        # Fixed 4/day cap: backlog fills first, new videos wait for next days.
         pipeline = self._make_pipeline()
         self._make_destination(pipeline)
         source = self._make_source(pipeline)
@@ -470,8 +475,9 @@ class TestScheduler(unittest.TestCase):
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").all()
         backlog_scheduled = [v for v in scheduled if v.is_backlog]
         new_scheduled = [v for v in scheduled if not v.is_backlog]
+        self.assertEqual(len(scheduled), 4)
         self.assertEqual(len(backlog_scheduled), 4)
-        self.assertEqual(len(new_scheduled), 2)
+        self.assertEqual(len(new_scheduled), 0)
 
     def test_round_robin_between_sources(self):
         pipeline = self._make_pipeline()

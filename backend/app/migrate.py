@@ -114,6 +114,7 @@ def run_migrations() -> None:
                 YouTubeChannelAnalyticsDaily,
                 YouTubeChannelDNA,
                 YouTubeContentFingerprint,
+                YouTubeDailyPublishOverride,
                 YouTubeDNASuggestion,
                 YouTubePerformanceSnapshot,
                 YouTubeResearchItem,
@@ -130,6 +131,7 @@ def run_migrations() -> None:
                 YouTubeContentFingerprint,
                 YouTubePerformanceSnapshot,
                 YouTubeDNASuggestion,
+                YouTubeDailyPublishOverride,
             ):
                 if not table_exists(connection, _model.__table__.name):
                     logger.info("Creating %s table", _model.__table__.name)
@@ -726,6 +728,19 @@ def run_migrations() -> None:
                 )
             except Exception:
                 logger.info("index %s skipped", _idx)
+
+        # Shorts slot reservation: one reservation per channel per minute.
+        # NULL scheduled_at rows stay distinct; legacy duplicates only log.
+        try:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uq_publication_destination_scheduled_at "
+                    "ON publications (destination_id, scheduled_at)"
+                )
+            )
+        except Exception:
+            logger.info("slot unique index skipped (possible legacy duplicates)")
 
         default_pipeline_id = ensure_default_pipeline(connection)
 

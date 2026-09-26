@@ -168,7 +168,7 @@ def get_next_upload_slot(
     timezone_name: str,
     now: datetime,
 ) -> datetime | None:
-    slots = slots or ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"]
+    slots = slots or list(SHORTS_DEFAULT_SLOTS)
     if not slots:
         return None
 
@@ -442,6 +442,501 @@ def get_slot_type(slot_index: int, backlog_slots: int, new_slots: int) -> str:
     return "new"
 
 
+# ---------------------------------------------------------------------------
+# YouTube Shorts fixed rule: MAX 4 shorts/day/channel.
+# ---------------------------------------------------------------------------
+
+SHORTS_DEFAULT_SLOTS = ["10:00", "14:00", "18:00", "22:00"]
+SHORTS_DEFAULT_TZ = "Asia/Ho_Chi_Minh"
+SHORTS_MAX_SLOTS_PER_DAY = 4
+SHORTS_MAX_LOOKAHEAD_DAYS = 365
+
+# Publication statuses that hold (reserve) a daily slot.
+SHORTS_RESERVED_STATUSES = {
+    "queued",
+    "scheduled",
+    "downloading",
+    "ai_metadata",
+    "uploading",
+    "processing",
+    "pending",
+}
+
+
+def shorts_daily_limit(destination: Destination | None = None) -> int:
+    """Hard cap: at most 4 shorts/day/channel (config-overridable)."""
+    try:
+        cap = int(getattr(settings, "youtube_shorts_daily_limit", 4) or 4)
+    except (TypeError, ValueError):
+        cap = 4
+    cap = max(1, cap)
+    if destination is not None:
+        try:
+            own = int(destination.daily_upload_limit or cap)
+        except (TypeError, ValueError):
+            own = cap
+        # Destination limit may only lower the cap, never exceed it.
+        return max(1, min(cap, own))
+    return cap
+
+
+def destination_tz(destination: Destination | None) -> str:
+    tz = (getattr(destination, "timezone", None) or "").strip() if destination else ""
+    return tz or SHORTS_DEFAULT_TZ
+
+
+def destination_today(destination: Destination | None, now: datetime):
+    """Local calendar date for a destination (fallback Asia/Ho_Chi_Minh)."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(destination_tz(destination))
+    except Exception:
+        tz = timezone.utc
+    return now.astimezone(tz).date()
+
+
+def shorts_slots_for_day(destination: Destination | None) -> list[tuple[int, int]]:
+    """Up to 4 (HH, MM) slots. Uses destination profile, else 10/14/18/22."""
+    raw = (getattr(destination, "upload_slots", None) or []) if destination else []
+    if not raw:
+        raw = list(SHORTS_DEFAULT_SLOTS)
+    out: list[tuple[int, int]] = []
+    for item in raw:
+        try:
+            hh, mm = str(item).strip().split(":")[:2]
+            h, m = int(hh), int(mm)
+            if 0 <= h <= 23 and 0 <= m <= 59 and (h, m) not in out:
+                out.append((h, m))
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if len(out) >= SHORTS_MAX_SLOTS_PER_DAY:
+            break
+    if not out:
+        out = [(10, 0), (14, 0), (18, 0), (22, 0)]
+    return out
+
+
+def local_day_bounds_for_date(
+    timezone_name: str, local_date
+) -> tuple[datetime, datetime]:
+    """UTC bounds for one local calendar date."""
+    tz = _resolve_tz(timezone_name or SHORTS_DEFAULT_TZ)
+    start_local = datetime.combine(
+        local_date, datetime.min.time().replace(tzinfo=tz)
+    )
+    return (
+        start_local.astimezone(timezone.utc),
+        (start_local + timedelta(days=1)).astimezone(timezone.utc),
+    )
+
+
+def count_day_usage(
+    db: Session,
+    destination: Destination,
+    local_date,
+) -> tuple[int, int]:
+    """Return (published, scheduled) shorts for a destination local date.
+
+    Published counts rows with published_at inside the day. Scheduled counts
+    rows in a slot-holding status with scheduled_at inside the day (legacy
+    rows with NULL scheduled_at fall back to creation day). Failed/skipped
+    never count.
+    """
+    tz_name = destination_tz(destination)
+    day_start, day_end = local_day_bounds_for_date(tz_name, local_date)
+
+    published = count_published_day(db, destination, local_date)
+
+    reserved = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == destination.id)
+        .where(Publication.status.in_(list(SHORTS_RESERVED_STATUSES)))
+        .where(
+            Publication.scheduled_at >= day_start,
+            Publication.scheduled_at < day_end,
+        )
+    ).scalar_one_or_none() or 0
+
+    # Legacy reserved rows without scheduled_at: attribute by creation day.
+    legacy = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == destination.id)
+        .where(Publication.status.in_(list(SHORTS_RESERVED_STATUSES)))
+        .where(Publication.scheduled_at.is_(None))
+        .where(Publication.created_at >= day_start)
+        .where(Publication.created_at < day_end)
+    ).scalar_one_or_none() or 0
+
+    return int(published), int(reserved + legacy)
+
+
+def count_published_day(
+    db: Session,
+    destination: Destination,
+    local_date,
+) -> int:
+    """Published shorts for a destination local date (quota source of truth)."""
+    tz_name = destination_tz(destination)
+    day_start, day_end = local_day_bounds_for_date(tz_name, local_date)
+    return int(
+        db.execute(
+            select(func.count(Publication.id))
+            .where(Publication.destination_id == destination.id)
+            .where(Publication.status == "published")
+            .where(Publication.published_at >= day_start)
+            .where(Publication.published_at < day_end)
+        ).scalar_one_or_none()
+        or 0
+    )
+
+
+def locked_destination(db: Session, destination_id: str) -> Destination | None:
+    """Row-lock one destination for quota check+create atomicity.
+
+    Serializes concurrent schedulers/manual publishes for the channel on
+    Postgres (FOR UPDATE). Hold the lock until commit.
+    """
+    return db.execute(
+        select(Destination)
+        .where(Destination.id == destination_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+
+
+def extra_allowed_today(
+    db: Session,
+    destination: Destination,
+    local_date,
+) -> int:
+    """Sum of user-approved extra slots for a destination local date."""
+    from app.models import YouTubeDailyPublishOverride
+
+    day_str = local_date.isoformat() if hasattr(local_date, "isoformat") else str(local_date)
+    total = db.execute(
+        select(func.coalesce(func.sum(YouTubeDailyPublishOverride.extra_allowed), 0))
+        .where(YouTubeDailyPublishOverride.destination_id == destination.id)
+        .where(YouTubeDailyPublishOverride.date == day_str)
+    ).scalar_one_or_none()
+    try:
+        return max(0, int(total or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def day_allowance(
+    db: Session,
+    destination: Destination,
+    local_date,
+    include_override: bool,
+) -> tuple[int, int, int]:
+    """Return (published, extra, allowed) for manual quota decisions."""
+    published = count_published_day(db, destination, local_date)
+    extra = extra_allowed_today(db, destination, local_date) if include_override else 0
+    return published, extra, shorts_daily_limit(destination) + extra
+
+
+def is_slot_free(
+    db: Session,
+    destination: Destination,
+    slot_utc: datetime,
+) -> bool:
+    """A slot is free when no active job claims its key and no active
+    publication targets the same minute."""
+    if slot_utc.tzinfo is None:
+        slot_utc = slot_utc.replace(tzinfo=timezone.utc)
+    key = f"{destination.id}:{slot_utc.isoformat()}"
+    claimed = db.execute(
+        select(VideoJob.id)
+        .where(VideoJob.schedule_slot_key == key)
+        .where(VideoJob.status.notin_(["failed"]))
+        .limit(1)
+    ).scalar_one_or_none()
+    if claimed is not None:
+        return False
+    minute = slot_utc.replace(second=0, microsecond=0)
+    # Reserved rows hold the minute; published rows keep history blocked too
+    # (matches the partial unique index on reserved statuses: a published
+    # row already passed through it, so the minute stays taken).
+    rows = db.execute(
+        select(Publication.scheduled_at)
+        .where(Publication.destination_id == destination.id)
+        .where(
+            Publication.status.in_(list(SHORTS_RESERVED_STATUSES))
+            | Publication.status.in_(["published", "failed"])
+        )
+        .where(Publication.scheduled_at.is_not(None))
+    ).all()
+    for (ts,) in rows:
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts.replace(second=0, microsecond=0) == minute:
+            return False
+    return True
+
+
+def find_next_available_slot(
+    db: Session,
+    destination: Destination,
+    now: datetime,
+    start_date=None,
+) -> tuple[Any, datetime] | None:
+    """Nearest (local_date, slot_utc) with a free slot and day usage < 4.
+
+    Skips past slots today. Never disturbs already-scheduled rows.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    tz_name = destination_tz(destination)
+    tz = _resolve_tz(tz_name)
+    limit = shorts_daily_limit(destination)
+    slots = shorts_slots_for_day(destination)
+    base_date = start_date or now.astimezone(tz).date()
+    for offset in range(SHORTS_MAX_LOOKAHEAD_DAYS + 1):
+        day = base_date + timedelta(days=offset)
+        published, scheduled = count_day_usage(db, destination, day)
+        if published + scheduled >= limit:
+            continue
+        for hh, mm in slots:
+            slot_local = datetime.combine(
+                day, datetime.min.time().replace(hour=hh, minute=mm, tzinfo=tz)
+            )
+            slot_utc = slot_local.astimezone(timezone.utc)
+            if slot_utc <= now:
+                continue
+            if not is_slot_free(db, destination, slot_utc):
+                continue
+            return day, slot_utc
+    return None
+
+
+def get_capacity(
+    db: Session,
+    destination: Destination,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Capacity snapshot for UI/API. Read-only."""
+    now = now or utcnow()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    tz_name = destination_tz(destination)
+    tz = _resolve_tz(tz_name)
+    today = now.astimezone(tz).date()
+    limit = shorts_daily_limit(destination)
+    published, scheduled = count_day_usage(db, destination, today)
+    used = published + scheduled
+    extra = extra_allowed_today(db, destination, today)
+    queued = db.execute(
+        select(func.count(Publication.id))
+        .where(Publication.destination_id == destination.id)
+        .where(Publication.status == "queued")
+    ).scalar_one_or_none() or 0
+    nxt = find_next_available_slot(db, destination, now)
+    return {
+        "destination_id": destination.id,
+        "daily_limit": limit,
+        "timezone": tz_name,
+        "today": today.isoformat(),
+        "published_today": int(published),
+        "scheduled_today": int(scheduled),
+        "used_today": int(used),
+        "remaining_today": max(0, limit - used),
+        "extra_allowed_today": int(extra),
+        "allowed_today": int(limit + extra),
+        "queued": int(queued),
+        "next_available_slot": nxt[1].isoformat() if nxt else None,
+    }
+
+
+def allocate_publication(
+    db: Session,
+    destination: Destination,
+    pipeline: Pipeline,
+    douyin_video: DouyinVideo,
+    now: datetime,
+    publication_mode: str = "auto",
+    title: str | None = None,
+    description: str | None = None,
+) -> tuple[Publication, datetime, Any] | None:
+    """Persist one queued publication on the nearest free slot (FIFO-safe).
+
+    Creates NO VideoJob: jobs are created by promote_due_publications when
+    the slot becomes due, so future days never leak into the worker early.
+    Retries forward on slot collision (concurrent workers).
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    for _ in range(SHORTS_MAX_SLOTS_PER_DAY * 4):
+        # Serialize concurrent allocators on Postgres; single commit below
+        # keeps check+insert atomic per attempt.
+        try:
+            locked_destination(db, destination.id)
+        except Exception:
+            pass
+        found = find_next_available_slot(db, destination, now)
+        if found is None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return None
+        day, slot_utc = found
+        # Skip if this video already has an active publication here.
+        existing = db.execute(
+            select(Publication)
+            .where(Publication.douyin_video_id == douyin_video.id)
+            .where(Publication.destination_id == destination.id)
+            .where(Publication.status.notin_(["failed", "skipped", "published"]))
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing, existing.scheduled_at or slot_utc, day
+        pub = Publication(
+            pipeline_id=pipeline.id,
+            douyin_video_id=douyin_video.id,
+            destination_id=destination.id,
+            platform=destination.platform,
+            publication_mode=publication_mode,
+            status="queued",
+            scheduled_at=slot_utc,
+            title=title,
+            description=description,
+        )
+        try:
+            sched_tz = destination_tz(destination)
+            try:
+                pub.youtube_publish_mode = "immediate"
+                pub.youtube_schedule_timezone = sched_tz
+                pub.youtube_scheduled = False
+                pub.youtube_privacy_status = "public"
+            except Exception:
+                pass
+        except Exception:
+            pass
+        db.add(pub)
+        try:
+            db.commit()
+            db.refresh(pub)
+            return pub, slot_utc, day
+        except IntegrityError:
+            db.rollback()
+            # Either the slot was taken concurrently (retry forward) or
+            # this video already has an active publication here (reuse it).
+            existing = db.execute(
+                select(Publication)
+                .where(Publication.douyin_video_id == douyin_video.id)
+                .where(Publication.destination_id == destination.id)
+                .where(Publication.status.notin_(["failed", "skipped", "published"]))
+                .limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing, existing.scheduled_at or slot_utc, day
+            continue
+    return None
+
+
+def promote_due_publications(
+    db: Session,
+    destination: Destination,
+    now: datetime,
+    grace_minutes: int = 10,
+) -> int:
+    """Create pending jobs for queued publications whose slot is due.
+
+    FIFO by (scheduled_at, created_at). Respects the 4/day cap and claims
+    each slot via schedule_slot_key so concurrent workers cannot double
+    schedule. Returns number of jobs created.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    due_before = now + timedelta(minutes=max(0, grace_minutes))
+    queued = list(
+        db.execute(
+            select(Publication)
+            .where(Publication.destination_id == destination.id)
+            .where(Publication.status == "queued")
+            .where(Publication.scheduled_at.is_not(None))
+            .where(Publication.scheduled_at <= due_before)
+            .order_by(Publication.scheduled_at.asc(), Publication.created_at.asc())
+            .limit(50)
+        )
+        .scalars()
+        .all()
+    )
+    created = 0
+    promoted_this_run = 0
+    pipeline = db.get(Pipeline, destination.pipeline_id)
+    for pub in queued:
+        slot_utc = pub.scheduled_at
+        if slot_utc is None:
+            continue
+        if slot_utc.tzinfo is None:
+            slot_utc = slot_utc.replace(tzinfo=timezone.utc)
+        tz_name = destination_tz(destination)
+        local_day = slot_utc.astimezone(_resolve_tz(tz_name)).date()
+        # Scheduler/auto NEVER consumes override headroom: hard cap 4
+        # published. In-run counter stops catch-up bursts from overshooting.
+        published = count_published_day(db, destination, local_day)
+        if published + promoted_this_run >= shorts_daily_limit(destination):
+            continue
+        slot_key = f"{destination.id}:{slot_utc.isoformat()}"
+        taken = db.execute(
+            select(VideoJob.id)
+            .where(VideoJob.schedule_slot_key == slot_key)
+            .where(VideoJob.status.notin_(["failed"]))
+            .limit(1)
+        ).scalar_one_or_none()
+        if taken is not None:
+            # Already promoted (e.g. by a concurrent worker): just flip state.
+            if pub.status == "queued":
+                pub.status = "scheduled"
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+            continue
+        video = db.get(DouyinVideo, pub.douyin_video_id)
+        if video is None:
+            continue
+        job = VideoJob(
+            source_url=video.url,
+            source_title=video.title,
+            title=pub.title,
+            description=pub.description or video.description,
+            privacy_status=(pipeline.default_privacy if pipeline else "public"),
+            status="pending",
+            pipeline_id=pub.pipeline_id,
+            source_video_id=video.video_id,
+            destination_id=destination.id,
+            publication_id=pub.id,
+            schedule_slot_key=slot_key,
+        )
+        try:
+            sched_tz = destination_tz(destination)
+            try:
+                job.youtube_publish_mode = "immediate"
+                job.youtube_schedule_timezone = sched_tz
+                job.youtube_scheduled = False
+            except Exception:
+                pass
+        except Exception:
+            pass
+        db.add(job)
+        pub.status = "scheduled"
+        try:
+            db.commit()
+            created += 1
+            promoted_this_run += 1
+        except IntegrityError:
+            db.rollback()
+            continue
+    return created
+
+
 def count_inventory_available(db: Session, pipeline: Pipeline) -> int:
     count = db.execute(
         select(func.count(DouyinVideo.id))
@@ -620,7 +1115,18 @@ def schedule_for_destination(
         )
         return
 
-    slots = destination.upload_slots or ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"]
+    # 0. Promote queued batch-import publications whose slot is due.
+    # FIFO by (scheduled_at, created_at); slot-key claim stops duplicates.
+    try:
+        promote_due_publications(db, destination, now)
+    except Exception:
+        logger.exception(
+            "Failed to promote queued publications for destination %s",
+            destination.id,
+        )
+
+    # Fixed rule: at most 4 slots/day/channel (profile slots, else default).
+    slots = [f"{h:02d}:{m:02d}" for h, m in shorts_slots_for_day(destination)]
     if not slots:
         _mark_destination_cycle(db, destination, now, REASON_WAITING_SLOT)
         return
@@ -646,20 +1152,22 @@ def schedule_for_destination(
         _mark_destination_cycle(db, destination, now, REASON_WAITING_SLOT)
         return
 
-    local_day_start_utc, _ = get_local_day_bounds(destination.timezone, now)
     created_any = False
 
     for slot in due_slots:
-        # Per-destination daily limit (checked before every slot).
-        today_released = count_todays_released_jobs(
-            db, pipeline, local_day_start_utc, destination
-        )
-        if today_released >= (destination.daily_upload_limit or 6):
+        # Fixed rule: max 4 shorts/day/channel, counting published +
+        # scheduled-for-today in the destination timezone.
+        tz_name = destination_tz(destination)
+        slot_day = slot.astimezone(_resolve_tz(tz_name)).date()
+        _pub_n, _sch_n = count_day_usage(db, destination, slot_day)
+        _cap = shorts_daily_limit(destination)
+        if _pub_n + _sch_n >= _cap:
             logger.info(
-                "Destination %s reached daily limit %s/%s",
+                "Destination %s reached daily limit %s/%s on %s",
                 destination.id,
-                today_released,
-                destination.daily_upload_limit,
+                _pub_n + _sch_n,
+                _cap,
+                slot_day.isoformat(),
             )
             _mark_destination_cycle(db, destination, now, REASON_DAILY_LIMIT)
             return
@@ -849,10 +1357,6 @@ def schedule_for_destination(
             video.video_id,
             destination.id,
             slot,
-        )
-        # Refresh day bounds in case catch-up spans midnight.
-        local_day_start_utc, _ = get_local_day_bounds(
-            destination.timezone, now
         )
 
     _mark_destination_cycle(

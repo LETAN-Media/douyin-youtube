@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: int = 60
     scheduler_startup_delay_seconds: int = 10
 
+    # YouTube Shorts fixed rule: max N shorts per day per channel.
+    youtube_shorts_daily_limit: int = 4
+
     # ---- AI Comment Reply ----
     # A subsystem independent of publishing: its own worker and interval so
     # comment polling can never block a video upload. Off entirely when

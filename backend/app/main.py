@@ -43,6 +43,9 @@ from app.models import (
     YouTubeComment,
 )
 from app.schemas import (
+    BatchImportItem,
+    BatchImportRequest,
+    BatchImportResponse,
     ChannelAddSourceRequest,
     ChannelAutoStatus,
     ChannelDetailResponse,
@@ -74,12 +77,15 @@ from app.schemas import (
     ManualPublishResponse,
     ManualResolveRequest,
     ManualResolveResponse,
+    DailyOverrideCreate,
+    DailyOverrideOut,
     PipelineCreate,
     PipelineOut,
     PipelineUpdate,
     PublicationOut,
     PublicationPublishRequest,
     PublicationRescheduleRequest,
+    ScheduleCapacityOut,
     SourceCookieSave,
     SourceCookieStatus,
     SourceCookieTestResponse,
@@ -2578,6 +2584,76 @@ def publish_inventory_video_now(
 
     now = _utcnow()
 
+    # Shorts 4/day rule for immediate publish (override-aware).
+    from app.scheduler import (
+        destination_today as _dest_today2,
+        day_allowance as _day_allowance2,
+        find_next_available_slot as _next_slot2,
+        shorts_daily_limit as _shorts_limit2,
+    )
+
+    _today2 = _dest_today2(destination, now)
+    _pub_n2, _extra_n2, _allowed_n2 = _day_allowance2(
+        db, destination, _today2, include_override=True
+    )
+    _cap2 = _shorts_limit2(destination)
+    _dest_locked2 = None
+    try:
+        from app.scheduler import locked_destination as _lock_dest2
+
+        _dest_locked2 = _lock_dest2(db, destination.id)
+        if _dest_locked2 is not None:
+            destination = _dest_locked2
+    except Exception:
+        pass
+    if _pub_n2 >= _allowed_n2:
+        if payload.queue_if_full:
+            allocated = _next_slot2(db, destination, now)
+            if allocated is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="DAILY_LIMIT_REACHED: no free slot within a year",
+                )
+            _day2, _slot_utc2 = allocated
+            if existing is not None and existing.status != "published":
+                existing.status = "queued"
+                existing.scheduled_at = _slot_utc2
+                existing.error = None
+                existing.attempts = 0
+                publication = existing
+            else:
+                if existing is not None and existing.status == "published":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Video đã published trên destination này",
+                    )
+                publication = Publication(
+                    pipeline_id=pipeline_id,
+                    douyin_video_id=video.id,
+                    destination_id=destination.id,
+                    platform=destination.platform,
+                    status="queued",
+                    scheduled_at=_slot_utc2,
+                )
+                db.add(publication)
+            db.commit()
+            db.refresh(publication)
+            return publication
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DAILY_LIMIT_REACHED",
+                "message": f"Daily limit reached ({_pub_n2}/{_allowed_n2}).",
+                "destination_id": destination.id,
+                "daily_limit": _cap2,
+                "published_today": _pub_n2,
+                "remaining": 0,
+                "override_required": True,
+                "extra_allowed_today": _extra_n2,
+                "options": ["Queue for tomorrow", "Replace a scheduled slot"],
+            },
+        )
+
     if existing is not None:
         if existing.status == "published":
             raise HTTPException(
@@ -3126,12 +3202,34 @@ def retry_publication(
     publication.status = "queued"
     publication.error = None
     publication.attempts = 0
-    publication.scheduled_at = _utcnow()
+    # Keep the original slot so a failed job retries into its reserved
+    # place (slot auto-frees while failed). Only assign now when empty.
+    if publication.scheduled_at is None:
+        publication.scheduled_at = _utcnow()
 
-    # Enqueue a worker job scoped to this destination so retry actually publishes.
+    # Enqueue a worker job only when the slot is due and the 4/day cap
+    # allows it; otherwise promotion picks it up later. Never lose the item.
+    from app.scheduler import (
+        count_day_usage as _count_day_usage3,
+        destination_today as _dest_today3,
+        shorts_daily_limit as _shorts_limit3,
+    )
+
+    _dest3 = db.get(Destination, publication.destination_id)
+    _due = False
+    if _dest3 is not None and publication.scheduled_at is not None:
+        _ts = publication.scheduled_at
+        if _ts.tzinfo is None:
+            _ts = _ts.replace(tzinfo=timezone.utc)
+        if _ts <= _utcnow() + timedelta(minutes=10):
+            _p3, _s3 = _count_day_usage3(
+                db, _dest3, _dest_today3(_dest3, _utcnow())
+            )
+            _due = (_p3 + _s3) <= _shorts_limit3(_dest3)
+
     video = db.get(DouyinVideo, publication.douyin_video_id)
     pipeline = db.get(Pipeline, publication.pipeline_id)
-    if video is not None and pipeline is not None:
+    if _due and video is not None and pipeline is not None:
         job = VideoJob(
             source_url=video.url,
             source_title=video.title,
@@ -3144,6 +3242,16 @@ def retry_publication(
             destination_id=publication.destination_id,
             publication_id=publication.id,
         )
+        try:
+            if publication.scheduled_at is not None:
+                _sk = publication.scheduled_at
+                if _sk.tzinfo is None:
+                    _sk = _sk.replace(tzinfo=timezone.utc)
+                job.schedule_slot_key = (
+                    f"{publication.destination_id}:{_sk.isoformat()}"
+                )
+        except Exception:
+            pass
         db.add(job)
 
     db.commit()
@@ -3213,7 +3321,14 @@ def reschedule_publication(
     publication.status = "scheduled"
     publication.scheduled_at = payload.scheduled_at
     publication.error = None
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="SLOT_COLLISION: this time slot is already taken for this channel",
+        )
     db.refresh(publication)
     return publication
 
@@ -3876,6 +3991,75 @@ def manual_publish_endpoint(
                 pass
         privacy = MODE_TO_PRIVACY.get(raw_mode, "public")
 
+        # Shorts 4/day rule: immediate Publish Now must respect the quota.
+        # allowed = 4 + user-approved extra (scheduler never auto-overrides).
+        if raw_mode == "immediate":
+            from app.scheduler import (
+                destination_today as _dest_today,
+                day_allowance as _day_allowance,
+                find_next_available_slot as _next_slot,
+            )
+
+            _today = _dest_today(dest, now)
+            try:
+                from app.scheduler import locked_destination as _lock_dest
+
+                if _lock_dest(db, dest.id) is not None:
+                    pass
+            except Exception:
+                pass
+            _pub_n, _extra_n, _allowed_n = _day_allowance(
+                db, dest, _today, include_override=True
+            )
+            _cap = _allowed_n - _extra_n
+            if _pub_n >= _allowed_n:
+                if payload.queue_if_full:
+                    allocated = _next_slot(db, dest, now)
+                    if allocated is None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="DAILY_LIMIT_REACHED: no free slot within a year",
+                        )
+                    _day, _slot_utc = allocated
+                    pub.status = "queued"
+                    pub.scheduled_at = _slot_utc
+                    pub.error = None
+                    pub.attempts = 0
+                    db.flush()
+                    created_publications.append(
+                        ManualPublicationItem(
+                            id=pub.id,
+                            destination_id=dest.id,
+                            destination_name=dest.name,
+                            platform=dest.platform,
+                            status="queued",
+                            progress=0,
+                            video_title=title or video.title,
+                            source_url=payload.source_url,
+                            thumbnail=video.thumbnail_url or payload.thumbnail,
+                            external_url=pub.external_url,
+                            error=None,
+                            created_at=pub.created_at,
+                            published_at=pub.published_at,
+                        )
+                    )
+                    continue
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "DAILY_LIMIT_REACHED",
+                        "message": f"Daily limit reached ({_pub_n}/{_allowed_n}).",
+                        "destination_id": dest.id,
+                        "destination_name": dest.name,
+                        "daily_limit": _cap,
+                        "published_today": _pub_n,
+                        "remaining": 0,
+                        "override_required": True,
+                        "extra_allowed_today": _extra_n,
+                        "options": ["Queue for tomorrow", "Replace a scheduled slot"],
+                    },
+                )
+
         # Reset scheduling columns on reuse.
         try:
             pub.youtube_publish_mode = raw_mode
@@ -4382,10 +4566,14 @@ def get_channel_detail_endpoint(
         .where(Publication.status == "failed")
     ).scalar() or 0
 
-    from app.scheduler import get_next_upload_slot
+    from app.scheduler import get_capacity, get_next_upload_slot
     slots = d.upload_slots or (pipeline.upload_slots if pipeline else []) or ["08:00", "12:00", "16:00"]
     nxt = get_next_upload_slot(slots, d.timezone or "UTC", now_utc)
     next_slot_str = nxt.isoformat() if nxt else None
+    try:
+        shorts_capacity = get_capacity(db, d, now_utc)
+    except Exception:
+        shorts_capacity = None
 
     from app.comment_poller import replies_today as _comment_replies_today
     from app.youtube import (
@@ -4448,6 +4636,7 @@ def get_channel_detail_endpoint(
         inventory_count=inventory_count,
         failed_count=failed_count,
         next_slot=next_slot_str,
+        shorts_capacity=shorts_capacity,
     )
 
 
@@ -5305,6 +5494,263 @@ def get_channel_inventory_endpoint(
             }
             for v in videos
         ],
+    }
+
+
+@app.get(
+    "/api/channels/{destination_id}/schedule-capacity",
+    response_model=ScheduleCapacityOut,
+    dependencies=[Depends(require_admin)],
+)
+def channel_schedule_capacity_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+) -> ScheduleCapacityOut:
+    """Shorts 4/day capacity snapshot for one channel. Read-only."""
+    from app.scheduler import get_capacity
+
+    d = db.get(Destination, destination_id)
+    if d is None or (d.platform or "").lower() != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    return ScheduleCapacityOut(**get_capacity(db, d, _utcnow()))
+
+
+@app.post(
+    "/api/channels/{destination_id}/import-urls",
+    response_model=BatchImportResponse,
+    dependencies=[Depends(require_admin)],
+)
+def channel_batch_import_endpoint(
+    destination_id: str,
+    payload: BatchImportRequest,
+    db: Session = Depends(get_db),
+) -> BatchImportResponse:
+    """Batch-import Douyin URLs into one channel with FIFO cross-day slots.
+
+    Every resolvable URL is persisted (never discarded); each video is
+    assigned to the nearest day with a free slot (max 4/day/channel).
+    """
+    from app.scheduler import (
+        allocate_publication,
+        destination_today,
+        get_capacity as _get_capacity,
+    )
+
+    d = db.get(Destination, destination_id)
+    if d is None or (d.platform or "").lower() != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    if not d.enabled:
+        raise HTTPException(status_code=409, detail="Channel đang bị pause")
+    pipeline = db.get(Pipeline, d.pipeline_id) if d.pipeline_id else None
+    if pipeline is None:
+        raise HTTPException(status_code=500, detail="Không tìm thấy pipeline phù hợp")
+
+    now = _utcnow()
+    today_str = destination_today(d, now).isoformat()
+    items: list[BatchImportItem] = []
+    scheduled_today = 0
+    scheduled_future = 0
+    rejected = 0
+    days: dict[str, int] = {}
+    seen_video_ids: set[str] = set()
+
+    for raw in payload.urls:
+        text = (raw or "").strip()
+        if not text:
+            rejected += 1
+            items.append(BatchImportItem(url=raw, status="rejected", error="Empty URL"))
+            continue
+        try:
+            resolved = resolve_douyin_input(text)
+        except HTTPException as exc:
+            rejected += 1
+            items.append(
+                BatchImportItem(url=text, status="rejected", error=str(exc.detail))
+            )
+            continue
+        except Exception as exc:
+            rejected += 1
+            items.append(
+                BatchImportItem(url=text, status="rejected", error=str(exc)[:300])
+            )
+            continue
+        if resolved.get("type") != "video":
+            rejected += 1
+            items.append(
+                BatchImportItem(
+                    url=text, status="rejected",
+                    error="Profile links are not importable as videos",
+                )
+            )
+            continue
+        video_id_val = resolved.get("video_id") or str(uuid.uuid4())[:12]
+        source_url = resolved.get("source_url") or text
+        if video_id_val in seen_video_ids:
+            items.append(
+                BatchImportItem(
+                    url=text, status="duplicate", video_id=video_id_val,
+                    error="Duplicate URL in this batch",
+                )
+            )
+            continue
+        seen_video_ids.add(video_id_val)
+        video = db.execute(
+            select(DouyinVideo)
+            .where(DouyinVideo.pipeline_id == pipeline.id)
+            .where(DouyinVideo.video_id == video_id_val)
+            .limit(1)
+        ).scalar_one_or_none()
+        if video is not None:
+            dup_pub = db.execute(
+                select(Publication.id)
+                .where(Publication.douyin_video_id == video.id)
+                .where(Publication.destination_id == d.id)
+                .where(Publication.status.notin_(["failed", "skipped"]))
+                .limit(1)
+            ).scalar_one_or_none()
+            if dup_pub is not None:
+                items.append(
+                    BatchImportItem(
+                        url=text, status="duplicate", video_id=video.video_id,
+                        error="Already queued/scheduled/published for this channel",
+                    )
+                )
+                continue
+        if video is None:
+            video = DouyinVideo(
+                pipeline_id=pipeline.id,
+                source_id=None,
+                video_id=video_id_val,
+                title=(resolved.get("caption") or "")[:300],
+                description=resolved.get("caption") or "",
+                url=source_url,
+                thumbnail_url=resolved.get("thumbnail"),
+                status="inventory",
+            )
+            db.add(video)
+            try:
+                db.commit()
+            except Exception:
+                # Concurrent duplicate insert: fall back to the existing row.
+                db.rollback()
+                video = db.execute(
+                    select(DouyinVideo)
+                    .where(DouyinVideo.pipeline_id == pipeline.id)
+                    .where(DouyinVideo.video_id == video_id_val)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if video is None:
+                    rejected += 1
+                    items.append(
+                        BatchImportItem(url=text, status="rejected", error="DB conflict")
+                    )
+                    continue
+            db.refresh(video)
+        allocated = allocate_publication(
+            db, d, pipeline, video, now,
+            publication_mode="manual",
+            title=(resolved.get("caption") or "")[:200],
+            description=resolved.get("caption") or "",
+        )
+        if allocated is None:
+            rejected += 1
+            items.append(
+                BatchImportItem(
+                    url=text, status="rejected", video_id=video.video_id,
+                    error="No free slot within a year",
+                )
+            )
+            continue
+        _pub, _slot_utc, _day = allocated
+        day_str = _day.isoformat()
+        days[day_str] = days.get(day_str, 0) + 1
+        if day_str == today_str:
+            scheduled_today += 1
+        else:
+            scheduled_future += 1
+        items.append(
+            BatchImportItem(
+                url=text, status="queued", scheduled_at=_slot_utc,
+                video_id=video.video_id,
+            )
+        )
+
+    cap = _get_capacity(db, d, now)
+    return BatchImportResponse(
+        imported=len([it for it in items if it.status != "rejected"]),
+        scheduled_today=scheduled_today,
+        scheduled_future=scheduled_future,
+        rejected=rejected,
+        items=items,
+        days=days,
+        next_available_slot=cap.get("next_available_slot"),
+    )
+
+
+@app.post(
+    "/api/channels/{destination_id}/overrides",
+    response_model=DailyOverrideOut,
+    status_code=201,
+    dependencies=[Depends(require_admin)],
+)
+def create_daily_override_endpoint(
+    destination_id: str,
+    payload: DailyOverrideCreate,
+    db: Session = Depends(get_db),
+) -> Any:
+    """Explicit user approval for extra slots today. Never auto-created."""
+    from app.models import YouTubeDailyPublishOverride
+    from app.scheduler import destination_today
+
+    d = db.get(Destination, destination_id)
+    if d is None or (d.platform or "").lower() != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    today_str = destination_today(d, _utcnow()).isoformat()
+    row = YouTubeDailyPublishOverride(
+        destination_id=d.id,
+        date=today_str,
+        approved_by=(payload.approved_by or "")[:200] or None,
+        reason=(payload.reason or "")[:2000] or None,
+        extra_allowed=int(payload.extra_allowed),
+        source=payload.source,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@app.get(
+    "/api/channels/{destination_id}/overrides",
+    dependencies=[Depends(require_admin)],
+)
+def list_daily_overrides_endpoint(
+    destination_id: str,
+    date: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.models import YouTubeDailyPublishOverride
+    from app.scheduler import destination_today
+
+    d = db.get(Destination, destination_id)
+    if d is None or (d.platform or "").lower() != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    day = date or destination_today(d, _utcnow()).isoformat()
+    rows = list(
+        db.execute(
+            select(YouTubeDailyPublishOverride)
+            .where(YouTubeDailyPublishOverride.destination_id == d.id)
+            .where(YouTubeDailyPublishOverride.date == day)
+            .order_by(YouTubeDailyPublishOverride.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "destination_id": d.id,
+        "date": day,
+        "extra_allowed": sum(int(r.extra_allowed or 0) for r in rows),
+        "items": [DailyOverrideOut.model_validate(r) for r in rows],
     }
 
 

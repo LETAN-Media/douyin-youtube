@@ -94,6 +94,12 @@ export function ManualPublishClient({
     destination_name: string;
     external_url?: string;
   } | null>(null);
+  const [limitModal, setLimitModal] = useState<{
+    destination_id: string;
+    destination_name: string;
+    daily_limit: number;
+    published_today: number;
+  } | null>(null);
 
   const [activePublications, setActivePublications] = useState<ManualPublicationItem[]>([]);
   const [history, setHistory] = useState<ManualPublicationItem[]>(initialHistory);
@@ -300,7 +306,7 @@ export function ManualPublishClient({
   };
 
   // Publish Now
-  const handlePublish = async (forceDuplicate = false) => {
+  const handlePublish = async (forceDuplicate = false, queueIfFull = false) => {
     if (!resolvedVideo || selectedDestinations.length === 0 || publishing) return;
 
     setPublishing(true);
@@ -344,6 +350,7 @@ export function ManualPublishClient({
         youtube_publish_date: effMode === "scheduled" && schedDate ? schedDate : undefined,
         youtube_publish_time: effMode === "scheduled" && schedTime ? schedTime : undefined,
         youtube_schedule_timezone: schedTz,
+        queue_if_full: queueIfFull,
       };
 
       const res = await fetch("/api/manual/publish", {
@@ -353,6 +360,22 @@ export function ManualPublishClient({
       });
 
       const data = await res.json();
+
+      const isDailyLimit =
+        data.code === "DAILY_LIMIT_REACHED" ||
+        data.override_required === true ||
+        (data.detail && typeof data.detail === "object" && (data.detail.code === "DAILY_LIMIT_REACHED" || data.detail.override_required === true));
+
+      if (res.status === 409 && isDailyLimit) {
+        const detailObj = (data.detail && typeof data.detail === "object" ? data.detail : data) as Record<string, unknown>;
+        setLimitModal({
+          destination_id: String(detailObj.destination_id || selectedDestinations[0] || ""),
+          destination_name: String(detailObj.destination_name || "YouTube Channel"),
+          daily_limit: Number(detailObj.daily_limit || 4),
+          published_today: Number(detailObj.published_today || 4),
+        });
+        return;
+      }
 
       if (res.status === 409 && data.code === "DUPLICATE_VIDEO") {
         setDuplicateWarning({
@@ -376,6 +399,33 @@ export function ManualPublishClient({
     } catch (err: unknown) {
       setPublishError(err instanceof Error ? err.message : "Đăng video thất bại");
     } finally {
+      setPublishing(false);
+    }
+  };
+
+  const handleCancelLimit = async () => {
+    setLimitModal(null);
+    await handlePublish(false, true);
+  };
+
+  const handleConfirmOverride = async () => {
+    if (!limitModal) return;
+    const destId = limitModal.destination_id;
+    setLimitModal(null);
+    setPublishing(true);
+    try {
+      await fetch(`/api/channels/${encodeURIComponent(destId)}/overrides`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          extra_allowed: 1,
+          reason: "User confirmed override via UI",
+          source: "ui_confirmation",
+        }),
+      });
+      await handlePublish(false, false);
+    } catch (err: unknown) {
+      setPublishError(err instanceof Error ? err.message : "Tạo override thất bại");
       setPublishing(false);
     }
   };
@@ -1103,6 +1153,49 @@ export function ManualPublishClient({
             </div>
           </div>
         ) : null}
+
+        {/* Daily Shorts Limit Confirmation Modal */}
+        {limitModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl border border-slate-200">
+              <div className="flex items-center gap-3 text-rose-600">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-600">
+                  <IconAlert size={20} />
+                </span>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900">
+                    Đạt giới hạn Shorts hôm nay
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    {limitModal.destination_name}
+                  </p>
+                </div>
+              </div>
+              <p className="mt-4 text-sm text-slate-600 leading-relaxed">
+                Channel này đã đạt giới hạn {limitModal.daily_limit} Shorts hôm nay.
+              </p>
+              <p className="mt-2 text-sm text-slate-700 font-semibold">
+                Bạn có muốn vượt giới hạn và đăng thêm video này hôm nay không?
+              </p>
+              <div className="mt-6 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={handleCancelLimit}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition"
+                >
+                  Huỷ
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmOverride}
+                  className="rounded-xl bg-rose-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-rose-500 transition"
+                >
+                  Vẫn đăng
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Step 5: Live Progress (Requirement 12) */}
         {activePublications.length > 0 ? (

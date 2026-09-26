@@ -8,11 +8,13 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
     Text,
     UniqueConstraint,
+    text as _sa_text,
 )
 from sqlalchemy.orm import (
     Mapped,
@@ -141,13 +143,13 @@ class Pipeline(Base):
     daily_upload_limit: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=6,
+        default=4,
     )
 
     upload_slots: Mapped[list[str] | None] = mapped_column(
         JSON,
         nullable=True,
-        default=lambda: ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+        default=lambda: ["10:00", "14:00", "18:00", "22:00"],
     )
 
     backlog_slots_per_day: Mapped[int] = mapped_column(
@@ -824,7 +826,7 @@ class Destination(Base):
     daily_upload_limit: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=6,
+        default=4,
     )
 
     backlog_slots_per_day: Mapped[int] = mapped_column(
@@ -848,7 +850,7 @@ class Destination(Base):
     upload_slots: Mapped[list[str] | None] = mapped_column(
         JSON,
         nullable=True,
-        default=lambda: ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+        default=lambda: ["10:00", "14:00", "18:00", "22:00"],
     )
 
     publish_strategy: Mapped[str] = mapped_column(
@@ -1388,6 +1390,23 @@ class Publication(Base):
             "destination_id",
             name="uq_publication_video_destination",
         ),
+        # One reservation per channel per minute, while the publication
+        # still holds its slot. Published/failed/skipped rows leave the
+        # index so history never blocks future inserts. NULL rows excluded.
+        Index(
+            "uq_publication_destination_scheduled_at",
+            "destination_id",
+            "scheduled_at",
+            unique=True,
+            sqlite_where=_sa_text(
+                "status IN ('queued','scheduled','pending','downloading',"
+                "'ai_metadata','uploading','processing')"
+            ),
+            postgresql_where=_sa_text(
+                "status IN ('queued','scheduled','pending','downloading',"
+                "'ai_metadata','uploading','processing')"
+            ),
+        ),
     )
 
 
@@ -1911,4 +1930,38 @@ class YouTubeDNASuggestion(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class YouTubeDailyPublishOverride(Base):
+    """Explicit user-approved extra slots. Scoped per destination + day.
+
+    Expires after its local day. Scheduler/auto paths NEVER create these;
+    only explicit user actions (UI confirm, user command) do. Multiple rows
+    per day sum their extra_allowed.
+    """
+
+    __tablename__ = "youtube_daily_publish_overrides"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # Local calendar date (destination timezone), YYYY-MM-DD.
+    date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    approved_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra_allowed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    # user_command | ui_confirmation
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default="ui_confirmation")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
     )
