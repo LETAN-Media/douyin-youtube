@@ -323,22 +323,24 @@ def dashboard_stats(
 
     _agg_sql = _text(
         "SELECT pipeline_id, metric, value FROM ("
-        "SELECT pipeline_id, 'job_total' AS metric, COUNT(*) AS value FROM video_jobs WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'job_published', COUNT(*) FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'job_pending', COUNT(*) FROM video_jobs WHERE pipeline_id IN :pids AND status = 'pending' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'source_count', COUNT(*) FROM douyin_sources WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_total', COUNT(*) FROM douyin_videos WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_backlog', COUNT(*) FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'backlog' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_new', COUNT(*) FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'new' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_scheduled', COUNT(*) FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'scheduled' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_published', COUNT(*) FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'dest_count', COUNT(*) FROM destinations WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_total', COUNT(*) FROM publications WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_failed', COUNT(*) FROM publications WHERE pipeline_id IN :pids AND status = 'failed' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_scheduled', COUNT(*) FROM publications WHERE pipeline_id IN :pids AND status IN ('scheduled', 'queued') GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_published', COUNT(*) FROM publications WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'today_vj', COUNT(*) FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' AND created_at >= :today GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'today_pub', COUNT(*) FROM publications WHERE pipeline_id IN :pids AND status = 'published' AND published_at >= :today GROUP BY pipeline_id"
+        "SELECT pipeline_id, 'job_total' AS metric, COUNT(*)::TEXT AS value FROM video_jobs WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'job_published', COUNT(*)::TEXT FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'job_pending', COUNT(*)::TEXT FROM video_jobs WHERE pipeline_id IN :pids AND status = 'pending' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'source_count', COUNT(*)::TEXT FROM douyin_sources WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'inv_total', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'inv_backlog', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'backlog' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'inv_new', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'new' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'inv_scheduled', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'scheduled' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'inv_published', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'dest_count', COUNT(*)::TEXT FROM destinations WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'dest_connected', COUNT(*)::TEXT FROM destinations WHERE pipeline_id IN :pids AND enabled = TRUE AND connected = TRUE AND credentials IS NOT NULL AND LOWER(platform) = 'youtube' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'skip_reasons', STRING_AGG(DISTINCT last_skip_reason, '|') FROM destinations WHERE pipeline_id IN :pids AND last_skip_reason IS NOT NULL GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'pub_total', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'pub_failed', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status = 'failed' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'pub_scheduled', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status IN ('scheduled', 'queued') GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'pub_published', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'today_vj', COUNT(*)::TEXT FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' AND created_at >= :today GROUP BY pipeline_id "
+        "UNION ALL SELECT pipeline_id, 'today_pub', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status = 'published' AND published_at >= :today GROUP BY pipeline_id"
         ") AS agg"
     ).bindparams(_bindparam("pids", expanding=True))
     _t_agg = time.perf_counter()
@@ -347,12 +349,19 @@ def dashboard_stats(
     ).all()
     timings["q_agg_ms"] = int((time.perf_counter() - _t_agg) * 1000)
 
-    _m: dict[str, dict[str, int]] = {}
+    _m: dict[str, dict[str, str]] = {}
     for _r in _agg_rows:
-        _m.setdefault(str(_r[0]), {})[str(_r[1])] = int(_r[2] or 0)
+        _m.setdefault(str(_r[0]), {})[str(_r[1])] = _r[2]
 
     def _g(_pid: str, _metric: str) -> int:
-        return int(_m.get(_pid, {}).get(_metric, 0) or 0)
+        try:
+            return int(_m.get(_pid, {}).get(_metric, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _gs(_pid: str, _metric: str) -> str | None:
+        _v = _m.get(_pid, {}).get(_metric)
+        return str(_v) if _v else None
 
     stats: dict[str, dict[str, int]] = {}
     source_counts: dict[str, int] = {}
@@ -386,54 +395,25 @@ def dashboard_stats(
         today_vj_counts[_pid] = _g(_pid, "today_vj")
         today_pub_counts[_pid] = _g(_pid, "today_pub")
 
-    # Destinations detail (one skinny query, no ORM relationships loaded)
-    _t_dest = time.perf_counter()
-    _dest_rows = db.execute(
-        select(
-            Destination.pipeline_id,
-            Destination.enabled,
-            Destination.connected,
-            Destination.credentials,
-            Destination.platform,
-            Destination.last_skip_reason,
-        )
-        .where(Destination.pipeline_id.in_(pipeline_ids))
-        .order_by(Destination.pipeline_id, Destination.created_at.asc())
-    ).all()
-    timings["q_dests_ms"] = int((time.perf_counter() - _t_dest) * 1000)
-
-    dests_by_pipeline: dict[str, list[dict[str, Any]]] = {}
-    for _r in _dest_rows:
-        dests_by_pipeline.setdefault(str(_r[0]), []).append(
-            {
-                "pipeline_id": str(_r[0]),
-                "enabled": bool(_r[1]),
-                "connected": bool(_r[2]),
-                "has_credentials": bool(_r[3]),
-                "platform": (_r[4] or ""),
-                "last_skip_reason": _r[5],
-            }
-        )
+    # Destination presence/connectivity/skip-reasons come from the same
+    # UNION batch (dest_count / dest_connected / skip_reasons) — no extra RTT.
+    timings["q_dests_ms"] = 0
 
     pipeline_enabled: dict[str, bool] = {str(p["id"]): bool(p["enabled"]) for p in pipelines}
     connected_counts: dict[str, int] = {}
     auto_reasons: dict[str, str | None] = {}
     for p in pipelines:
         pid = str(p["id"])
-        dests = dests_by_pipeline.get(pid, [])
-        connected = [
-            d for d in dests
-            if d["enabled"] and d["connected"] and d["has_credentials"]
-            and (d["platform"] or "").lower() == "youtube"
-        ]
-        connected_counts[pid] = len(connected)
+        _dest_total = destination_counts.get(pid, 0)
+        _connected_n = _g(pid, "dest_connected")
+        connected_counts[pid] = _connected_n
 
         # Compute auto_reason per pipeline (no DB query here)
         if not pipeline_enabled.get(pid, True):
             auto_reasons[pid] = "SCHEDULER_DISABLED"
-        elif not dests:
+        elif _dest_total <= 0:
             auto_reasons[pid] = "DESTINATION_NOT_CONNECTED"
-        elif not connected:
+        elif _connected_n <= 0:
             auto_reasons[pid] = "DESTINATION_NOT_CONNECTED"
         else:
             inv_available = int(
@@ -444,7 +424,8 @@ def dashboard_stats(
             if inv_available <= 0:
                 auto_reasons[pid] = "NO_AVAILABLE_INVENTORY"
             else:
-                reasons = [d["last_skip_reason"] for d in dests if d["last_skip_reason"]]
+                _skip_raw = _gs(pid, "skip_reasons")
+                reasons = [s for s in (_skip_raw.split("|") if _skip_raw else []) if s]
                 if reasons:
                     found: str | None = None
                     for cand in (
@@ -518,7 +499,6 @@ def dashboard_stats(
                     pass
 
         inv_available = int(inv_stat.get("new", 0) or 0) + int(inv_stat.get("backlog", 0) or 0)
-        dests = dests_by_pipeline.get(pipeline_id, [])
         connected_count = connected_counts.get(pipeline_id, 0)
         auto_reason = auto_reasons.get(pipeline_id)
 
