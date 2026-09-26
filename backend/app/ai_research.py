@@ -318,11 +318,14 @@ def analyze_trends(
     raw = _chat(system, user)
     data = _extract_json(raw)
     if data is None and raw:
-        # One strict retry: models sometimes answer in prose first.
+        # Strict retry as a CONVERSION task (much easier for the model
+        # than fresh generation): reformat its own prose into JSON.
         logger.info("ai research retrying with JSON-only nudge (len=%d)", len(raw))
         raw = _chat(
-            system + " Reply with ONLY the JSON object, no prose before or after.",
-            user,
+            system
+            + " Convert the previous analysis below into ONLY the JSON object. "
+            "START with { and END with }. No prose.",
+            "Previous analysis to convert:\n" + raw[:4000],
         )
         data = _extract_json(raw)
     if data is None:
