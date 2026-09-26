@@ -107,6 +107,39 @@ def run_migrations() -> None:
                 Base.metadata.create_all(bind=connection, tables=[PipelineSource.__table__])
         except Exception as exc:
             logger.warning("Platform tables create skipped: %s", exc)
+
+        # YouTube Analytics + Trend Research tables (additive only)
+        try:
+            from app.models import (
+                YouTubeChannelAnalyticsDaily,
+                YouTubeResearchItem,
+                YouTubeResearchRun,
+                YouTubeVideoAnalyticsDaily,
+            )
+
+            for _model in (
+                YouTubeChannelAnalyticsDaily,
+                YouTubeVideoAnalyticsDaily,
+                YouTubeResearchRun,
+                YouTubeResearchItem,
+            ):
+                if not table_exists(connection, _model.__table__.name):
+                    logger.info("Creating %s table", _model.__table__.name)
+                    Base.metadata.create_all(
+                        bind=connection, tables=[_model.__table__]
+                    )
+        except Exception as exc:
+            logger.warning("Analytics tables create skipped: %s", exc)
+        for _tbl, _col, _typ in [
+            ("destinations", "research_region", "VARCHAR(10) DEFAULT 'VN'"),
+        ]:
+            try:
+                if not column_exists(connection, _tbl, _col):
+                    logger.info("Adding %s to %s", _col, _tbl)
+                    with connection.begin_nested():
+                        connection.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS {_col} {_typ}"))
+            except Exception as exc:
+                logger.warning("Add %s to %s skipped: %s", _col, _tbl, exc)
         for _tbl, _col, _typ in [
             ("douyin_sources", "platform", "VARCHAR(20) DEFAULT 'douyin'"),
             ("douyin_sources", "avatar_url", "TEXT"),

@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     JSON,
@@ -1038,6 +1039,15 @@ class Destination(Base):
         server_default="immediate",
     )
 
+    # ---- AI Trend Research: per-channel research region ----
+    # VN | US | TH | JP | KR | MULTI (multi-region aggregation)
+    research_region: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        default="VN",
+        server_default="VN",
+    )
+
 
 class YouTubeComment(Base):
     """A comment fetched from a channel's own published videos.
@@ -1646,4 +1656,136 @@ class OAuthState(Base):
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+    )
+
+
+class YouTubeChannelAnalyticsDaily(Base):
+    """Daily OWNED-channel analytics snapshot (YouTube Analytics API)."""
+
+    __tablename__ = "youtube_channel_analytics_daily"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    channel_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    watch_minutes: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_view_duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_view_percentage: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    likes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    comments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    shares: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    subs_gained: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    subs_lost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("destination_id", "date", name="uq_yt_analytics_dest_date"),
+    )
+
+
+class YouTubeVideoAnalyticsDaily(Base):
+    """Per-video OWNED analytics snapshot (dimension=video top list)."""
+
+    __tablename__ = "youtube_video_analytics_daily"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    video_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    watch_minutes: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_view_duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    likes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    comments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    subs_gained: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "destination_id", "video_id", "date",
+            name="uq_yt_video_analytics_dest_video_date",
+        ),
+    )
+
+
+class YouTubeResearchRun(Base):
+    """One trend-research run (deterministic + optional AI layer)."""
+
+    __tablename__ = "youtube_research_runs"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # queued | fetching | scoring | ai_analysis | completed | failed
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
+    region: Mapped[str] = mapped_column(String(10), nullable=False, default="VN")
+    niche: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    search_calls_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    videos_analyzed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ai_output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class YouTubeResearchItem(Base):
+    """One ranked trend item within a run (evidence-backed)."""
+
+    __tablename__ = "youtube_research_items"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("youtube_research_runs.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    destination_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("destinations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="video")
+    video_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    channel_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    views_per_hour: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    age_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trend_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    channel_fit_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
     )

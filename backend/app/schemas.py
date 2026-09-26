@@ -802,6 +802,12 @@ class ChannelDetailResponse(BaseModel):
     comment_replies_today: int = 0
     comment_count: int = 0
 
+    # YouTube Analytics (owned channel). Never blocks other tabs.
+    analytics_oauth_ready: bool = False
+    analytics_oauth_reason: str | None = None
+    analytics_reconnect_required: bool = False
+    research_region: str = "VN"
+
 
 class ChannelUpdateRequest(BaseModel):
     name: str | None = None
@@ -817,6 +823,7 @@ class ChannelUpdateRequest(BaseModel):
     default_privacy: str | None = None
     youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] | None = None
     publishing_strategy: Literal["immediate", "scheduled"] | None = None
+    research_region: Literal["VN", "US", "TH", "JP", "KR", "MULTI"] | None = None
 
 
 class ChannelAddSourceRequest(BaseModel):

@@ -26,10 +26,15 @@ logger = logging.getLogger("douyin-youtube-youtube")
 #: Channels authorised before this scope was added must reconnect.
 YOUTUBE_FORCE_SSL_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 
+#: Required to read OWNED channel analytics (YouTube Analytics API).
+#: No monetary/revenue scope is requested.
+YOUTUBE_ANALYTICS_READONLY_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
+
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
     YOUTUBE_FORCE_SSL_SCOPE,
+    YOUTUBE_ANALYTICS_READONLY_SCOPE,
 ]
 
 GLOBAL_TOKEN_SETTING_KEY = "youtube_credentials"
@@ -538,6 +543,30 @@ def destination_comment_scope_status(
     if any(str(s).endswith("youtube.force-ssl") for s in scopes):
         return True, None
     return False, "YOUTUBE_SCOPE_MISSING"
+
+
+def destination_analytics_scope_status(
+    destination: Destination | None,
+) -> tuple[bool, str | None]:
+    """Can this destination read OWNED channel analytics?
+
+    Returns (ok, reason). Channels authorised before yt-analytics.readonly
+    was added MUST reconnect (RECONNECT_REQUIRED): an old refresh token
+    does not silently gain the scope. Never touches the channel otherwise.
+    """
+    if destination is None:
+        return False, "DESTINATION_NOT_FOUND"
+    if not destination.credentials:
+        return False, "YOUTUBE_REAUTH_REQUIRED"
+    scopes = granted_scopes(destination.credentials)
+    if not scopes:
+        # Token predates scope recording: assume analytics scope missing.
+        return False, "RECONNECT_REQUIRED"
+    if YOUTUBE_ANALYTICS_READONLY_SCOPE in scopes:
+        return True, None
+    if any(str(s).endswith("yt-analytics.readonly") for s in scopes):
+        return True, None
+    return False, "RECONNECT_REQUIRED"
 
 
 def build_destination_client(

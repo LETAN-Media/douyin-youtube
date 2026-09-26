@@ -543,6 +543,12 @@ export interface ChannelDetail {
   comment_oauth_reason?: string | null;
   comment_replies_today?: number;
   comment_count?: number;
+
+  // YouTube Analytics (owned channel, isolated from other subsystems).
+  analytics_oauth_ready?: boolean;
+  analytics_oauth_reason?: string | null;
+  analytics_reconnect_required?: boolean;
+  research_region?: string | null;
 }
 
 export type CommentReplyMode = "off" | "review" | "auto";

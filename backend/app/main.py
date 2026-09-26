@@ -4367,9 +4367,14 @@ def get_channel_detail_endpoint(
     next_slot_str = nxt.isoformat() if nxt else None
 
     from app.comment_poller import replies_today as _comment_replies_today
-    from app.youtube import destination_comment_scope_status
+    from app.youtube import (
+        destination_analytics_scope_status,
+        destination_comment_scope_status,
+    )
 
     comment_oauth_ready, comment_oauth_reason = destination_comment_scope_status(d)
+    analytics_oauth_ready, analytics_oauth_reason = destination_analytics_scope_status(d)
+    analytics_reconnect_required = (not analytics_oauth_ready) and analytics_oauth_reason == "RECONNECT_REQUIRED"
     comment_count = int(
         db.execute(
             select(func.count(YouTubeComment.id))
@@ -4400,6 +4405,10 @@ def get_channel_detail_endpoint(
         comment_oauth_reason=comment_oauth_reason,
         comment_count=comment_count,
         comment_replies_today=_comment_replies_today(db, d.id),
+        analytics_oauth_ready=analytics_oauth_ready,
+        analytics_oauth_reason=analytics_oauth_reason,
+        analytics_reconnect_required=analytics_reconnect_required,
+        research_region=getattr(d, "research_region", "VN") or "VN",
         channel=channel_item,
         daily_upload_limit=d.daily_upload_limit,
         metadata_profile=d.metadata_profile,
@@ -4499,6 +4508,11 @@ def update_channel_endpoint(
                 pipeline.youtube_default_publish_mode = _mode
             except Exception:
                 pass
+    if payload.research_region is not None:
+        try:
+            d.research_region = payload.research_region
+        except Exception:
+            pass
 
     db.commit()
     return get_channel_detail_endpoint(destination_id=destination_id, db=db)
@@ -5953,4 +5967,333 @@ def next_free_slot_endpoint(
         "timezone": d.timezone or "Asia/Ho_Chi_Minh",
         "slots": d.upload_slots or [],
         "next_slot": nxt.isoformat() if nxt else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# YouTube Channel Analytics + AI Trend Research (DB/cache-first endpoints)
+# ---------------------------------------------------------------------------
+
+
+def _require_yt_channel(db: Session, destination_id: str) -> Destination:
+    d = db.get(Destination, destination_id)
+    if d is None or (d.platform or "").lower() != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    return d
+
+
+@app.get(
+    "/api/channels/{destination_id}/analytics",
+    dependencies=[Depends(require_admin)],
+)
+def get_channel_analytics_endpoint(
+    destination_id: str,
+    range: str = Query(default="28d"),
+    start: str | None = Query(default=None),
+    end: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Owned-channel analytics from DB snapshots + cache. Never calls YouTube.
+
+    Triggers a background refresh when stale; always returns cached data now.
+    """
+    from app.models import YouTubeChannelAnalyticsDaily, YouTubeVideoAnalyticsDaily
+    from app.research_service import (
+        analytics_status,
+        insights_cache_key,
+        maybe_background_analytics_refresh,
+    )
+    from app.youtube_analytics import resolve_range, summarize_daily
+
+    d = _require_yt_channel(db, destination_id)
+    status = analytics_status(db, d)
+    s, e = resolve_range(range, start, end)
+    rows = list(
+        db.execute(
+            select(YouTubeChannelAnalyticsDaily)
+            .where(YouTubeChannelAnalyticsDaily.destination_id == destination_id)
+            .where(YouTubeChannelAnalyticsDaily.date >= s)
+            .where(YouTubeChannelAnalyticsDaily.date <= e)
+            .order_by(YouTubeChannelAnalyticsDaily.date.asc())
+            .limit(400)
+        )
+        .scalars()
+        .all()
+    )
+    daily = [
+        {
+            "date": r.date, "views": r.views, "watch_minutes": r.watch_minutes,
+            "avg_view_duration": r.avg_view_duration,
+            "avg_view_percentage": r.avg_view_percentage,
+            "likes": r.likes, "comments": r.comments, "shares": r.shares,
+            "subs_gained": r.subs_gained, "subs_lost": r.subs_lost,
+        }
+        for r in rows
+    ]
+    tops = list(
+        db.execute(
+            select(YouTubeVideoAnalyticsDaily)
+            .where(YouTubeVideoAnalyticsDaily.destination_id == destination_id)
+            .where(YouTubeVideoAnalyticsDaily.date >= s)
+            .order_by(YouTubeVideoAnalyticsDaily.views.desc())
+            .limit(50)
+        )
+        .scalars()
+        .all()
+    )
+    # Enrich top videos with titles/thumbnails from own publications.
+    pubs = {
+        (p.external_post_id or ""): p
+        for p in db.execute(
+            select(Publication)
+            .where(Publication.destination_id == destination_id)
+            .where(Publication.external_post_id.is_not(None))
+        )
+        .scalars()
+        .all()
+    }
+    top_videos = []
+    for t in tops[:50]:
+        pub = pubs.get(t.video_id or "")
+        video = None
+        if pub is not None:
+            from app.models import DouyinVideo as _DV
+
+            video = db.get(_DV, pub.douyin_video_id)
+        top_videos.append(
+            {
+                "video_id": t.video_id,
+                "title": t.title or (pub.title if pub else None) or (video.title if video else None),
+                "thumbnail": t.thumbnail_url or (video.thumbnail_url if video else None),
+                "views": t.views, "watch_minutes": t.watch_minutes,
+                "avg_view_duration": t.avg_view_duration,
+                "likes": t.likes, "comments": t.comments,
+                "subs_gained": t.subs_gained,
+            }
+        )
+    from app.models import AppSetting as _AS
+
+    insights: dict[str, Any] | None = None
+    cache_row = db.get(_AS, insights_cache_key(destination_id, s, e))
+    if cache_row is not None:
+        try:
+            import json as _json
+
+            insights = _json.loads(cache_row.value)
+        except (ValueError, TypeError):
+            insights = None
+    # Stale-cache background refresh (fire-and-forget, returns cached now).
+    try:
+        maybe_background_analytics_refresh(db, d)
+    except Exception:
+        pass
+    return {
+        "destination_id": destination_id,
+        "range": range, "start": s, "end": e,
+        "oauth_ready": status["oauth_ready"],
+        "oauth_reason": status["oauth_reason"],
+        "reconnect_required": status["reconnect_required"],
+        "summary": summarize_daily(daily),
+        "daily": daily,
+        "top_videos": top_videos,
+        "traffic_sources": (insights or {}).get("traffic_sources", []),
+        "search_terms": (insights or {}).get("search_terms", []),
+        "cached": True,
+    }
+
+
+@app.post(
+    "/api/channels/{destination_id}/analytics/refresh",
+    status_code=202,
+    dependencies=[Depends(require_admin)],
+)
+def refresh_channel_analytics_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """Queue an owned-analytics refresh (background, 202 immediately)."""
+    from app.research_service import analytics_status, queue_analytics_refresh
+
+    d = _require_yt_channel(db, destination_id)
+    status = analytics_status(db, d)
+    if not status["oauth_ready"]:
+        raise HTTPException(
+            status_code=409,
+            detail=status["oauth_reason"] or "RECONNECT_REQUIRED",
+        )
+    return queue_analytics_refresh(destination_id)
+
+
+@app.get(
+    "/api/channels/{destination_id}/research",
+    dependencies=[Depends(require_admin)],
+)
+def get_channel_research_endpoint(
+    destination_id: str,
+    db: Session = Depends(get_db),
+):
+    """Latest research run + items from DB. Never calls YouTube/AI on load."""
+    from app.models import YouTubeResearchItem, YouTubeResearchRun
+    from app.research_service import get_latest_run
+
+    _require_yt_channel(db, destination_id)
+    run = get_latest_run(db, destination_id)
+    if run is None:
+        return {
+            "destination_id": destination_id, "status": "empty",
+            "run": None, "videos": [], "hashtags": [],
+            "ai": None, "niche": None,
+        }
+    items = list(
+        db.execute(
+            select(YouTubeResearchItem)
+            .where(YouTubeResearchItem.run_id == run.id)
+            .order_by(YouTubeResearchItem.trend_score.desc())
+        )
+        .scalars()
+        .all()
+    )
+    videos = [
+        {
+            "video_id": i.video_id, "title": i.title,
+            "channel_title": i.channel_title, "thumbnail_url": i.thumbnail_url,
+            "views": i.views, "views_per_hour": i.views_per_hour,
+            "age_hours": i.age_hours, "trend_score": i.trend_score,
+            "channel_fit_score": i.channel_fit_score,
+            "evidence": i.evidence_json or {},
+        }
+        for i in items if i.kind == "video"
+    ]
+    hashtags = [
+        {
+            "tag": i.title, "trend_score": i.trend_score,
+            "channel_fit_score": i.channel_fit_score,
+            "evidence": i.evidence_json or {},
+        }
+        for i in items if i.kind == "hashtag"
+    ]
+    return {
+        "destination_id": destination_id, "status": run.status,
+        "run": {
+            "id": run.id, "status": run.status, "region": run.region,
+            "search_calls_used": run.search_calls_used,
+            "videos_analyzed": run.videos_analyzed,
+            "error": run.error,
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        },
+        "videos": videos, "hashtags": hashtags,
+        "ai": run.ai_output, "niche": run.niche,
+    }
+
+
+@app.post(
+    "/api/channels/{destination_id}/research/refresh",
+    status_code=202,
+    dependencies=[Depends(require_admin)],
+)
+def refresh_channel_research_endpoint(
+    destination_id: str,
+    force: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    """Queue a research run (background). Cached unless expired/force."""
+    from app.research_service import queue_research_refresh
+
+    _require_yt_channel(db, destination_id)
+    return queue_research_refresh(destination_id, force=force)
+
+
+@app.post(
+    "/api/channels/{destination_id}/research/generate-titles",
+    dependencies=[Depends(require_admin)],
+)
+def generate_research_titles_endpoint(
+    destination_id: str,
+    count: int = Query(default=8, ge=5, le=10),
+    db: Session = Depends(get_db),
+):
+    """Generate 5-10 titles from the latest run (single AI call)."""
+    from app import ai_research as _ai
+    from app import trend_research as _tr
+    from app.research_service import get_latest_run
+
+    d = _require_yt_channel(db, destination_id)
+    run = get_latest_run(db, destination_id)
+    if run is None or not run.niche:
+        raise HTTPException(status_code=409, detail="NO_RESEARCH_RUN: refresh research first")
+    ai = run.ai_output or {}
+    lang = str((run.niche or {}).get("language") or "auto")
+    titles = _ai.generate_titles(run.niche, ai.get("hot_topics") or [], lang, count)
+    _ = (d, _tr)
+    return {"destination_id": destination_id, "language": lang, "titles": titles}
+
+
+@app.post(
+    "/api/channels/{destination_id}/research/generate-hashtags",
+    dependencies=[Depends(require_admin)],
+)
+def generate_research_hashtags_endpoint(
+    destination_id: str,
+    count: int = Query(default=15, ge=5, le=30),
+    db: Session = Depends(get_db),
+):
+    """Cluster evidence-backed hashtags via AI (deterministic fallback)."""
+    from app import ai_research as _ai
+    from app.models import YouTubeResearchItem
+    from app.research_service import get_latest_run
+
+    _require_yt_channel(db, destination_id)
+    run = get_latest_run(db, destination_id)
+    if run is None or not run.niche:
+        raise HTTPException(status_code=409, detail="NO_RESEARCH_RUN: refresh research first")
+    items = list(
+        db.execute(
+            select(YouTubeResearchItem)
+            .where(YouTubeResearchItem.run_id == run.id)
+            .where(YouTubeResearchItem.kind == "hashtag")
+            .order_by(YouTubeResearchItem.trend_score.desc())
+            .limit(25)
+        )
+        .scalars()
+        .all()
+    )
+    stats = [
+        {
+            "tag": i.title, "frequency": (i.evidence_json or {}).get("frequency", 0),
+            "recent_frequency": (i.evidence_json or {}).get("recent_frequency", 0),
+            "trend_score": i.trend_score,
+            "channel_fit_score": i.channel_fit_score,
+        }
+        for i in items
+    ]
+    lang = str((run.niche or {}).get("language") or "auto")
+    return {
+        "destination_id": destination_id, "language": lang,
+        "hashtags": _ai.generate_hashtags(run.niche, stats, lang, count),
+    }
+
+
+@app.post(
+    "/api/channels/{destination_id}/research/apply",
+    dependencies=[Depends(require_admin)],
+)
+def apply_research_endpoint(
+    destination_id: str,
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+):
+    """Normalize a user-confirmed Apply bundle. Never auto-overwrites."""
+    _require_yt_channel(db, destination_id)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="INVALID_APPLY_PAYLOAD")
+    title = str(payload.get("title") or "")[:100]
+    keywords = [str(k) for k in (payload.get("keywords") or [])][:30]
+    hashtags = [str(h) for h in (payload.get("hashtags") or [])][:30]
+    hashtags = [h if h.startswith("#") else f"#{h}" for h in hashtags if h.strip("# ")]
+    if not title and not hashtags:
+        raise HTTPException(status_code=400, detail="INVALID_APPLY_PAYLOAD: empty bundle")
+    return {
+        "ok": True, "destination_id": destination_id,
+        "title": title, "description_keywords": keywords, "hashtags": hashtags,
     }

@@ -140,6 +140,15 @@ class Settings(BaseSettings):
     comment_scan_videos_per_channel: int = 5
     comment_threads_max_pages: int = 2
 
+    # ---- YouTube Trend Research quota safety ----
+    # Page loads only read DB/cache. Manual Refresh triggers research only
+    # when cache is expired (unless force=true for admin).
+    youtube_research_cache_minutes: int = 360
+    youtube_research_max_search_calls_per_run: int = 5
+    youtube_research_max_videos: int = 50
+    # Owned-analytics background refresh cadence (times per day, 1-4).
+    youtube_analytics_refresh_per_day: int = 2
+
     # RevidAPI Douyin creator feed (no Douyin cookie required). OPTIONAL and
     # default OFF: not part of the production creator scan path any more.
     revid_api_key: str = ""

@@ -37,6 +37,8 @@ import type {
 import { actionGetOauthUrl, actionToggleDestination, actionUpdateDestination } from "@/lib/actions";
 import { YouTubePublishSelector } from "@/components/YouTubePublishSelector";
 import { UpcomingScheduled } from "@/components/UpcomingScheduled";
+import { ChannelAnalytics } from "@/components/ChannelAnalytics";
+import { ChannelResearch } from "@/components/ChannelResearch";
 
 function formatDuration(sec?: number | null): string {
   if (sec == null || sec <= 0) return "00:00";
@@ -64,6 +66,8 @@ type TabType =
   | "queue"
   | "upcoming"
   | "published"
+  | "analytics"
+  | "research"
   | "comments"
   | "ai_profile"
   | "settings";
@@ -1292,6 +1296,32 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
 
         <button
           type="button"
+          onClick={() => setActiveTab("analytics")}
+          className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
+            activeTab === "analytics"
+              ? "border-indigo-600 text-indigo-700"
+              : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
+          }`}
+        >
+          <IconDashboard size={15} />
+          Analytics
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab("research")}
+          className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
+            activeTab === "research"
+              ? "border-indigo-600 text-indigo-700"
+              : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
+          }`}
+        >
+          <IconSparkles size={15} />
+          AI Research
+        </button>
+
+        <button
+          type="button"
           onClick={() => setActiveTab("comments")}
           className={`flex min-h-[44px] items-center gap-1.5 border-b-2 px-3.5 py-2 text-xs font-extrabold transition whitespace-nowrap ${
             activeTab === "comments"
@@ -2272,6 +2302,39 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
         <div className="space-y-4">
           <UpcomingScheduled destinationId={channel.destination_id} />
         </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* TAB: ANALYTICS (owned channel, DB/cache first)               */}
+      {/* ============================================================ */}
+      {activeTab === "analytics" && (
+        <Card className="p-5 sm:p-6">
+          <ChannelAnalytics destinationId={channel.destination_id} />
+        </Card>
+      )}
+
+      {/* ============================================================ */}
+      {/* TAB: AI RESEARCH (trend radar + apply to metadata)           */}
+      {/* ============================================================ */}
+      {activeTab === "research" && (
+        <Card className="p-5 sm:p-6">
+          <ChannelResearch
+            destinationId={channel.destination_id}
+            onApply={(bundle) => {
+              if (bundle.title) setTitle(bundle.title);
+              if (bundle.hashtags && bundle.hashtags.length > 0) {
+                setHashtags((prev) => {
+                  const merged = `${prev} ${bundle.hashtags!.join(" ")}`.trim().split(/\s+/);
+                  return Array.from(new Set(merged)).join(" ");
+                });
+              }
+              if (bundle.keywords && bundle.keywords.length > 0) {
+                setDescription((prev) => `${prev}\n\nKeywords: ${bundle.keywords!.join(", ")}`.trim());
+              }
+              setActiveTab("manual");
+            }}
+          />
+        </Card>
       )}
 
       {/* ============================================================ */}
