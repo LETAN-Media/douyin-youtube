@@ -117,6 +117,8 @@ def create_oauth_url(
     db: Session,
     pipeline_id: str | None = None,
     destination_id: str | None = None,
+    workspace_id: str | None = None,
+    initiated_by_user_id: str | None = None,
 ) -> str:
     validate_google_config()
 
@@ -135,11 +137,30 @@ def create_oauth_url(
         if destination:
             resolved_destination_id = destination.id
 
+    # Tenant binding (Phase 9): derive the workspace from the destination
+    # (or pipeline) when the caller did not pass one explicitly, so the
+    # callback can verify credentials land ONLY in the intended workspace.
+    bound_workspace_id = workspace_id
+    if not bound_workspace_id and resolved_destination_id:
+        dest_row = db.get(Destination, resolved_destination_id)
+        if dest_row is not None:
+            bound_workspace_id = dest_row.workspace_id or (
+                db.get(Pipeline, dest_row.pipeline_id).workspace_id
+                if dest_row.pipeline_id and db.get(Pipeline, dest_row.pipeline_id)
+                else None
+            )
+    if not bound_workspace_id and pipeline_id:
+        pipe_row = db.get(Pipeline, pipeline_id)
+        if pipe_row is not None:
+            bound_workspace_id = pipe_row.workspace_id
+
     db.add(
         OAuthState(
             state=state,
             pipeline_id=pipeline_id,
             destination_id=resolved_destination_id,
+            workspace_id=bound_workspace_id,
+            initiated_by_user_id=initiated_by_user_id,
             expires_at=(
                 utcnow()
                 + timedelta(minutes=15)
@@ -177,7 +198,7 @@ def complete_oauth(
     authorization_response: str,
     pipeline_id: str | None = None,
     destination_id: str | None = None,
-) -> None:
+) -> dict:
     state_row = db.get(
         OAuthState,
         state,
@@ -209,6 +230,36 @@ def complete_oauth(
     resolved_pipeline_id = (
         pipeline_id or state_row.pipeline_id
     )
+
+    # Tenant binding (Phase 9): a workspace-bound flow may ONLY attach
+    # credentials to a destination/pipeline inside that same workspace.
+    # Never fall back to global credentials and never cross tenants.
+    bound_ws = getattr(state_row, "workspace_id", None)
+    if bound_ws:
+        if resolved_destination_id:
+            _dest = db.get(Destination, resolved_destination_id)
+            if _dest is None:
+                raise RuntimeError("Destination không tồn tại khi lưu OAuth")
+            _dest_ws = _dest.workspace_id
+            if not _dest_ws and _dest.pipeline_id:
+                _pipe = db.get(Pipeline, _dest.pipeline_id)
+                _dest_ws = _pipe.workspace_id if _pipe else None
+            if str(_dest_ws or "") != str(bound_ws):
+                raise RuntimeError(
+                    "OAuth state không thuộc workspace của channel này"
+                )
+        elif resolved_pipeline_id:
+            _pipe = db.get(Pipeline, resolved_pipeline_id)
+            if _pipe is None:
+                raise RuntimeError("Pipeline không tồn tại khi lưu OAuth")
+            if str(_pipe.workspace_id or "") != str(bound_ws):
+                raise RuntimeError(
+                    "OAuth state không thuộc workspace của pipeline này"
+                )
+        else:
+            raise RuntimeError(
+                "OAuth state thiếu destination/pipeline"
+            )
 
     old_refresh_token = None
     destination = None
@@ -386,6 +437,11 @@ def complete_oauth(
     if state_row:
         db.delete(state_row)
         db.commit()
+
+    return {
+        "destination_id": resolved_destination_id,
+        "pipeline_id": resolved_pipeline_id,
+    }
 
 
 def _load_from_json(

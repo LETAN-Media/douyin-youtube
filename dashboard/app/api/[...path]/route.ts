@@ -1,5 +1,13 @@
 import { NextResponse } from "next/server";
 import { getServerEnv } from "@/lib/env";
+import { forwardAuthHeaders } from "@/lib/forward";
+
+// Generic backend forwarder for dashboard API calls.
+//
+// Identity forwarding (Phase 18): user sessions are forwarded as
+// X-Session-Token so the backend enforces per-workspace isolation.
+// Only the legacy admin cookie forwards X-Admin-Token. Requests are
+// never escalated: without a valid session the backend returns 401/404.
 
 // Generic backend forwarder for dashboard API calls.
 //
@@ -11,18 +19,16 @@ import { getServerEnv } from "@/lib/env";
 // passes status/body through untouched (JSON stays JSON).
 // Specific routes (e.g. /api/manual/publish) still take precedence.
 async function forward(request: Request, path: string[]) {
-  const { apiUrl, adminToken } = getServerEnv();
+  const { apiUrl } = getServerEnv();
   if (!apiUrl) {
     return NextResponse.json(
       { error: "DOUYIN_API_URL chưa được cấu hình." },
       { status: 500 },
     );
   }
-  if (!adminToken) {
-    return NextResponse.json(
-      { error: "DOUYIN_ADMIN_TOKEN chưa được cấu hình." },
-      { status: 500 },
-    );
+  const auth = await forwardAuthHeaders();
+  if (auth.kind === "none") {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
   const incoming = new URL(request.url);
@@ -30,7 +36,7 @@ async function forward(request: Request, path: string[]) {
     `${apiUrl}/api/${path.map((s) => encodeURIComponent(s)).join("/")}` +
     (incoming.search || "");
 
-  const headers: Record<string, string> = { "X-Admin-Token": adminToken };
+  const headers: Record<string, string> = { ...auth.headers };
   const contentType = request.headers.get("content-type");
   if (contentType) headers["Content-Type"] = contentType;
 

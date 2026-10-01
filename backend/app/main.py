@@ -94,7 +94,22 @@ from app.schemas import (
     SourceWithCookieOut,
     SourceSyncResponse,
 )
-from app.security import require_admin
+from app.tenancy import (
+    AuthContext,
+    authenticate_request,
+    default_workspace_id,
+    require_destination,
+    require_job,
+    require_pipeline,
+    require_pipeline_source,
+    require_publication,
+    require_source,
+    require_system_admin,
+    require_video,
+    tenant_ctx,
+    visible_destination_ids,
+    visible_pipeline_ids,
+)
 from app.worker import (
     recover_incomplete_jobs,
     worker_loop,
@@ -238,7 +253,9 @@ origins = settings.allowed_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=False,
+    # Cookies (dy_api_session) are only usable by direct API clients when
+    # origins are explicit. With "*" credentials stay off (browser rule).
+    allow_credentials=(origins != ["*"]),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -261,10 +278,400 @@ def health() -> dict:
     }
 
 
+# =====================================================================
+# Multi-user auth (Phase 4-5): email+password login, opaque sessions.
+# Legacy X-Admin-Token keeps working alongside these routes.
+# =====================================================================
+
+@app.post("/api/auth/login")
+def login_endpoint(
+    payload: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """User login. Returns an opaque session token + sets the
+    ``dy_api_session`` HttpOnly cookie (direct-API clients). Dashboard
+    clients should ALSO persist the token server-side (never localStorage).
+    """
+    from app.auth import (
+        create_user_session,
+        hash_password,
+        normalize_email,
+        verify_password,
+    )
+    from app.config import settings as _settings
+    from app.models import User as _User
+    from app.models import Workspace as _Workspace
+    from app.models import WorkspaceMember as _Member
+    from app.tenancy import user_public_info as _pub_info
+
+    email = normalize_email(str((payload or {}).get("email", "")))
+    password = str((payload or {}).get("password", ""))
+    if not email or not password:
+        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+
+    user = (
+        db.execute(select(_User).where(_User.email == email).limit(1))
+        .scalars()
+        .first()
+    )
+    if user is None or (user.status or "active") != "active":
+        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+    if not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+
+    _session_row, token = create_user_session(
+        db,
+        user,
+        ttl_seconds=_settings.session_ttl_seconds,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    memberships = (
+        db.execute(
+            select(_Member, _Workspace)
+            .join(_Workspace, _Member.workspace_id == _Workspace.id)
+            .where(_Member.user_id == user.id)
+            .order_by(_Member.created_at.asc())
+        )
+        .all()
+    )
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    body = {
+        "token": token,
+        "expires_at": _session_row.expires_at.isoformat(),
+        "user": _pub_info(user),
+        "workspaces": [
+            {
+                "id": ws.id,
+                "name": ws.name,
+                "role": m.role,
+            }
+            for (m, ws) in memberships
+        ],
+    }
+    resp = _JSONResponse(content=body)
+    resp.set_cookie(
+        key="dy_api_session",
+        value=token,
+        httponly=True,
+        secure="https://" in (_settings.public_base_url or ""),
+        samesite="lax",
+        path="/",
+        max_age=_settings.session_ttl_seconds,
+    )
+    return resp  # type: ignore[return-value]
+
+
+@app.post(
+    "/api/auth/logout",
+    dependencies=[Depends(authenticate_request)],
+)
+def logout_endpoint(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.auth import revoke_session
+    from app.tenancy import _extract_session_token as _extract
+
+    token = _extract(request)
+    if token:
+        revoke_session(db, token)
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    resp = _JSONResponse(content={"ok": True})
+    resp.delete_cookie(key="dy_api_session", path="/")
+    return resp  # type: ignore[return-value]
+
+
+@app.get(
+    "/api/auth/me",
+    dependencies=[Depends(authenticate_request)],
+)
+def me_endpoint(db: Session = Depends(get_db)) -> dict:
+    """Current identity + workspaces. Legacy admin-token callers get a
+    synthetic system-admin identity so old tooling keeps working."""
+    from app.models import User as _User
+    from app.models import Workspace as _Workspace
+    from app.models import WorkspaceMember as _Member
+    from app.tenancy import user_public_info as _pub_info
+
+    ctx = tenant_ctx()
+    if ctx.user_id is None:
+        return {
+            "user": {
+                "id": None,
+                "email": None,
+                "display_name": "System Admin (token)",
+                "status": "active",
+                "is_system_admin": True,
+            },
+            "workspaces": [],
+            "via": ctx.via,
+        }
+    user = db.get(_User, ctx.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Phiên không còn hợp lệ")
+    memberships = (
+        db.execute(
+            select(_Member, _Workspace)
+            .join(_Workspace, _Member.workspace_id == _Workspace.id)
+            .where(_Member.user_id == user.id)
+            .order_by(_Member.created_at.asc())
+        )
+        .all()
+    )
+    return {
+        "user": _pub_info(user),
+        "workspaces": [
+            {"id": ws.id, "name": ws.name, "role": m.role} for (m, ws) in memberships
+        ],
+        "via": ctx.via,
+    }
+
+
+@app.post(
+    "/api/auth/change-password",
+    dependencies=[Depends(authenticate_request)],
+)
+def change_password_endpoint(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.auth import hash_password, verify_password
+    from app.models import User as _User
+
+    ctx = tenant_ctx()
+    if ctx.user_id is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy")
+    user = db.get(_User, ctx.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Phiên không còn hợp lệ")
+    current = str((payload or {}).get("current_password", ""))
+    new_pw = str((payload or {}).get("new_password", ""))
+    if not verify_password(current, user.password_hash):
+        raise HTTPException(status_code=401, detail="Mật khẩu hiện tại không đúng")
+    try:
+        user.password_hash = hash_password(new_pw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    db.commit()
+    return {"ok": True}
+
+
+# =====================================================================
+# Admin user management (Phase 15): system-admin only.
+# =====================================================================
+
+@app.get(
+    "/api/admin/users",
+    dependencies=[Depends(authenticate_request)],
+)
+def admin_list_users_endpoint(db: Session = Depends(get_db)) -> dict:
+    from app.models import User as _User
+    from app.models import Workspace as _Workspace
+    from app.models import WorkspaceMember as _Member
+    from app.tenancy import user_public_info as _pub_info
+
+    require_system_admin()
+    users = (
+        db.execute(select(_User).order_by(_User.created_at.asc()).limit(500))
+        .scalars()
+        .all()
+    )
+    members = db.execute(select(_Member)).scalars().all()
+    workspaces = {w.id: w for w in db.execute(select(_Workspace)).scalars().all()}
+    by_user: dict[str, list[dict]] = {}
+    for m in members:
+        ws = workspaces.get(m.workspace_id)
+        by_user.setdefault(m.user_id, []).append(
+            {
+                "workspace_id": m.workspace_id,
+                "workspace_name": ws.name if ws else m.workspace_id,
+                "role": m.role,
+            }
+        )
+    return {
+        "users": [
+            {**_pub_info(u), "workspaces": by_user.get(u.id, [])} for u in users
+        ]
+    }
+
+
+@app.post(
+    "/api/admin/users",
+    dependencies=[Depends(authenticate_request)],
+)
+def admin_create_user_endpoint(
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a login user + a fresh empty workspace (unless the payload
+    names an existing one). The new user starts with NO data: they connect
+    their own YouTube channel afterwards."""
+    import uuid as _uuid
+
+    from app.auth import hash_password, normalize_email
+    from app.models import User as _User
+    from app.models import Workspace as _Workspace
+    from app.models import WorkspaceMember as _Member
+    from app.tenancy import user_public_info as _pub_info
+
+    require_system_admin()
+    email = normalize_email(str((payload or {}).get("email", "")))
+    password = str((payload or {}).get("password", ""))
+    display_name = str((payload or {}).get("display_name", "") or "").strip() or None
+    workspace_name = str((payload or {}).get("workspace_name", "") or "").strip()
+    is_admin = bool((payload or {}).get("is_system_admin", False))
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="Email không hợp lệ")
+    existing = (
+        db.execute(select(_User).where(_User.email == email).limit(1))
+        .scalars()
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Email đã tồn tại")
+    try:
+        pw_hash = hash_password(password)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    user = _User(
+        email=email,
+        password_hash=pw_hash,
+        display_name=display_name or email.split("@")[0],
+        status="active",
+        is_system_admin=is_admin,
+    )
+    db.add(user)
+    db.flush()
+
+    if is_admin:
+        # System admins see everything; still give them the Admin Workspace
+        # membership for a consistent UI.
+        from app.tenancy import ADMIN_WORKSPACE_NAME as _ADMIN_WS
+
+        admin_ws = (
+            db.execute(
+                select(_Workspace).where(_Workspace.name == _ADMIN_WS).limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if admin_ws is None:
+            admin_ws = _Workspace(name=_ADMIN_WS, owner_user_id=user.id)
+            db.add(admin_ws)
+            db.flush()
+        db.add(
+            _Member(workspace_id=admin_ws.id, user_id=user.id, role="owner")
+        )
+        ws_info = {"id": admin_ws.id, "name": admin_ws.name, "role": "owner"}
+    else:
+        ws = _Workspace(
+            name=workspace_name or f"{user.display_name or email} Workspace",
+            owner_user_id=user.id,
+        )
+        db.add(ws)
+        db.flush()
+        db.add(_Member(workspace_id=ws.id, user_id=user.id, role="owner"))
+        ws_info = {"id": ws.id, "name": ws.name, "role": "owner"}
+
+    db.commit()
+    db.refresh(user)
+    return {"user": _pub_info(user), "workspace": ws_info}
+
+
+@app.patch(
+    "/api/admin/users/{user_id}",
+    dependencies=[Depends(authenticate_request)],
+)
+def admin_update_user_endpoint(
+    user_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.auth import revoke_all_user_sessions
+    from app.models import User as _User
+    from app.tenancy import user_public_info as _pub_info
+
+    require_system_admin()
+    user = db.get(_User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy user")
+    if "display_name" in (payload or {}):
+        user.display_name = str(payload.get("display_name") or "").strip() or None
+    if "status" in (payload or {}):
+        status_val = str(payload.get("status") or "").strip()
+        if status_val not in ("active", "disabled"):
+            raise HTTPException(status_code=422, detail="status phải là active|disabled")
+        user.status = status_val
+        if status_val == "disabled":
+            revoke_all_user_sessions(db, user.id)
+    if "is_system_admin" in (payload or {}):
+        user.is_system_admin = bool(payload.get("is_system_admin"))
+    db.commit()
+    db.refresh(user)
+    return {"user": _pub_info(user)}
+
+
+@app.delete(
+    "/api/admin/users/{user_id}",
+    dependencies=[Depends(authenticate_request)],
+)
+def admin_delete_user_endpoint(
+    user_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.auth import revoke_all_user_sessions
+    from app.models import User as _User
+
+    require_system_admin()
+    ctx = tenant_ctx()
+    if ctx.user_id is not None and ctx.user_id == user_id:
+        raise HTTPException(status_code=409, detail="Không thể tự xóa chính mình")
+    user = db.get(_User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy user")
+    # Data safety: workspaces owned by the user are KEPT (reassign by admin
+    # via DB if needed). Only the login + sessions are removed.
+    revoke_all_user_sessions(db, user.id)
+    db.delete(user)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post(
+    "/api/admin/users/{user_id}/reset-password",
+    dependencies=[Depends(authenticate_request)],
+)
+def admin_reset_password_endpoint(
+    user_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.auth import hash_password, revoke_all_user_sessions
+    from app.models import User as _User
+
+    require_system_admin()
+    user = db.get(_User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy user")
+    new_pw = str((payload or {}).get("new_password", ""))
+    try:
+        user.password_hash = hash_password(new_pw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    revoke_all_user_sessions(db, user.id)
+    db.commit()
+    return {"ok": True}
+
+
 @app.get(
     "/api/dashboard",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def dashboard_stats(
@@ -282,19 +689,24 @@ def dashboard_stats(
 
     # Skinny column select: full Pipeline entities would lazy-load
     # sources/videos/destinations/publications via selectin (hidden N+1).
-    _pipe_rows = db.execute(
-        select(
-            Pipeline.id,
-            Pipeline.name,
-            Pipeline.slug,
-            Pipeline.enabled,
-            Pipeline.youtube_connected,
-            Pipeline.youtube_channel_title,
-            Pipeline.default_privacy,
-            Pipeline.daily_upload_limit,
-            Pipeline.upload_slots,
-        ).order_by(Pipeline.created_at.asc())
-    ).all()
+    # Tenant scope: regular users only see pipelines in their workspaces.
+    _pipe_stmt = select(
+        Pipeline.id,
+        Pipeline.name,
+        Pipeline.slug,
+        Pipeline.enabled,
+        Pipeline.youtube_connected,
+        Pipeline.youtube_channel_title,
+        Pipeline.default_privacy,
+        Pipeline.daily_upload_limit,
+        Pipeline.upload_slots,
+    ).order_by(Pipeline.created_at.asc())
+    _visible_pipes = visible_pipeline_ids(db, tenant_ctx())
+    if _visible_pipes is not None:
+        if not _visible_pipes:
+            return {"pipelines": []}
+        _pipe_stmt = _pipe_stmt.where(Pipeline.id.in_(_visible_pipes))
+    _pipe_rows = db.execute(_pipe_stmt).all()
     pipelines = [
         {
             "id": str(r[0]),
@@ -802,7 +1214,7 @@ def dashboard_page() -> HTMLResponse:
     "/api/jobs",
     response_model=JobOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def create_job(
@@ -834,6 +1246,16 @@ def create_job(
             detail="Pipeline không tồn tại",
         )
 
+    # Tenant check: callers may only enqueue into their own workspace.
+    _ctx = tenant_ctx()
+    if not _ctx.is_system_admin and not (
+        pipeline.workspace_id and pipeline.workspace_id in (_ctx.workspace_ids or [])
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Pipeline không tồn tại",
+        )
+
     if not pipeline.enabled:
         raise HTTPException(
             status_code=400,
@@ -855,6 +1277,7 @@ def create_job(
         privacy_status=privacy_status,
         status="pending",
         pipeline_id=pipeline_id,
+        workspace_id=pipeline.workspace_id,
     )
 
     db.add(job)
@@ -868,7 +1291,7 @@ def create_job(
     "/api/jobs",
     response_model=list[JobOut],
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def list_jobs(
@@ -876,6 +1299,7 @@ def list_jobs(
         get_db
     ),
 ) -> list[VideoJob]:
+    ctx = tenant_ctx()
     statement = (
         select(VideoJob)
         .order_by(
@@ -883,6 +1307,10 @@ def list_jobs(
         )
         .limit(100)
     )
+    if not ctx.is_system_admin:
+        if not ctx.workspace_ids:
+            return []
+        statement = statement.where(VideoJob.workspace_id.in_(ctx.workspace_ids))
 
     return list(
         db.execute(statement)
@@ -895,7 +1323,7 @@ def list_jobs(
     "/api/jobs/{job_id}",
     response_model=JobOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_job(
@@ -904,25 +1332,14 @@ def get_job(
         get_db
     ),
 ) -> VideoJob:
-    job = db.get(
-        VideoJob,
-        job_id,
-    )
-
-    if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy job",
-        )
-
-    return job
+    return require_job(db, job_id)
 
 
 @app.post(
     "/api/jobs/{job_id}/retry",
     response_model=JobOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def retry_job(
@@ -931,16 +1348,7 @@ def retry_job(
         get_db
     ),
 ) -> VideoJob:
-    job = db.get(
-        VideoJob,
-        job_id,
-    )
-
-    if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy job",
-        )
+    job = require_job(db, job_id)
 
     if job.status not in {
         "failed",
@@ -967,7 +1375,7 @@ def retry_job(
     "/api/pipelines",
     response_model=list[PipelineOut],
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def list_pipelines(
@@ -975,11 +1383,16 @@ def list_pipelines(
         get_db
     ),
 ) -> list[Pipeline]:
+    ctx = tenant_ctx()
     statement = (
         select(Pipeline)
         .order_by(Pipeline.created_at.asc())
         .limit(100)
     )
+    if not ctx.is_system_admin:
+        if not ctx.workspace_ids:
+            return []
+        statement = statement.where(Pipeline.workspace_id.in_(ctx.workspace_ids))
 
     return list(
         db.execute(statement)
@@ -993,7 +1406,7 @@ def list_pipelines(
     response_model=PipelineOut,
     status_code=201,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def create_pipeline(
@@ -1019,6 +1432,7 @@ def create_pipeline(
         backlog_order=payload.backlog_order,
         backlog_threshold_days=payload.backlog_threshold_days,
         timezone=payload.timezone,
+        workspace_id=default_workspace_id(db),
     )
     try:
         pipeline.youtube_default_publish_mode = payload.youtube_default_publish_mode or "immediate"
@@ -1036,7 +1450,7 @@ def create_pipeline(
     "/api/pipelines/{pipeline_id}",
     response_model=PipelineOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_pipeline(
@@ -1045,25 +1459,14 @@ def get_pipeline(
         get_db
     ),
 ) -> Pipeline:
-    pipeline = db.get(
-        Pipeline,
-        pipeline_id,
-    )
-
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
-
-    return pipeline
+    return require_pipeline(db, pipeline_id)
 
 
 @app.patch(
     "/api/pipelines/{pipeline_id}",
     response_model=PipelineOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def update_pipeline(
@@ -1073,16 +1476,7 @@ def update_pipeline(
         get_db
     ),
 ) -> Pipeline:
-    pipeline = db.get(
-        Pipeline,
-        pipeline_id,
-    )
-
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    pipeline = require_pipeline(db, pipeline_id)
 
     update_data = payload.model_dump(
         exclude_none=True,
@@ -1100,7 +1494,7 @@ def update_pipeline(
 @app.get(
     "/api/pipelines/{pipeline_id}/sources",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def list_pipeline_sources(
@@ -1109,14 +1503,7 @@ def list_pipeline_sources(
         get_db
     ),
 ) -> list[dict]:
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
-
-    # Return both legacy DouyinSource and new PipelineSource (generic)
+    pipeline = require_pipeline(db, pipeline_id)
     from app.models import PipelineSource
 
     douyin = list(
@@ -1171,7 +1558,7 @@ def list_pipeline_sources(
     "/api/pipelines/{pipeline_id}/sources",
     status_code=201,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def create_pipeline_source(
@@ -1181,12 +1568,7 @@ def create_pipeline_source(
         get_db
     ),
 ):
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    pipeline = require_pipeline(db, pipeline_id)
 
     # Generic platform handling (douyin/facebook). Douyin uses DouyinSource table for
     # backwards compat with inventory; Facebook uses PipelineSource.
@@ -1213,6 +1595,7 @@ def create_pipeline_source(
         resolved = prov.resolve_source(p_profile_url) if prov else {"source_external_id": p_profile_url, "source_url": p_profile_url}
         ps = _PS(
             pipeline_id=pipeline_id,
+            workspace_id=pipeline.workspace_id,
             platform="facebook",
             source_external_id=resolved.get("source_external_id") or p_profile_url,
             source_url=resolved.get("source_url") or p_profile_url,
@@ -1236,6 +1619,7 @@ def create_pipeline_source(
 
     source = DouyinSource(
         pipeline_id=pipeline_id,
+        workspace_id=pipeline.workspace_id,
         name=p_name,
         original_profile_url=original_profile_url,
         profile_url=profile_url,
@@ -1264,7 +1648,7 @@ def create_pipeline_source(
     "/api/sources/{source_id}",
     response_model=DouyinSourceOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_source(
@@ -1273,22 +1657,14 @@ def get_source(
         get_db
     ),
 ) -> DouyinSource:
-    source = db.get(DouyinSource, source_id)
-
-    if source is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy source",
-        )
-
-    return source
+    return require_source(db, source_id)
 
 
 @app.patch(
     "/api/sources/{source_id}",
     response_model=DouyinSourceOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def update_source(
@@ -1298,13 +1674,7 @@ def update_source(
         get_db
     ),
 ) -> DouyinSource:
-    source = db.get(DouyinSource, source_id)
-
-    if source is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy source",
-        )
+    source = require_source(db, source_id)
 
     update_data = payload.model_dump(
         exclude_none=True,
@@ -1323,7 +1693,7 @@ def update_source(
     "/api/sources/{source_id}",
     status_code=204,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def delete_source(
@@ -1332,13 +1702,7 @@ def delete_source(
         get_db
     ),
 ) -> None:
-    source = db.get(DouyinSource, source_id)
-
-    if source is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy source",
-        )
+    source = require_source(db, source_id)
 
     db.delete(source)
     db.commit()
@@ -1348,7 +1712,7 @@ def delete_source(
     "/api/destinations",
     response_model=list[DestinationOut],
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def list_all_destinations(
@@ -1356,10 +1720,14 @@ def list_all_destinations(
         get_db
     ),
 ) -> list[Destination]:
+    ctx = tenant_ctx()
+    stmt = select(Destination).order_by(Destination.created_at.asc())
+    if not ctx.is_system_admin:
+        if not ctx.workspace_ids:
+            return []
+        stmt = stmt.where(Destination.workspace_id.in_(ctx.workspace_ids))
     return list(
-        db.execute(
-            select(Destination).order_by(Destination.created_at.asc())
-        )
+        db.execute(stmt)
         .scalars()
         .all()
     )
@@ -1369,7 +1737,7 @@ def list_all_destinations(
     "/api/pipelines/{pipeline_id}/destinations",
     response_model=list[DestinationOut],
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def list_pipeline_destinations(
@@ -1378,12 +1746,7 @@ def list_pipeline_destinations(
         get_db
     ),
 ) -> list[Destination]:
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    require_pipeline(db, pipeline_id)
 
     return list(
         db.execute(
@@ -1401,7 +1764,7 @@ def list_pipeline_destinations(
     response_model=DestinationOut,
     status_code=201,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def create_pipeline_destination(
@@ -1411,15 +1774,11 @@ def create_pipeline_destination(
         get_db
     ),
 ) -> Destination:
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    pipeline = require_pipeline(db, pipeline_id)
 
     destination = Destination(
         pipeline_id=pipeline_id,
+        workspace_id=pipeline.workspace_id,
         platform=payload.platform,
         name=payload.name,
         external_account_id=payload.external_account_id,
@@ -1448,7 +1807,7 @@ def create_pipeline_destination(
     "/api/destinations/{destination_id}",
     response_model=DestinationOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_destination(
@@ -1457,22 +1816,14 @@ def get_destination(
         get_db
     ),
 ) -> Destination:
-    destination = db.get(Destination, destination_id)
-
-    if destination is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy destination",
-        )
-
-    return destination
+    return require_destination(db, destination_id)
 
 
 @app.patch(
     "/api/destinations/{destination_id}",
     response_model=DestinationOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def update_destination(
@@ -1482,13 +1833,7 @@ def update_destination(
         get_db
     ),
 ) -> Destination:
-    destination = db.get(Destination, destination_id)
-
-    if destination is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy destination",
-        )
+    destination = require_destination(db, destination_id)
 
     update_data = payload.model_dump(
         exclude_none=True,
@@ -1507,7 +1852,7 @@ def update_destination(
     "/api/destinations/{destination_id}",
     status_code=204,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def delete_destination(
@@ -1516,13 +1861,7 @@ def delete_destination(
         get_db
     ),
 ) -> None:
-    destination = db.get(Destination, destination_id)
-
-    if destination is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy destination",
-        )
+    destination = require_destination(db, destination_id)
 
     db.delete(destination)
     db.commit()
@@ -1532,7 +1871,7 @@ def delete_destination(
     "/api/publications",
     response_model=list[PublicationOut],
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def list_publications(
@@ -1558,6 +1897,13 @@ def list_publications(
         get_db
     ),
 ) -> list[Publication]:
+    ctx = tenant_ctx()
+    # Tenant scope: explicit ids must belong to the caller; unfiltered
+    # listing is restricted to the caller workspaces (admins: everything).
+    if pipeline_id:
+        require_pipeline(db, pipeline_id)
+    if destination_id:
+        require_destination(db, destination_id)
     query = select(Publication)
 
     if pipeline_id:
@@ -1565,6 +1911,11 @@ def list_publications(
 
     if destination_id:
         query = query.where(Publication.destination_id == destination_id)
+
+    if not ctx.is_system_admin:
+        if not ctx.workspace_ids:
+            return []
+        query = query.where(Publication.workspace_id.in_(ctx.workspace_ids))
 
     if status:
         query = query.where(Publication.status == status)
@@ -1620,7 +1971,7 @@ def _destination_next_upload(destination: Destination) -> str | None:
 @app.get(
     "/api/destinations/{destination_id}/status",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def destination_status(
@@ -1629,13 +1980,7 @@ def destination_status(
         get_db
     ),
 ) -> dict:
-    destination = db.get(Destination, destination_id)
-
-    if destination is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy destination",
-        )
+    destination = require_destination(db, destination_id)
 
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -1663,7 +2008,7 @@ def destination_status(
 @app.get(
     "/api/pipelines/{pipeline_id}/destinations/statuses",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def pipeline_destination_statuses(
@@ -1676,12 +2021,7 @@ def pipeline_destination_statuses(
 
     Single grouped COUNT query + pure next-slot computation.
     """
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    require_pipeline(db, pipeline_id)
     destinations = list(
         db.execute(
             select(Destination)
@@ -1726,7 +2066,7 @@ def pipeline_destination_statuses(
 @app.get(
     "/api/pipelines/{pipeline_id}/flow-state",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def pipeline_flow_state(
@@ -1743,12 +2083,9 @@ def pipeline_flow_state(
     10 minutes. No N+1: fixed ~10 queries regardless of node counts.
     Frontend polls this every few seconds; never revalidates the page.
     """
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    # All sub-queries below are keyed by this pipeline_id, so verifying it
+    # here scopes the entire response to the caller workspace.
+    require_pipeline(db, pipeline_id)
 
     sources = list(
         db.execute(
@@ -2062,7 +2399,7 @@ def pipeline_flow_state(
 @app.get(
     "/api/youtube/status",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def youtube_status(
@@ -2076,13 +2413,10 @@ def youtube_status(
         get_db
     ),
 ) -> dict:
+    if pipeline_id:
+        require_pipeline(db, pipeline_id)
     if destination_id:
-        destination = db.get(Destination, destination_id)
-        if destination is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Không tìm thấy destination",
-            )
+        destination = require_destination(db, destination_id)
 
         return {
             "connected": destination.connected,
@@ -2106,7 +2440,7 @@ def youtube_status(
 @app.post(
     "/api/youtube/oauth-url",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def youtube_oauth_url(
@@ -2123,6 +2457,7 @@ def youtube_oauth_url(
     resolved_destination_id = destination_id
 
     if not resolved_destination_id and pipeline_id:
+        require_pipeline(db, pipeline_id)
         destination = db.execute(
             select(Destination)
             .where(Destination.pipeline_id == pipeline_id)
@@ -2133,11 +2468,27 @@ def youtube_oauth_url(
         if destination:
             resolved_destination_id = destination.id
 
+    if resolved_destination_id:
+        # 404 when the channel belongs to another workspace (IDOR guard).
+        resolved_dest = require_destination(db, resolved_destination_id)
+        bound_workspace_id = resolved_dest.workspace_id
+        if not bound_workspace_id and resolved_dest.pipeline_id:
+            bound_pipe = db.get(Pipeline, resolved_dest.pipeline_id)
+            bound_workspace_id = bound_pipe.workspace_id if bound_pipe else None
+    else:
+        bound_workspace_id = None
+        if pipeline_id:
+            bound_pipe = db.get(Pipeline, pipeline_id)
+            bound_workspace_id = bound_pipe.workspace_id if bound_pipe else None
+
+    ctx = tenant_ctx()
     try:
         url = create_oauth_url(
             db=db,
             pipeline_id=pipeline_id,
             destination_id=resolved_destination_id,
+            workspace_id=bound_workspace_id,
+            initiated_by_user_id=ctx.user_id,
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -2174,7 +2525,7 @@ def youtube_callback(
     authorization_response = str(request.url)
 
     try:
-        complete_oauth(
+        oauth_result = complete_oauth(
             db=db,
             state=state,
             authorization_response=(
@@ -2193,10 +2544,14 @@ def youtube_callback(
         )
 
     # Resolve destination/pipeline for frontend redirect.
-    # Always land on the Destinations tab so the user immediately sees
-    # Connected + channel title (never a dead-end page).
-    resolved_destination_id = destination_id
-    resolved_pipeline_id = pipeline_id
+    # IDs come from the VERIFIED oauth state (workspace-bound), never from a
+    # global "latest connected" lookup (that would leak other tenants).
+    resolved_destination_id = (
+        destination_id or (oauth_result or {}).get("destination_id")
+    )
+    resolved_pipeline_id = (
+        pipeline_id or (oauth_result or {}).get("pipeline_id")
+    )
 
     # Best-effort: look up destination to build frontend URL.
     frontend_base = (settings.frontend_url or "").rstrip("/")
@@ -2217,23 +2572,6 @@ def youtube_callback(
             url=f"{frontend_base}/pipelines/{resolved_pipeline_id}?oauth=success",
             status_code=302,
         )
-
-    # Fallback: try to find most recently connected destination.
-    if frontend_base:
-        latest = db.execute(
-            select(Destination)
-            .where(Destination.connected == True)  # noqa: E712
-            .order_by(Destination.updated_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if latest is not None:
-            return RedirectResponse(
-                url=(
-                    f"{frontend_base}/pipelines/{latest.pipeline_id}"
-                    f"/destinations/{latest.id}?oauth=success"
-                ),
-                status_code=302,
-            )
 
     return HTMLResponse(
         """
@@ -2268,7 +2606,7 @@ def youtube_callback(
     "/api/pipelines/{pipeline_id}",
     status_code=204,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def delete_pipeline(
@@ -2277,13 +2615,7 @@ def delete_pipeline(
         get_db
     ),
 ) -> None:
-    pipeline = db.get(Pipeline, pipeline_id)
-
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    pipeline = require_pipeline(db, pipeline_id)
 
     db.delete(pipeline)
     db.commit()
@@ -2292,7 +2624,7 @@ def delete_pipeline(
 @app.get(
     "/api/pipelines/{pipeline_id}/stats",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def pipeline_stats(
@@ -2303,12 +2635,7 @@ def pipeline_stats(
 ) -> dict:
     from app.scheduler import get_next_upload_slot
 
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    pipeline = require_pipeline(db, pipeline_id)
 
     sources_count = db.execute(
         select(func.count(DouyinSource.id))
@@ -2413,7 +2740,7 @@ def pipeline_stats(
     "/api/pipelines/{pipeline_id}/inventory",
     response_model=InventoryListResponse,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def list_inventory(
@@ -2427,12 +2754,7 @@ def list_inventory(
         get_db
     ),
 ) -> InventoryListResponse:
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    require_pipeline(db, pipeline_id)
 
     query = select(DouyinVideo).where(DouyinVideo.pipeline_id == pipeline_id)
     count_query = select(func.count(DouyinVideo.id)).where(
@@ -2440,6 +2762,9 @@ def list_inventory(
     )
 
     if source_id:
+        src = require_source(db, source_id)
+        if src.pipeline_id != pipeline_id:
+            raise HTTPException(status_code=404, detail="Không tìm thấy source")
         query = query.where(DouyinVideo.source_id == source_id)
         count_query = count_query.where(DouyinVideo.source_id == source_id)
 
@@ -2480,7 +2805,7 @@ def list_inventory(
     "/api/pipelines/{pipeline_id}/inventory/{video_id}",
     response_model=DouyinVideoWithPublications,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_inventory_video(
@@ -2490,12 +2815,7 @@ def get_inventory_video(
         get_db
     ),
 ) -> DouyinVideoWithPublications:
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    require_pipeline(db, pipeline_id)
 
     video = db.get(DouyinVideo, video_id)
     if video is None or video.pipeline_id != pipeline_id:
@@ -2531,7 +2851,7 @@ def get_inventory_video(
     response_model=PublicationOut,
     status_code=201,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def publish_inventory_video_now(
@@ -2542,12 +2862,7 @@ def publish_inventory_video_now(
         get_db
     ),
 ) -> Publication:
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    pipeline = require_pipeline(db, pipeline_id)
 
     video = db.get(DouyinVideo, video_id)
     if video is None or video.pipeline_id != pipeline_id:
@@ -2556,8 +2871,8 @@ def publish_inventory_video_now(
             detail="Không tìm thấy video",
         )
 
-    destination = db.get(Destination, payload.destination_id)
-    if destination is None or destination.pipeline_id != pipeline_id:
+    destination = require_destination(db, payload.destination_id)
+    if destination.pipeline_id != pipeline_id:
         raise HTTPException(
             status_code=404,
             detail="Không tìm thấy destination",
@@ -2629,6 +2944,7 @@ def publish_inventory_video_now(
                     )
                 publication = Publication(
                     pipeline_id=pipeline_id,
+                    workspace_id=pipeline.workspace_id,
                     douyin_video_id=video.id,
                     destination_id=destination.id,
                     platform=destination.platform,
@@ -2668,6 +2984,7 @@ def publish_inventory_video_now(
     else:
         publication = Publication(
             pipeline_id=pipeline_id,
+            workspace_id=pipeline.workspace_id,
             douyin_video_id=video.id,
             destination_id=destination.id,
             platform=destination.platform,
@@ -2684,6 +3001,7 @@ def publish_inventory_video_now(
         privacy_status=pipeline.default_privacy,
         status="pending",
         pipeline_id=pipeline_id,
+        workspace_id=pipeline.workspace_id,
         source_video_id=video.video_id,
         destination_id=destination.id,
     )
@@ -2708,7 +3026,7 @@ def publish_inventory_video_now(
     response_model=SourceSyncResponse,
     status_code=202,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def sync_source_now(
@@ -2722,12 +3040,7 @@ def sync_source_now(
     Flow: queued -> running -> completed/failed/auth_required.
     Dashboard must poll GET /api/sources/{id} every 2-5s.
     """
-    source = db.get(DouyinSource, source_id)
-    if source is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy source",
-        )
+    source = require_source(db, source_id)
 
     source.inventory_sync_status = "queued"
     source.inventory_sync_error = None
@@ -2751,7 +3064,7 @@ def sync_source_now(
     response_model=SourceImportResponse,
     status_code=202,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def start_initial_import(
@@ -2766,9 +3079,7 @@ def start_initial_import(
     """
     from app import douyin_import
 
-    source = db.get(DouyinSource, source_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    source = require_source(db, source_id)
 
     quota = douyin_import.quota_status()
     if not douyin_quota_can_start():
@@ -2798,7 +3109,7 @@ def start_initial_import(
     response_model=SourceImportResponse,
     status_code=202,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def resume_initial_import(
@@ -2808,9 +3119,7 @@ def resume_initial_import(
     """Resume a paused import from the stored cursor instead of page 1."""
     from app import douyin_import
 
-    source = db.get(DouyinSource, source_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    source = require_source(db, source_id)
     if not source.initial_import_cursor:
         raise HTTPException(
             status_code=409,
@@ -2846,7 +3155,7 @@ def resume_initial_import(
     response_model=SourceImportResponse,
     status_code=202,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def refresh_source_now(
@@ -2856,9 +3165,7 @@ def refresh_source_now(
     """Manual refresh: page 1 newest-first, stop at the first known video."""
     from app import douyin_import
 
-    source = db.get(DouyinSource, source_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    source = require_source(db, source_id)
 
     quota = douyin_import.quota_status()
     if not douyin_quota_can_start():
@@ -2885,7 +3192,7 @@ def refresh_source_now(
     "/api/sources/{source_id}/inventory",
     response_model=SourceInventoryResponse,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_source_inventory(
@@ -2895,9 +3202,7 @@ def get_source_inventory(
     db: Session = Depends(get_db),
 ) -> SourceInventoryResponse:
     """Inventory rows for one source (admin import result)."""
-    source = db.get(DouyinSource, source_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    source = require_source(db, source_id)
 
     from app import douyin_import
 
@@ -2911,7 +3216,7 @@ def get_source_inventory(
     "/api/douyin/quota",
     response_model=DouyinQuotaOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_douyin_quota() -> DouyinQuotaOut:
@@ -2925,7 +3230,7 @@ def get_douyin_quota() -> DouyinQuotaOut:
     "/api/pipelines/{pipeline_id}/sync",
     status_code=202,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def sync_pipeline_now(
@@ -2935,12 +3240,7 @@ def sync_pipeline_now(
     ),
 ) -> dict:
     """Queue pipeline-wide sync, return immediately. Background worker scans."""
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    require_pipeline(db, pipeline_id)
 
     sources = list(
         db.execute(
@@ -2978,10 +3278,12 @@ def sync_pipeline_now(
 @app.get(
     "/api/system/douyin-session",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def douyin_session_status() -> dict:
+    # Global platform session: system-admin only (Phase 14).
+    require_system_admin()
     """Cookie/session status only. Never returns cookie values.
 
     Does NOT launch a browser: anonymous_access/cookie_required reflect
@@ -3059,10 +3361,11 @@ def douyin_session_status() -> dict:
     "/api/douyin/session/start",
     status_code=201,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def douyin_session_start() -> dict:
+    require_system_admin()
     """Queue a QR login flow, return session_id immediately.
 
     QR capture runs in background; dashboard polls
@@ -3082,10 +3385,11 @@ def douyin_session_start() -> dict:
 @app.get(
     "/api/douyin/session/status",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def douyin_session_aggregate() -> dict:
+    require_system_admin()
     from app.douyin_session import get_aggregate_status
 
     return get_aggregate_status()
@@ -3094,10 +3398,11 @@ def douyin_session_aggregate() -> dict:
 @app.get(
     "/api/douyin/session/{session_id}/status",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def douyin_session_flow_status(session_id: str) -> dict:
+    require_system_admin()
     from app.douyin_session import get_flow_status
 
     try:
@@ -3111,10 +3416,11 @@ def douyin_session_flow_status(session_id: str) -> dict:
 @app.post(
     "/api/douyin/session/validate",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def douyin_session_validate() -> dict:
+    require_system_admin()
     from app.douyin_session import validate_saved_session
 
     try:
@@ -3126,12 +3432,13 @@ def douyin_session_validate() -> dict:
 @app.post(
     "/api/douyin/session/disconnect",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def douyin_session_disconnect(
     session_id: str | None = Query(default=None),
 ) -> dict:
+    require_system_admin()
     from app.douyin_session import disconnect_session
 
     removed = disconnect_session(session_id)
@@ -3142,7 +3449,7 @@ def douyin_session_disconnect(
     "/api/publications/{publication_id}",
     response_model=PublicationOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def get_publication(
@@ -3151,12 +3458,7 @@ def get_publication(
         get_db
     ),
 ) -> Publication:
-    publication = db.get(Publication, publication_id)
-    if publication is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy publication",
-        )
+    publication = require_publication(db, publication_id)
     return publication
 
 
@@ -3164,7 +3466,7 @@ def get_publication(
     "/api/publications/{publication_id}/retry",
     response_model=PublicationOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def retry_publication(
@@ -3173,12 +3475,7 @@ def retry_publication(
         get_db
     ),
 ) -> Publication:
-    publication = db.get(Publication, publication_id)
-    if publication is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy publication",
-        )
+    publication = require_publication(db, publication_id)
 
     if publication.status not in {"failed", "skipped", "queued", "scheduled"}:
         raise HTTPException(
@@ -3238,6 +3535,7 @@ def retry_publication(
             privacy_status=pipeline.default_privacy,
             status="pending",
             pipeline_id=pipeline.id,
+            workspace_id=publication.workspace_id or pipeline.workspace_id,
             source_video_id=video.video_id,
             destination_id=publication.destination_id,
             publication_id=publication.id,
@@ -3263,7 +3561,7 @@ def retry_publication(
     "/api/publications/{publication_id}/skip",
     response_model=PublicationOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def skip_publication(
@@ -3272,12 +3570,7 @@ def skip_publication(
         get_db
     ),
 ) -> Publication:
-    publication = db.get(Publication, publication_id)
-    if publication is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy publication",
-        )
+    publication = require_publication(db, publication_id)
 
     if publication.status == "published":
         raise HTTPException(
@@ -3295,7 +3588,7 @@ def skip_publication(
     "/api/publications/{publication_id}/reschedule",
     response_model=PublicationOut,
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def reschedule_publication(
@@ -3305,12 +3598,7 @@ def reschedule_publication(
         get_db
     ),
 ) -> Publication:
-    publication = db.get(Publication, publication_id)
-    if publication is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy publication",
-        )
+    publication = require_publication(db, publication_id)
 
     if publication.status == "published":
         raise HTTPException(
@@ -3336,7 +3624,7 @@ def reschedule_publication(
 @app.get(
     "/api/pipelines/{pipeline_id}/scheduler-status",
     dependencies=[
-        Depends(require_admin)
+        Depends(authenticate_request)
     ],
 )
 def pipeline_scheduler_status(
@@ -3358,12 +3646,7 @@ def pipeline_scheduler_status(
         get_slots_between,
     )
 
-    pipeline = db.get(Pipeline, pipeline_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Không tìm thấy pipeline",
-        )
+    require_pipeline(db, pipeline_id)
 
     now = _utcnow()
     destinations = list(
@@ -3650,7 +3933,7 @@ def resolve_douyin_input(raw_input: str) -> dict[str, Any]:
 @app.post(
     "/api/manual/resolve",
     response_model=ManualResolveResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def manual_resolve_endpoint(
     payload: ManualResolveRequest,
@@ -3662,7 +3945,7 @@ def manual_resolve_endpoint(
 @app.post(
     "/api/manual/metadata",
     response_model=ManualMetadataResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def manual_metadata_endpoint(
     payload: ManualMetadataRequest,
@@ -3671,9 +3954,9 @@ def manual_metadata_endpoint(
     destinations: list[Destination] = []
     if payload.destination_ids:
         for did in payload.destination_ids:
-            d = db.get(Destination, did)
-            if d is not None:
-                destinations.append(d)
+            # 404 when the destination belongs to another workspace.
+            d = require_destination(db, did)
+            destinations.append(d)
 
     context_text = (payload.caption or "").strip() or payload.source_url
 
@@ -3708,7 +3991,18 @@ def manual_metadata_endpoint(
     first_dest = destinations[0] if destinations else None
     pipeline = db.get(Pipeline, first_dest.pipeline_id) if (first_dest and first_dest.pipeline_id) else None
     if pipeline is None:
-        pipeline = db.execute(select(Pipeline).order_by(Pipeline.created_at.asc()).limit(1)).scalar_one_or_none()
+        # Tenant-safe default: first pipeline of the CALLER workspace only.
+        _pipes = visible_pipeline_ids(db, tenant_ctx())
+        _pipe_q = select(Pipeline).order_by(Pipeline.created_at.asc()).limit(1)
+        if _pipes is not None:
+            if not _pipes:
+                pipeline = None
+            else:
+                pipeline = db.execute(
+                    _pipe_q.where(Pipeline.id.in_(_pipes))
+                ).scalar_one_or_none()
+        else:
+            pipeline = db.execute(_pipe_q).scalar_one_or_none()
 
     gen = generate_metadata_structured(
         context_text=context_text,
@@ -3740,7 +4034,7 @@ def manual_metadata_endpoint(
     "/api/manual/publish",
     response_model=ManualPublishResponse,
     status_code=202,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def manual_publish_endpoint(
     payload: ManualPublishRequest,
@@ -3751,9 +4045,8 @@ def manual_publish_endpoint(
 
     destinations: list[Destination] = []
     for did in payload.destination_ids:
-        dest = db.get(Destination, did)
-        if dest is None:
-            raise HTTPException(status_code=404, detail=f"Không tìm thấy destination id={did}")
+        # 404 when the destination belongs to another workspace (IDOR guard).
+        dest = require_destination(db, did)
         if not dest.enabled:
             raise HTTPException(status_code=409, detail=f"Destination '{dest.name}' đang bị tạm dừng (paused)")
         if dest.platform == "facebook":
@@ -3795,8 +4088,13 @@ def manual_publish_endpoint(
 
     for dest in destinations:
         pipeline = db.get(Pipeline, dest.pipeline_id) if dest.pipeline_id else None
-        if pipeline is None:
-            pipeline = db.execute(select(Pipeline).order_by(Pipeline.created_at.asc()).limit(1)).scalar_one_or_none()
+        if pipeline is None and dest.workspace_id:
+            pipeline = db.execute(
+                select(Pipeline)
+                .where(Pipeline.workspace_id == dest.workspace_id)
+                .order_by(Pipeline.created_at.asc())
+                .limit(1)
+            ).scalar_one_or_none()
         if pipeline is None:
             raise HTTPException(status_code=500, detail="Không tìm thấy pipeline phù hợp")
 
@@ -3829,6 +4127,7 @@ def manual_publish_endpoint(
         if video is None:
             video = DouyinVideo(
                 pipeline_id=pipeline.id,
+                workspace_id=pipeline.workspace_id or dest.workspace_id,
                 source_id=None,
                 video_id=video_id_val,
                 title=title or payload.source_title or "",
@@ -3855,6 +4154,7 @@ def manual_publish_endpoint(
         if pub is None:
             pub = Publication(
                 pipeline_id=pipeline.id,
+                workspace_id=pipeline.workspace_id or dest.workspace_id,
                 douyin_video_id=video.id,
                 destination_id=dest.id,
                 platform=dest.platform,
@@ -4079,6 +4379,7 @@ def manual_publish_endpoint(
             privacy_status=privacy,
             status="pending",
             pipeline_id=pipeline.id,
+            workspace_id=pipeline.workspace_id or dest.workspace_id,
             destination_id=dest.id,
             publication_id=pub.id,
             source_video_id=video.video_id,
@@ -4123,22 +4424,24 @@ def manual_publish_endpoint(
 @app.get(
     "/api/manual/publications",
     response_model=list[ManualPublicationItem],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def list_manual_publications_endpoint(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> list[ManualPublicationItem]:
-    pubs = list(
-        db.execute(
-            select(Publication)
-            .where(Publication.publication_mode == "manual")
-            .order_by(Publication.created_at.desc())
-            .limit(limit)
-        )
-        .scalars()
-        .all()
+    ctx = tenant_ctx()
+    stmt = (
+        select(Publication)
+        .where(Publication.publication_mode == "manual")
+        .order_by(Publication.created_at.desc())
+        .limit(limit)
     )
+    if not ctx.is_system_admin:
+        if not ctx.workspace_ids:
+            return []
+        stmt = stmt.where(Publication.workspace_id.in_(ctx.workspace_ids))
+    pubs = list(db.execute(stmt).scalars().all())
 
     items: list[ManualPublicationItem] = []
     for p in pubs:
@@ -4182,15 +4485,13 @@ def list_manual_publications_endpoint(
 @app.get(
     "/api/manual/publications/{publication_id}",
     response_model=ManualPublicationItem,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_manual_publication_endpoint(
     publication_id: str,
     db: Session = Depends(get_db),
 ) -> ManualPublicationItem:
-    p = db.get(Publication, publication_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    p = require_publication(db, publication_id)
 
     dest = db.get(Destination, p.destination_id)
     video = db.get(DouyinVideo, p.douyin_video_id)
@@ -4228,15 +4529,13 @@ def get_manual_publication_endpoint(
 @app.post(
     "/api/manual/publications/{publication_id}/retry",
     response_model=ManualPublicationItem,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def retry_manual_publication_endpoint(
     publication_id: str,
     db: Session = Depends(get_db),
 ) -> ManualPublicationItem:
-    p = db.get(Publication, publication_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    p = require_publication(db, publication_id)
 
     if p.status == "published":
         raise HTTPException(status_code=409, detail="Publication đã published")
@@ -4262,6 +4561,7 @@ def retry_manual_publication_endpoint(
             privacy_status=pipeline.default_privacy,
             status="pending",
             pipeline_id=pipeline.id,
+            workspace_id=p.workspace_id or pipeline.workspace_id,
             source_video_id=video.video_id,
             destination_id=dest.id,
             publication_id=p.id,
@@ -4291,20 +4591,22 @@ def retry_manual_publication_endpoint(
 @app.get(
     "/api/channels",
     response_model=list[ChannelItem],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def list_channels_endpoint(
     db: Session = Depends(get_db),
 ) -> list[ChannelItem]:
-    dests = (
-        db.execute(
-            select(Destination)
-            .where(Destination.platform == "youtube")
-            .order_by(Destination.name.asc())
-        )
-        .scalars()
-        .all()
+    ctx = tenant_ctx()
+    stmt = (
+        select(Destination)
+        .where(Destination.platform == "youtube")
+        .order_by(Destination.name.asc())
     )
+    if not ctx.is_system_admin:
+        if not ctx.workspace_ids:
+            return []
+        stmt = stmt.where(Destination.workspace_id.in_(ctx.workspace_ids))
+    dests = db.execute(stmt).scalars().all()
 
     if not dests:
         return []
@@ -4409,15 +4711,13 @@ def list_channels_endpoint(
 @app.get(
     "/api/channels/{destination_id}",
     response_model=ChannelDetailResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_channel_detail_endpoint(
     destination_id: str,
     db: Session = Depends(get_db),
 ) -> ChannelDetailResponse:
-    d = db.get(Destination, destination_id)
-    if d is None or d.platform != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel này")
+    d = require_destination(db, destination_id, youtube_only=True)
 
     pipeline = db.get(Pipeline, d.pipeline_id) if d.pipeline_id else None
 
@@ -4643,16 +4943,14 @@ def get_channel_detail_endpoint(
 @app.patch(
     "/api/channels/{destination_id}",
     response_model=ChannelDetailResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def update_channel_endpoint(
     destination_id: str,
     payload: ChannelUpdateRequest,
     db: Session = Depends(get_db),
 ) -> ChannelDetailResponse:
-    d = db.get(Destination, destination_id)
-    if d is None or d.platform != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel này")
+    d = require_destination(db, destination_id, youtube_only=True)
 
     pipeline = db.get(Pipeline, d.pipeline_id) if d.pipeline_id else None
 
@@ -4763,7 +5061,7 @@ def trigger_inventory_sync_job(source_id: str, mode: str = "full") -> None:
 @app.post(
     "/api/channels/{destination_id}/sources",
     status_code=201,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def add_channel_source_endpoint(
     destination_id: str,
@@ -4771,9 +5069,7 @@ def add_channel_source_endpoint(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    d = db.get(Destination, destination_id)
-    if d is None or d.platform != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel này")
+    d = require_destination(db, destination_id, youtube_only=True)
     if not d.pipeline_id:
         raise HTTPException(status_code=400, detail="Channel workspace lacks linked pipeline")
 
@@ -4791,6 +5087,7 @@ def add_channel_source_endpoint(
         resolved = prov.resolve_source(url) if prov else {"source_external_id": url, "source_url": url}
         ps = _PS(
             pipeline_id=d.pipeline_id,
+            workspace_id=d.workspace_id,
             platform="facebook",
             source_external_id=resolved.get("source_external_id") or url.split("/")[-1].split("?")[0],
             source_url=resolved.get("source_url") or url,
@@ -4816,6 +5113,7 @@ def add_channel_source_endpoint(
 
     source = DouyinSource(
         pipeline_id=d.pipeline_id,
+        workspace_id=d.workspace_id,
         destination_id=d.id,
         name=name,
         profile_url=clean_url,
@@ -4856,27 +5154,14 @@ def add_channel_source_endpoint(
 
 @app.delete(
     "/api/channels/{destination_id}/sources/{source_id}",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def delete_channel_source_endpoint(
     destination_id: str,
     source_id: str,
     db: Session = Depends(get_db),
 ):
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
-
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
-
-    # Strict isolation check (Requirement 15):
-    if s.pipeline_id != d.pipeline_id:
-        raise HTTPException(
-            status_code=403,
-            detail="Cross-workspace mismatch: source does not belong to this channel workspace",
-        )
+    d, s = _require_workspace_source(db, destination_id, source_id)
 
     db.delete(s)
     db.commit()
@@ -4885,7 +5170,7 @@ def delete_channel_source_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/sources/{source_id}/sync",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def sync_channel_source_endpoint(
     destination_id: str,
@@ -4893,20 +5178,7 @@ def sync_channel_source_endpoint(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
-
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
-
-    # Strict isolation check (Requirement 15):
-    if s.pipeline_id != d.pipeline_id:
-        raise HTTPException(
-            status_code=403,
-            detail="Cross-workspace mismatch: source does not belong to this channel workspace",
-        )
+    d, s = _require_workspace_source(db, destination_id, source_id)
 
     background_tasks.add_task(trigger_inventory_sync_job, s.id)
     return {"ok": True, "source_id": s.id}
@@ -4917,12 +5189,8 @@ def _require_workspace_source(
     destination_id: str,
     source_id: str,
 ) -> tuple[Destination, DouyinSource]:
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    d = require_destination(db, destination_id)
+    s = require_source(db, source_id)
     if s.pipeline_id != d.pipeline_id:
         raise HTTPException(
             status_code=403,
@@ -4990,15 +5258,13 @@ def _source_with_cookie_out(s: DouyinSource) -> dict:
 
 @app.get(
     "/api/channels/{destination_id}/sources",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def list_channel_sources_endpoint(
     destination_id: str,
     db: Session = Depends(get_db),
 ):
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id)
     from app.models import PipelineSource
 
     douyin = list(
@@ -5040,7 +5306,7 @@ def list_channel_sources_endpoint(
 
 @app.post(
     "/api/sources/{source_id}/cookie",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def save_source_cookie_endpoint(
     source_id: str,
@@ -5049,9 +5315,7 @@ def save_source_cookie_endpoint(
 ):
     from app.source_cookies import save_source_cookie
 
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    s = require_source(db, source_id)
     try:
         return save_source_cookie(db, s, payload.cookie)
     except ValueError as exc:
@@ -5060,7 +5324,7 @@ def save_source_cookie_endpoint(
 
 @app.delete(
     "/api/sources/{source_id}/cookie",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def delete_source_cookie_endpoint(
     source_id: str,
@@ -5068,15 +5332,13 @@ def delete_source_cookie_endpoint(
 ):
     from app.source_cookies import delete_source_cookie
 
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    s = require_source(db, source_id)
     return delete_source_cookie(db, s)
 
 
 @app.post(
     "/api/sources/{source_id}/test",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def test_source_cookie_endpoint(
     source_id: str,
@@ -5084,9 +5346,7 @@ def test_source_cookie_endpoint(
 ):
     from app.source_cookies import test_source_cookie
 
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    s = require_source(db, source_id)
     try:
         return test_source_cookie(db, s)
     except RuntimeError as exc:
@@ -5097,16 +5357,14 @@ def test_source_cookie_endpoint(
 
 @app.post(
     "/api/sources/{source_id}/scan",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def scan_source_now_endpoint(
     source_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    s = require_source(db, source_id)
     if s.needs_reauth:
         raise HTTPException(
             status_code=409,
@@ -5120,15 +5378,13 @@ def scan_source_now_endpoint(
 
 @app.post(
     "/api/sources/{source_id}/pause",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def pause_source_endpoint(
     source_id: str,
     db: Session = Depends(get_db),
 ):
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    s = require_source(db, source_id)
     s.enabled = False
     db.commit()
     return {"ok": True, "source_id": s.id, "enabled": False}
@@ -5136,15 +5392,13 @@ def pause_source_endpoint(
 
 @app.post(
     "/api/sources/{source_id}/resume",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def resume_source_endpoint(
     source_id: str,
     db: Session = Depends(get_db),
 ):
-    s = db.get(DouyinSource, source_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    s = require_source(db, source_id)
     if s.needs_reauth:
         raise HTTPException(
             status_code=409,
@@ -5158,7 +5412,7 @@ def resume_source_endpoint(
 
 @app.get(
     "/api/channels/{destination_id}/auto/status",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def channel_auto_status_endpoint(
     destination_id: str,
@@ -5166,9 +5420,7 @@ def channel_auto_status_endpoint(
 ):
     from app.scheduler import count_todays_released_jobs, get_local_day_bounds
 
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id)
 
     sources = list(
         db.execute(
@@ -5233,9 +5485,11 @@ def channel_auto_status_endpoint(
 # ── Global Platform Accounts (shared login) ──
 @app.get(
     "/api/platform-accounts",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def list_platform_accounts_endpoint(db: Session = Depends(get_db)):
+    # Shared global logins: system-admin only, never visible to regular users.
+    require_system_admin()
     from app.models import PlatformAccount
 
     accounts = list(db.execute(select(PlatformAccount).order_by(PlatformAccount.platform.asc())).scalars().all())
@@ -5269,12 +5523,13 @@ def list_platform_accounts_endpoint(db: Session = Depends(get_db)):
 
 @app.post(
     "/api/platform-accounts/douyin",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def save_douyin_platform_account_endpoint(
     payload: SourceCookieSave,
     db: Session = Depends(get_db),
 ):
+    require_system_admin()
     from app.platform_accounts import save_platform_credentials
 
     try:
@@ -5291,9 +5546,10 @@ def save_douyin_platform_account_endpoint(
 
 @app.post(
     "/api/platform-accounts/douyin/test",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def test_douyin_platform_account_endpoint(db: Session = Depends(get_db)):
+    require_system_admin()
     from app.platform_accounts import test_platform_account
 
     try:
@@ -5306,9 +5562,10 @@ def test_douyin_platform_account_endpoint(db: Session = Depends(get_db)):
 
 @app.delete(
     "/api/platform-accounts/douyin",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def delete_douyin_platform_account_endpoint(db: Session = Depends(get_db)):
+    require_system_admin()
     from app.models import PlatformAccount
 
     acct = db.execute(select(PlatformAccount).where(PlatformAccount.platform == "douyin").limit(1)).scalar_one_or_none()
@@ -5324,12 +5581,13 @@ def delete_douyin_platform_account_endpoint(db: Session = Depends(get_db)):
 
 @app.post(
     "/api/platform-accounts/facebook",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def save_facebook_platform_account_endpoint(
     payload: SourceCookieSave,
     db: Session = Depends(get_db),
 ):
+    require_system_admin()
     from app.platform_accounts import save_platform_credentials
 
     try:
@@ -5341,9 +5599,10 @@ def save_facebook_platform_account_endpoint(
 
 @app.delete(
     "/api/platform-accounts/facebook",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def delete_facebook_platform_account_endpoint(db: Session = Depends(get_db)):
+    require_system_admin()
     from app.models import PlatformAccount
 
     acct = db.execute(select(PlatformAccount).where(PlatformAccount.platform == "facebook").limit(1)).scalar_one_or_none()
@@ -5359,7 +5618,7 @@ def delete_facebook_platform_account_endpoint(db: Session = Depends(get_db)):
 
 @app.patch(
     "/api/pipeline-sources/{source_id}",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def update_pipeline_source_endpoint(
     source_id: str,
@@ -5368,12 +5627,13 @@ def update_pipeline_source_endpoint(
 ):
     from app.models import PipelineSource
 
-    src = db.get(PipelineSource, source_id)
+    try:
+        src = require_pipeline_source(db, source_id)
+    except HTTPException:
+        src = None
     if src is None:
-        # Fallback to DouyinSource for legacy
-        src2 = db.get(DouyinSource, source_id)
-        if src2 is None:
-            raise HTTPException(status_code=404, detail="Không tìm thấy source")
+        # Fallback to DouyinSource for legacy (tenant-enforced).
+        src2 = require_source(db, source_id)
         # Allow toggling enabled via legacy table
         if "enabled" in payload:
             src2.enabled = bool(payload["enabled"])
@@ -5389,7 +5649,7 @@ def update_pipeline_source_endpoint(
 
 @app.delete(
     "/api/pipeline-sources/{source_id}",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def delete_pipeline_source_endpoint(
     source_id: str,
@@ -5397,23 +5657,24 @@ def delete_pipeline_source_endpoint(
 ):
     from app.models import PipelineSource
 
-    src = db.get(PipelineSource, source_id)
+    try:
+        src = require_pipeline_source(db, source_id)
+    except HTTPException:
+        src = None
     if src is not None:
         db.delete(src)
         db.commit()
         return {"ok": True}
-    # Fallback legacy
-    dsrc = db.get(DouyinSource, source_id)
-    if dsrc is not None:
-        db.delete(dsrc)
-        db.commit()
-        return {"ok": True}
-    raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    # Fallback legacy (tenant-enforced).
+    dsrc = require_source(db, source_id)
+    db.delete(dsrc)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post(
     "/api/pipeline-sources/{source_id}/scan",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def scan_pipeline_source_endpoint(
     source_id: str,
@@ -5422,7 +5683,10 @@ def scan_pipeline_source_endpoint(
 ):
     from app.models import PipelineSource
 
-    src = db.get(PipelineSource, source_id)
+    try:
+        src = require_pipeline_source(db, source_id)
+    except HTTPException:
+        src = None
     if src is not None:
         # For Facebook stub, just return
         if src.platform != "douyin":
@@ -5430,10 +5694,8 @@ def scan_pipeline_source_endpoint(
         # For pipeline_sources douyin, we need a DouyinSource-like sync
         # For now, return ok (real Douyin pipeline_sources not yet scanned via Playwright)
         return {"ok": True, "source_id": src.id}
-    # Legacy DouyinSource
-    ds = db.get(DouyinSource, source_id)
-    if ds is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy source")
+    # Legacy DouyinSource (tenant-enforced).
+    ds = require_source(db, source_id)
     if getattr(ds, "needs_reauth", False):
         # Check global account instead
         from app.models import PlatformAccount
@@ -5449,7 +5711,7 @@ def scan_pipeline_source_endpoint(
 
 @app.get(
     "/api/channels/{destination_id}/inventory",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_channel_inventory_endpoint(
     destination_id: str,
@@ -5458,9 +5720,7 @@ def get_channel_inventory_endpoint(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id)
 
     if not d.pipeline_id:
         return {"items": [], "total": 0}
@@ -5500,7 +5760,7 @@ def get_channel_inventory_endpoint(
 @app.get(
     "/api/channels/{destination_id}/schedule-capacity",
     response_model=ScheduleCapacityOut,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def channel_schedule_capacity_endpoint(
     destination_id: str,
@@ -5509,16 +5769,14 @@ def channel_schedule_capacity_endpoint(
     """Shorts 4/day capacity snapshot for one channel. Read-only."""
     from app.scheduler import get_capacity
 
-    d = db.get(Destination, destination_id)
-    if d is None or (d.platform or "").lower() != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id, youtube_only=True)
     return ScheduleCapacityOut(**get_capacity(db, d, _utcnow()))
 
 
 @app.post(
     "/api/channels/{destination_id}/import-urls",
     response_model=BatchImportResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def channel_batch_import_endpoint(
     destination_id: str,
@@ -5536,9 +5794,7 @@ def channel_batch_import_endpoint(
         get_capacity as _get_capacity,
     )
 
-    d = db.get(Destination, destination_id)
-    if d is None or (d.platform or "").lower() != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id, youtube_only=True)
     if not d.enabled:
         raise HTTPException(status_code=409, detail="Channel đang bị pause")
     pipeline = db.get(Pipeline, d.pipeline_id) if d.pipeline_id else None
@@ -5619,6 +5875,7 @@ def channel_batch_import_endpoint(
         if video is None:
             video = DouyinVideo(
                 pipeline_id=pipeline.id,
+                workspace_id=pipeline.workspace_id or d.workspace_id,
                 source_id=None,
                 video_id=video_id_val,
                 title=(resolved.get("caption") or "")[:300],
@@ -5691,7 +5948,7 @@ def channel_batch_import_endpoint(
     "/api/channels/{destination_id}/overrides",
     response_model=DailyOverrideOut,
     status_code=201,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def create_daily_override_endpoint(
     destination_id: str,
@@ -5702,12 +5959,11 @@ def create_daily_override_endpoint(
     from app.models import YouTubeDailyPublishOverride
     from app.scheduler import destination_today
 
-    d = db.get(Destination, destination_id)
-    if d is None or (d.platform or "").lower() != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id, youtube_only=True)
     today_str = destination_today(d, _utcnow()).isoformat()
     row = YouTubeDailyPublishOverride(
         destination_id=d.id,
+        workspace_id=d.workspace_id,
         date=today_str,
         approved_by=(payload.approved_by or "")[:200] or None,
         reason=(payload.reason or "")[:2000] or None,
@@ -5722,7 +5978,7 @@ def create_daily_override_endpoint(
 
 @app.get(
     "/api/channels/{destination_id}/overrides",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def list_daily_overrides_endpoint(
     destination_id: str,
@@ -5732,9 +5988,7 @@ def list_daily_overrides_endpoint(
     from app.models import YouTubeDailyPublishOverride
     from app.scheduler import destination_today
 
-    d = db.get(Destination, destination_id)
-    if d is None or (d.platform or "").lower() != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id, youtube_only=True)
     day = date or destination_today(d, _utcnow()).isoformat()
     rows = list(
         db.execute(
@@ -5758,16 +6012,14 @@ def list_daily_overrides_endpoint(
     "/api/channels/{destination_id}/publish",
     response_model=ManualPublishResponse,
     status_code=202,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def channel_workspace_publish_endpoint(
     destination_id: str,
     payload: ManualPublishRequest,
     db: Session = Depends(get_db),
 ) -> ManualPublishResponse:
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id)
 
     # Force destination to this channel workspace only
     payload.destination_ids = [d.id]
@@ -5817,10 +6069,8 @@ def _comment_reply_settings_out(
 
 
 def _require_youtube_channel(db: Session, destination_id: str) -> Destination:
-    d = db.get(Destination, destination_id)
-    if d is None or (d.platform or "").lower() != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
-    return d
+    # Tenant-enforced: 404 when missing OR outside the caller workspace.
+    return require_destination(db, destination_id, youtube_only=True)
 
 
 def _resolve_channel_comment(
@@ -5828,23 +6078,16 @@ def _resolve_channel_comment(
     destination_id: str,
     comment_id: str,
 ) -> YouTubeComment:
-    comment = db.get(YouTubeComment, comment_id)
-    if comment is None:
-        comment = db.execute(
-            select(YouTubeComment)
-            .where(YouTubeComment.destination_id == destination_id)
-            .where(YouTubeComment.youtube_comment_id == comment_id)
-            .limit(1)
-        ).scalar_one_or_none()
-    if comment is None or comment.destination_id != destination_id:
-        raise HTTPException(status_code=404, detail="Không tìm thấy bình luận")
-    return comment
+    # Tenant-enforced via require_destination + scoped comment lookup.
+    from app.tenancy import require_comment as _require_comment
+
+    return _require_comment(db, destination_id, comment_id)
 
 
 @app.get(
     "/api/channels/{destination_id}/comment-reply-settings",
     response_model=CommentReplySettingsOut,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_comment_reply_settings_endpoint(
     destination_id: str,
@@ -5858,7 +6101,7 @@ def get_comment_reply_settings_endpoint(
 @app.patch(
     "/api/channels/{destination_id}/comment-reply-settings",
     response_model=CommentReplySettingsOut,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def update_comment_reply_settings_endpoint(
     destination_id: str,
@@ -5917,7 +6160,7 @@ def update_comment_reply_settings_endpoint(
 @app.get(
     "/api/channels/{destination_id}/comments",
     response_model=CommentListResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def list_channel_comments_endpoint(
     destination_id: str,
@@ -5975,7 +6218,7 @@ def list_channel_comments_endpoint(
     "/api/channels/{destination_id}/comments/scan",
     response_model=dict,
     status_code=202,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def scan_channel_comments_endpoint(
     destination_id: str,
@@ -6032,7 +6275,7 @@ def scan_channel_comments_endpoint(
 @app.post(
     "/api/channels/{destination_id}/comments/{comment_id}/generate-reply",
     response_model=CommentActionResult,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def generate_comment_reply_endpoint(
     destination_id: str,
@@ -6064,7 +6307,7 @@ def generate_comment_reply_endpoint(
 @app.post(
     "/api/channels/{destination_id}/comments/{comment_id}/reply",
     response_model=CommentActionResult,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def reply_to_comment_endpoint(
     destination_id: str,
@@ -6098,7 +6341,7 @@ def reply_to_comment_endpoint(
 @app.post(
     "/api/channels/{destination_id}/comments/{comment_id}/skip",
     response_model=CommentActionResult,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def skip_comment_endpoint(
     destination_id: str,
@@ -6140,7 +6383,7 @@ def _resolve_schedule_datetime(payload, default_tz: str | None) -> tuple[datetim
 
 @app.get(
     "/api/channels/{destination_id}/upcoming",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_upcoming_scheduled_endpoint(
     destination_id: str,
@@ -6149,9 +6392,7 @@ def get_upcoming_scheduled_endpoint(
     """Upcoming / Scheduled list for a channel workspace."""
     from app.youtube_scheduling import format_scheduled_preview
 
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id)
     rows = list(
         db.execute(
             select(Publication, DouyinVideo)
@@ -6193,7 +6434,7 @@ def get_upcoming_scheduled_endpoint(
 
 @app.patch(
     "/api/publications/{publication_id}/schedule",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def change_publication_schedule_endpoint(
     publication_id: str,
@@ -6208,9 +6449,7 @@ def change_publication_schedule_endpoint(
         req = YouTubeScheduleUpdateRequest(**(payload or {}))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"INVALID_PUBLISH_AT: {exc}") from exc
-    pub = db.get(Publication, publication_id)
-    if pub is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    pub = require_publication(db, publication_id)
     if pub.status == "published":
         raise HTTPException(status_code=409, detail="Video đã published, không thể đổi lịch")
     dest = db.get(Destination, pub.destination_id)
@@ -6278,16 +6517,14 @@ def change_publication_schedule_endpoint(
 
 @app.post(
     "/api/publications/{publication_id}/publish-now",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def publish_now_endpoint(
     publication_id: str,
     db: Session = Depends(get_db),
 ):
     """Scheduled -> Publish now (videos.update privacyStatus=public)."""
-    pub = db.get(Publication, publication_id)
-    if pub is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    pub = require_publication(db, publication_id)
     video_id = pub.external_post_id
     if not video_id:
         # Not yet uploaded: flip intent to immediate so worker publishes public.
@@ -6345,16 +6582,14 @@ def publish_now_endpoint(
 
 @app.post(
     "/api/publications/{publication_id}/cancel-schedule",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def cancel_schedule_endpoint(
     publication_id: str,
     db: Session = Depends(get_db),
 ):
     """Cancel schedule: video stays private, publishAt cleared. Never deletes video."""
-    pub = db.get(Publication, publication_id)
-    if pub is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy publication")
+    pub = require_publication(db, publication_id)
     video_id = pub.external_post_id
     if video_id:
         from app.youtube import cancel_video_schedule
@@ -6386,7 +6621,7 @@ def cancel_schedule_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/reconcile-scheduled",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def reconcile_scheduled_endpoint(
     destination_id: str,
@@ -6395,9 +6630,7 @@ def reconcile_scheduled_endpoint(
     """Trigger reconciler for due scheduled videos (manual + periodic)."""
     from app.youtube_reconciler import reconcile_scheduled_videos
 
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    require_destination(db, destination_id, youtube_only=True)
     # Scope reconciler to this destination by filtering afterwards; the core
     # reconciler is global-lightweight (limit 50, horizon check).
     summary = reconcile_scheduled_videos(db_session=db)
@@ -6406,7 +6639,7 @@ def reconcile_scheduled_endpoint(
 
 @app.get(
     "/api/channels/{destination_id}/next-slot",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def next_free_slot_endpoint(
     destination_id: str,
@@ -6415,9 +6648,7 @@ def next_free_slot_endpoint(
     """Preview next free auto slot for this channel (per-channel schedule)."""
     from app.youtube_scheduling import find_next_free_slot
 
-    d = db.get(Destination, destination_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    d = require_destination(db, destination_id, youtube_only=True)
     try:
         rows = db.execute(
             select(Publication.youtube_publish_at)
@@ -6443,15 +6674,13 @@ def next_free_slot_endpoint(
 
 
 def _require_yt_channel(db: Session, destination_id: str) -> Destination:
-    d = db.get(Destination, destination_id)
-    if d is None or (d.platform or "").lower() != "youtube":
-        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
-    return d
+    # Tenant-enforced: 404 when missing OR outside the caller workspace.
+    return require_destination(db, destination_id, youtube_only=True)
 
 
 @app.get(
     "/api/channels/{destination_id}/analytics",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_channel_analytics_endpoint(
     destination_id: str,
@@ -6563,7 +6792,12 @@ def get_channel_analytics_endpoint(
     from app.models import AppSetting as _AS
 
     insights: dict[str, Any] | None = None
-    cache_row = db.get(_AS, insights_cache_key(destination_id, s, e))
+    cache_row = db.get(
+        _AS,
+        insights_cache_key(
+            destination_id, s, e, getattr(d, "workspace_id", None)
+        ),
+    )
     if cache_row is not None:
         try:
             import json as _json
@@ -6604,7 +6838,7 @@ def get_channel_analytics_endpoint(
 @app.post(
     "/api/channels/{destination_id}/analytics/refresh",
     status_code=202,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def refresh_channel_analytics_endpoint(
     destination_id: str,
@@ -6625,7 +6859,7 @@ def refresh_channel_analytics_endpoint(
 
 @app.get(
     "/api/channels/{destination_id}/research",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_channel_research_endpoint(
     destination_id: str,
@@ -6717,7 +6951,7 @@ def get_channel_research_endpoint(
 @app.post(
     "/api/channels/{destination_id}/research/refresh",
     status_code=202,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def refresh_channel_research_endpoint(
     destination_id: str,
@@ -6733,7 +6967,7 @@ def refresh_channel_research_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/research/generate-titles",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def generate_research_titles_endpoint(
     destination_id: str,
@@ -6758,7 +6992,7 @@ def generate_research_titles_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/research/generate-hashtags",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def generate_research_hashtags_endpoint(
     destination_id: str,
@@ -6803,7 +7037,7 @@ def generate_research_hashtags_endpoint(
 
 @app.get(
     "/api/channels/{destination_id}/dna",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def get_channel_dna_endpoint(
     destination_id: str,
@@ -6823,7 +7057,7 @@ def get_channel_dna_endpoint(
 
 @app.patch(
     "/api/channels/{destination_id}/dna",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def update_channel_dna_endpoint(
     destination_id: str,
@@ -6841,7 +7075,7 @@ def update_channel_dna_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/dna/suggest-hashtags",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def suggest_dna_hashtags_endpoint(
     destination_id: str,
@@ -6912,7 +7146,7 @@ def suggest_dna_hashtags_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/dna/suggest-tags",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def suggest_dna_tags_endpoint(
     destination_id: str,
@@ -6948,7 +7182,7 @@ def suggest_dna_tags_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/dna/titles",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def dna_title_candidates_endpoint(
     destination_id: str,
@@ -6973,7 +7207,7 @@ def dna_title_candidates_endpoint(
 
 @app.get(
     "/api/channels/{destination_id}/dna/suggestions",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def list_dna_suggestions_endpoint(
     destination_id: str,
@@ -7008,7 +7242,7 @@ def list_dna_suggestions_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/dna/suggestions/{suggestion_id}/apply",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def apply_dna_suggestion_endpoint(
     destination_id: str,
@@ -7029,7 +7263,7 @@ def apply_dna_suggestion_endpoint(
 
 @app.post(
     "/api/channels/{destination_id}/dna/suggestions/{suggestion_id}/dismiss",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def dismiss_dna_suggestion_endpoint(
     destination_id: str,
@@ -7050,7 +7284,7 @@ def dismiss_dna_suggestion_endpoint(
 @app.post(
     "/api/channels/{destination_id}/dna/performance/collect",
     status_code=202,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def collect_dna_performance_endpoint(
     destination_id: str,
@@ -7150,7 +7384,7 @@ def _dna_performance_job(destination_id: str) -> None:
 
 @app.post(
     "/api/channels/{destination_id}/research/apply",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(authenticate_request)],
 )
 def apply_research_endpoint(
     destination_id: str,

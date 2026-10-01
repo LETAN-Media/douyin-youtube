@@ -1,7 +1,10 @@
 // Central server-side API client.
-// Browser -> Next.js server -> FastAPI. ADMIN_TOKEN never leaves the server.
+// Browser -> Next.js server -> FastAPI. Identity is forwarded per-session:
+// user sessions go as X-Session-Token (tenant-enforced by the backend),
+// the legacy admin session goes as X-Admin-Token. Tokens never reach JS.
 
 import { getServerEnv } from "./env";
+import { forwardAuthHeaders } from "./forward";
 import type {
   ChannelDetail,
   ChannelItem,
@@ -64,13 +67,14 @@ async function apiFetch<T>(
   init: RequestInit = {},
   opts: { timeoutMs?: number } = {},
 ): Promise<T> {
-  const { apiUrl, adminToken } = getServerEnv();
+  const { apiUrl } = getServerEnv();
   if (!apiUrl) throw new ApiError(500, "DOUYIN_API_URL chưa được cấu hình.");
-  if (!adminToken)
-    throw new ApiError(500, "DOUYIN_ADMIN_TOKEN chưa được cấu hình.");
+  const auth = await forwardAuthHeaders();
+  if (auth.kind === "none")
+    throw new ApiError(401, "Unauthorized: vui lòng đăng nhập lại.");
 
   const headers: Record<string, string> = {
-    "X-Admin-Token": adminToken,
+    ...auth.headers,
     ...(init.headers as Record<string, string> | undefined),
   };
   if (init.body !== undefined && !headers["Content-Type"]) {
@@ -661,3 +665,88 @@ export async function getScheduleCapacity(
   );
 }
 
+
+// ---------- Auth / Admin users (multi-tenant) ----------
+
+export interface MeWorkspace {
+  id: string;
+  name: string;
+  role: string;
+}
+
+export interface MeUser {
+  id: string | null;
+  email: string | null;
+  display_name: string | null;
+  status: string;
+  is_system_admin: boolean;
+}
+
+export interface MeResponse {
+  user: MeUser;
+  workspaces: MeWorkspace[];
+  via?: string;
+}
+
+export async function getMe(): Promise<MeResponse> {
+  return apiFetch<MeResponse>("/api/auth/me");
+}
+
+export interface AdminUserRow {
+  id: string;
+  email: string;
+  display_name: string | null;
+  status: string;
+  is_system_admin: boolean;
+  last_login_at: string | null;
+  created_at: string | null;
+  workspaces: {
+    workspace_id: string;
+    workspace_name: string;
+    role: string;
+  }[];
+}
+
+export async function listAdminUsers(): Promise<AdminUserRow[]> {
+  const data = await apiFetch<{ users: AdminUserRow[] }>("/api/admin/users");
+  return data.users ?? [];
+}
+
+export async function adminCreateUser(input: {
+  email: string;
+  password: string;
+  display_name?: string;
+  workspace_name?: string;
+  is_system_admin?: boolean;
+}): Promise<{ user: AdminUserRow; workspace: MeWorkspace }> {
+  return apiFetch("/api/admin/users", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function adminUpdateUser(
+  id: string,
+  input: Record<string, unknown>,
+): Promise<{ user: AdminUserRow }> {
+  return apiFetch(`/api/admin/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function adminDeleteUser(id: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/admin/users/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function adminResetPassword(
+  id: string,
+  newPassword: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/admin/users/${encodeURIComponent(id)}/reset-password`, {
+    method: "POST",
+    body: JSON.stringify({ new_password: newPassword }),
+  });
+}

@@ -55,8 +55,17 @@ def _cache_set(db, key: str, payload: dict[str, Any]) -> None:
     db.commit()
 
 
-def insights_cache_key(destination_id: str, start: str, end: str) -> str:
-    return f"yt_insights:{destination_id}:{start}:{end}"
+def insights_cache_key(
+    destination_id: str, start: str, end: str, workspace_id: str | None = None
+) -> str:
+    # Tenant-scoped cache key (Phase 11): never keyed by destination alone.
+    ws = workspace_id or "global"
+    return f"yt_insights:{ws}:{destination_id}:{start}:{end}"
+
+
+def analytics_refresh_key(destination_id: str, workspace_id: str | None = None) -> str:
+    ws = workspace_id or "global"
+    return f"yt_analytics_last_refresh:{ws}:{destination_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +82,9 @@ def analytics_status(db, destination: Destination) -> dict[str, Any]:
         .order_by(YouTubeChannelAnalyticsDaily.date.desc())
         .limit(1)
     ).scalar_one_or_none()
-    refresh_row = db.get(AppSetting, f"yt_analytics_last_refresh:{destination.id}")
+    refresh_row = db.get(
+        AppSetting, analytics_refresh_key(destination.id, getattr(destination, "workspace_id", None))
+    )
     last_refresh_at = None
     if refresh_row is not None:
         try:
@@ -140,7 +151,10 @@ def _analytics_refresh_job(destination_id: str) -> None:
             terms = fetch_search_terms(aclient, channel_id, start28, end)
             _cache_set(
                 db,
-                insights_cache_key(destination_id, start28, end),
+                insights_cache_key(
+                    destination_id, start28, end,
+                    getattr(dest, "workspace_id", None),
+                ),
                 {
                     "traffic_sources": traffic,
                     "search_terms": terms,
@@ -150,7 +164,9 @@ def _analytics_refresh_job(destination_id: str) -> None:
             )
             _cache_set(
                 db,
-                f"yt_analytics_last_refresh:{destination_id}",
+                analytics_refresh_key(
+                    destination_id, getattr(dest, "workspace_id", None)
+                ),
                 {"at": utcnow().isoformat()},
             )
             db.commit()
@@ -171,7 +187,9 @@ def _upsert_daily(db, dest: Destination, channel_id: str, r: dict[str, Any]) -> 
     ).scalar_one_or_none()
     if row is None:
         row = YouTubeChannelAnalyticsDaily(
-            destination_id=dest.id, channel_id=channel_id, date=r["date"]
+            destination_id=dest.id,
+            workspace_id=getattr(dest, "workspace_id", None),
+            channel_id=channel_id, date=r["date"]
         )
         db.add(row)
     row.views = r["views"]
@@ -200,7 +218,9 @@ def _upsert_top_videos(db, dest: Destination, date_key: str, tops: list[dict]) -
         ).scalar_one_or_none()
         if row is None:
             row = YouTubeVideoAnalyticsDaily(
-                destination_id=dest.id, video_id=vid, date=date_key
+                destination_id=dest.id,
+                workspace_id=getattr(dest, "workspace_id", None),
+                video_id=vid, date=date_key
             )
             db.add(row)
         row.views = t.get("views", 0)
@@ -222,7 +242,12 @@ def maybe_background_analytics_refresh(
         per_day = 2
     interval = timedelta(hours=24.0 / per_day)
     if last_refresh_at is None:
-        row = db.get(AppSetting, f"yt_analytics_last_refresh:{destination.id}")
+        row = db.get(
+            AppSetting,
+            analytics_refresh_key(
+                destination.id, getattr(destination, "workspace_id", None)
+            ),
+        )
         if row is not None:
             try:
                 last_refresh_at = json.loads(row.value).get("at")
@@ -243,6 +268,11 @@ def maybe_background_analytics_refresh(
 # ---------------------------------------------------------------------------
 # Trend research runs (public Data API, quota-guarded, background)
 # ---------------------------------------------------------------------------
+
+def _dest_ws(db, destination_id: str) -> str | None:
+    dest = db.get(Destination, destination_id)
+    return getattr(dest, "workspace_id", None) if dest is not None else None
+
 
 def get_latest_run(db, destination_id: str) -> YouTubeResearchRun | None:
     return db.execute(
@@ -281,7 +311,11 @@ def queue_research_refresh(destination_id: str, force: bool = False) -> dict[str
                 "ok": True, "destination_id": destination_id,
                 "status": "completed", "run_id": latest.id, "cached": True,
             }
-        run = YouTubeResearchRun(destination_id=destination_id, status="queued")
+        run = YouTubeResearchRun(
+            destination_id=destination_id,
+            workspace_id=_dest_ws(db, destination_id),
+            status="queued",
+        )
         db.add(run)
         db.commit()
         db.refresh(run)
@@ -392,9 +426,11 @@ def _research_job(destination_id: str, run_id: str) -> None:
             for v in ranked[:15]:
                 fit_map[v["video_id"]] = _tr.channel_fit_score(v, top_hist_v, niche.get("keywords") or [])
             # Persist items.
+            _item_ws = getattr(dest, "workspace_id", None)
             for v in ranked[:50]:
                 db.add(YouTubeResearchItem(
-                    run_id=run_id, destination_id=destination_id, kind="video",
+                    run_id=run_id, destination_id=destination_id,
+                    workspace_id=_item_ws, kind="video",
                     video_id=v.get("video_id"), title=(v.get("title") or "")[:400],
                     channel_title=(v.get("channel_title") or "")[:300],
                     thumbnail_url=v.get("thumbnail"),
@@ -410,7 +446,8 @@ def _research_job(destination_id: str, run_id: str) -> None:
                 ))
             for h in hashtag_stats:
                 db.add(YouTubeResearchItem(
-                    run_id=run_id, destination_id=destination_id, kind="hashtag",
+                    run_id=run_id, destination_id=destination_id,
+                    workspace_id=_item_ws, kind="hashtag",
                     title=h.get("tag"), trend_score=h.get("trend_score", 0),
                     channel_fit_score=h.get("channel_fit_score"),
                     evidence_json={

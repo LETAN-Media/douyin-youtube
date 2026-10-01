@@ -2,13 +2,17 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { IconChannels, IconDashboard, IconLogout, IconMenu, IconPlus, IconX } from "./icons";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: <IconDashboard size={17} /> },
   { href: "/channels", label: "Channels", icon: <IconChannels size={17} /> },
   { href: "/pipelines/new", label: "New Pipeline", icon: <IconPlus size={17} /> },
+];
+
+const adminNav = [
+  { href: "/admin/users", label: "Users", icon: <IconDashboard size={17} /> },
 ];
 
 function LogoutButton({ compact = false }: { compact?: boolean }) {
@@ -55,9 +59,23 @@ function Brand() {
 }
 
 function NavItems({ onNavigate, pathname }: { onNavigate?: () => void; pathname: string }) {
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled) setIsAdmin(!!data?.user?.is_system_admin);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const items = isAdmin ? [...nav, ...adminNav] : nav;
   return (
     <nav className="flex flex-col gap-1">
-      {nav.map((item) => {
+      {items.map((item) => {
         const active =
           item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
         return (

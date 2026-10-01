@@ -217,6 +217,7 @@ def _upsert_comment(
 
     comment = YouTubeComment(
         destination_id=destination.id,
+        workspace_id=getattr(destination, "workspace_id", None),
         video_id=video_id,
         video_title=(video_title or None),
         youtube_comment_id=comment_id,

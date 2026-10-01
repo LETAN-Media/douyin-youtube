@@ -211,6 +211,18 @@ class Settings(BaseSettings):
     # blocked provider must surface as an error rather than silently scraping.
     douyin_creator_fallbacks_enabled: bool = False
 
+    # ---- Multi-user / multi-tenant auth ----
+    # No public signup endpoint exists; admins create accounts via
+    # POST /api/admin/users. This flag documents that default.
+    signup_disabled: bool = True
+    # Opaque session token lifetime for user login (email+password).
+    session_ttl_seconds: int = 30 * 24 * 60 * 60
+    # Optional bootstrap for the FIRST system-admin user. When both are set
+    # and no user with that email exists, migration creates it. After the
+    # first login, rotate/remove these immediately.
+    admin_email: str = ""
+    admin_initial_password: str = ""
+
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",

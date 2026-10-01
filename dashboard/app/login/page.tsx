@@ -8,6 +8,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
+  const [legacy, setLegacy] = useState(false);
 
   return (
     <div className="relative flex min-h-dvh items-center justify-center overflow-hidden px-4">
@@ -23,7 +24,9 @@ export default function LoginPage() {
           Douyin Control Panel
         </h1>
         <p className="mt-1 text-sm text-slate-500">
-          Đăng nhập admin để quản lý pipelines.
+          {legacy
+            ? "Đăng nhập admin legacy để quản lý hệ thống."
+            : "Đăng nhập bằng email để vào workspace của bạn."}
         </p>
         {error ? (
           <p className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-sm font-semibold text-rose-700">
@@ -56,12 +59,31 @@ export default function LoginPage() {
             });
           }}
         >
+          {!legacy ? (
+            <div>
+              <label
+                htmlFor="email"
+                className="mb-1.5 block text-xs font-bold text-slate-600"
+              >
+                Email
+              </label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                autoComplete="username"
+                required
+                placeholder="ban@workspace.vn"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm shadow-sm outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100"
+              />
+            </div>
+          ) : null}
           <div>
             <label
               htmlFor="password"
               className="mb-1.5 block text-xs font-bold text-slate-600"
             >
-              Mật khẩu admin (DASHBOARD_SECRET)
+              {legacy ? "Mật khẩu admin (DASHBOARD_SECRET)" : "Mật khẩu"}
             </label>
             <input
               id="password"
@@ -81,7 +103,17 @@ export default function LoginPage() {
             {pending ? "Đang đăng nhập…" : "Đăng nhập"}
           </button>
         </form>
-        <p className="mt-5 text-center text-[11px] text-slate-400">
+        <button
+          type="button"
+          onClick={() => {
+            setLegacy(!legacy);
+            setError(null);
+          }}
+          className="mt-4 w-full text-center text-xs font-semibold text-slate-400 transition hover:text-indigo-600"
+        >
+          {legacy ? "← Dùng tài khoản email" : "Đăng nhập admin legacy →"}
+        </button>
+        <p className="mt-3 text-center text-[11px] text-slate-400">
           Pipeline → Sources → Inventory → Destinations → Publications
         </p>
       </div>

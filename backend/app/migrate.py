@@ -170,7 +170,7 @@ def run_migrations() -> None:
                 if not column_exists(connection, _tbl, _col):
                     logger.info("Adding %s to %s", _col, _tbl)
                     with connection.begin_nested():
-                        connection.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS {_col} {_typ}"))
+                        connection.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_typ}"))
             except Exception as exc:
                 logger.warning("Add %s to %s skipped: %s", _col, _tbl, exc)
         for _tbl, _col, _typ in [
@@ -184,7 +184,7 @@ def run_migrations() -> None:
                 if not column_exists(connection, _tbl, _col):
                     logger.info("Adding %s to %s", _col, _tbl)
                     with connection.begin_nested():
-                        connection.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS {_col} {_typ}"))
+                        connection.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_typ}"))
             except Exception as exc:
                 logger.warning("Add %s to %s skipped: %s", _col, _tbl, exc)
         # One-time per-source cookie → global PlatformAccount
@@ -210,7 +210,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE video_jobs "
-                    "ADD COLUMN IF NOT EXISTS pipeline_id VARCHAR(36)"
+                    "ADD COLUMN pipeline_id VARCHAR(36)"
                 )
             )
 
@@ -220,7 +220,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE pipelines "
-                    "ADD COLUMN IF NOT EXISTS youtube_credentials TEXT"
+                    "ADD COLUMN youtube_credentials TEXT"
                 )
             )
 
@@ -230,7 +230,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE pipelines "
-                    "ADD COLUMN IF NOT EXISTS youtube_connected BOOLEAN DEFAULT FALSE"
+                    "ADD COLUMN youtube_connected BOOLEAN DEFAULT FALSE"
                 )
             )
 
@@ -240,7 +240,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE pipelines "
-                    "ADD COLUMN IF NOT EXISTS youtube_channel_id VARCHAR(200)"
+                    "ADD COLUMN youtube_channel_id VARCHAR(200)"
                 )
             )
 
@@ -250,7 +250,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE pipelines "
-                    "ADD COLUMN IF NOT EXISTS youtube_channel_title VARCHAR(300)"
+                    "ADD COLUMN youtube_channel_title VARCHAR(300)"
                 )
             )
 
@@ -260,7 +260,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE oauth_states "
-                    "ADD COLUMN IF NOT EXISTS pipeline_id VARCHAR(36)"
+                    "ADD COLUMN pipeline_id VARCHAR(36)"
                 )
             )
 
@@ -270,7 +270,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE oauth_states "
-                    "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
+                    "ADD COLUMN destination_id VARCHAR(36)"
                 )
             )
 
@@ -280,7 +280,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE video_jobs "
-                    "ADD COLUMN IF NOT EXISTS source_video_id VARCHAR(200)"
+                    "ADD COLUMN source_video_id VARCHAR(200)"
                 )
             )
 
@@ -290,7 +290,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE video_jobs "
-                    "ADD COLUMN IF NOT EXISTS schedule_slot_key VARCHAR(100)"
+                    "ADD COLUMN schedule_slot_key VARCHAR(100)"
                 )
             )
 
@@ -300,7 +300,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE video_jobs "
-                    "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
+                    "ADD COLUMN destination_id VARCHAR(36)"
                 )
             )
 
@@ -310,7 +310,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE video_jobs "
-                    "ADD COLUMN IF NOT EXISTS publication_id VARCHAR(36)"
+                    "ADD COLUMN publication_id VARCHAR(36)"
                 )
             )
             try:
@@ -337,7 +337,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         f"ALTER TABLE destinations "
-                        f"ADD COLUMN IF NOT EXISTS {_col} {_typ}"
+                        f"ADD COLUMN {_col} {_typ}"
                     )
                 )
 
@@ -347,7 +347,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                    "ADD COLUMN IF NOT EXISTS original_profile_url TEXT"
+                    "ADD COLUMN original_profile_url TEXT"
                 )
             )
 
@@ -357,7 +357,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                    "ADD COLUMN IF NOT EXISTS inventory_sync_status VARCHAR(20) DEFAULT 'idle'"
+                    "ADD COLUMN inventory_sync_status VARCHAR(20) DEFAULT 'idle'"
                 )
             )
 
@@ -367,7 +367,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                    "ADD COLUMN IF NOT EXISTS destination_id VARCHAR(36)"
+                    "ADD COLUMN destination_id VARCHAR(36)"
                 )
             )
 
@@ -377,7 +377,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                    "ADD COLUMN IF NOT EXISTS inventory_count INTEGER DEFAULT 0"
+                    "ADD COLUMN inventory_count INTEGER DEFAULT 0"
                 )
             )
 
@@ -387,7 +387,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                    "ADD COLUMN IF NOT EXISTS inventory_synced_at TIMESTAMPTZ"
+                    "ADD COLUMN inventory_synced_at TIMESTAMPTZ"
                 )
             )
 
@@ -397,7 +397,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                    "ADD COLUMN IF NOT EXISTS inventory_sync_error TEXT"
+                    "ADD COLUMN inventory_sync_error TEXT"
                 )
             )
 
@@ -426,7 +426,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -449,7 +449,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_sources "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -476,7 +476,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_videos "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -486,7 +486,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE destinations "
-                    "ADD COLUMN IF NOT EXISTS min_upload_interval_minutes INTEGER DEFAULT 0"
+                    "ADD COLUMN min_upload_interval_minutes INTEGER DEFAULT 0"
                 )
             )
 
@@ -517,7 +517,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE destinations "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -579,7 +579,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_videos "
-                    "ADD COLUMN IF NOT EXISTS is_backfill BOOLEAN DEFAULT FALSE"
+                    "ADD COLUMN is_backfill BOOLEAN DEFAULT FALSE"
                 )
             )
 
@@ -589,7 +589,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE douyin_videos "
-                    "ADD COLUMN IF NOT EXISTS thumbnail_url TEXT"
+                    "ADD COLUMN thumbnail_url TEXT"
                 )
             )
 
@@ -606,7 +606,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE publications "
-                    "ADD COLUMN IF NOT EXISTS publication_mode VARCHAR(20) DEFAULT 'auto'"
+                    "ADD COLUMN publication_mode VARCHAR(20) DEFAULT 'auto'"
                 )
             )
 
@@ -628,7 +628,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE pipelines "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -641,7 +641,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE destinations "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -658,7 +658,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE publications "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -674,7 +674,7 @@ def run_migrations() -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE video_jobs "
-                        f"ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+                        f"ADD COLUMN {column_name} {column_type}"
                     )
                 )
 
@@ -683,7 +683,7 @@ def run_migrations() -> None:
             connection.execute(
                 text(
                     "ALTER TABLE pipelines "
-                    "ADD COLUMN IF NOT EXISTS youtube_default_publish_mode VARCHAR(20) DEFAULT 'immediate'"
+                    "ADD COLUMN youtube_default_publish_mode VARCHAR(20) DEFAULT 'immediate'"
                 )
             )
 
@@ -743,6 +743,12 @@ def run_migrations() -> None:
             logger.info("slot unique index skipped (possible legacy duplicates)")
 
         default_pipeline_id = ensure_default_pipeline(connection)
+
+        # ---- Multi-tenant auth + workspace backfill (additive, idempotent) ----
+        try:
+            run_tenant_migration(connection)
+        except Exception as exc:
+            logger.warning("Tenant migration skipped/partial: %s", exc)
 
         if default_pipeline_id is not None:
             migrate_existing_youtube_to_destination(connection)
@@ -844,9 +850,283 @@ def migrate_existing_youtube_to_destination(connection: Any) -> None:
                 enabled=True,
             )
             db.add(destination)
+            # New destinations inherit the pipeline workspace (never global).
+            try:
+                pipe_ws = db.execute(
+                    text("SELECT workspace_id FROM pipelines WHERE id = :pid"),
+                    {"pid": pipeline_id},
+                ).fetchone()
+                if pipe_ws is not None and pipe_ws[0]:
+                    destination.workspace_id = pipe_ws[0]
+            except Exception:
+                pass
             db.commit()
             logger.info(
                 "Migrated YouTube OAuth for pipeline %s to destination %s",
                 pipeline_id,
                 destination.id,
             )
+
+
+# =====================================================================
+# Multi-tenant migration (Phase 2-3): additive + idempotent + backfill.
+# Every step uses IF NOT EXISTS / ON CONFLICT guards so reruns are safe.
+# =====================================================================
+
+ADMIN_WORKSPACE_NAME = "Admin Workspace"
+
+_TENANT_TABLES = [
+    "pipelines",
+    "destinations",
+    "pipeline_sources",
+    "douyin_sources",
+    "douyin_videos",
+    "publications",
+    "video_jobs",
+    "youtube_comments",
+    "youtube_channel_analytics_daily",
+    "youtube_video_analytics_daily",
+    "youtube_research_runs",
+    "youtube_research_items",
+    "youtube_channel_dna",
+    "youtube_content_fingerprints",
+    "youtube_performance_snapshots",
+    "youtube_dna_suggestions",
+    "youtube_daily_publish_overrides",
+    "oauth_states",
+]
+
+
+def run_tenant_migration(connection: Any) -> None:
+    from app.models import User, UserSession, Workspace, WorkspaceMember
+
+    # 1. New auth tables (no-op when they already exist).
+    for _model in (User, Workspace, WorkspaceMember, UserSession):
+        if not table_exists(connection, _model.__table__.name):
+            logger.info("Creating %s table", _model.__table__.name)
+            Base.metadata.create_all(bind=connection, tables=[_model.__table__])
+
+    # 2. workspace_id columns on every tenant table.
+    for _tbl in _TENANT_TABLES:
+        try:
+            if table_exists(connection, _tbl) and not column_exists(
+                connection, _tbl, "workspace_id"
+            ):
+                logger.info("Adding workspace_id to %s", _tbl)
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {_tbl} "
+                        "ADD COLUMN workspace_id VARCHAR(36)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        f"CREATE INDEX IF NOT EXISTS ix_{_tbl}_workspace_id "
+                        f"ON {_tbl} (workspace_id)"
+                    )
+                )
+        except Exception as exc:
+            logger.warning("workspace_id on %s skipped: %s", _tbl, exc)
+    try:
+        if table_exists(connection, "oauth_states") and not column_exists(
+            connection, "oauth_states", "initiated_by_user_id"
+        ):
+            connection.execute(
+                text(
+                    "ALTER TABLE oauth_states "
+                    "ADD COLUMN initiated_by_user_id VARCHAR(36)"
+                )
+            )
+    except Exception as exc:
+        logger.warning("oauth_states.initiated_by_user_id skipped: %s", exc)
+
+    # 3. Composite indexes for the hottest scoped queries.
+    for _idx, _tbl, _cols in [
+        ("ix_douyin_videos_workspace_created", "douyin_videos", "(workspace_id, created_at)"),
+        ("ix_youtube_comments_workspace_dest", "youtube_comments", "(workspace_id, destination_id)"),
+        ("ix_publications_workspace_dest", "publications", "(workspace_id, destination_id)"),
+        ("ix_publications_workspace_created", "publications", "(workspace_id, created_at)"),
+    ]:
+        try:
+            if table_exists(connection, _tbl):
+                connection.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS {_idx} ON {_tbl} {_cols}")
+                )
+        except Exception:
+            logger.info("index %s skipped", _idx)
+
+    # 4. Ensure the Admin Workspace exists (owns ALL pre-existing data).
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    _now = _dt.now(_tz.utc)
+    admin_ws_id = connection.execute(
+        text("SELECT id FROM workspaces WHERE name = :name LIMIT 1"),
+        {"name": ADMIN_WORKSPACE_NAME},
+    ).fetchone()
+    if admin_ws_id is None:
+        import uuid as _uuid
+
+        admin_ws_id = (str(_uuid.uuid4()),)
+        connection.execute(
+            text(
+                "INSERT INTO workspaces (id, name, owner_user_id, created_at, updated_at) "
+                "VALUES (:id, :name, NULL, :now, :now)"
+            ),
+            {"id": admin_ws_id[0], "name": ADMIN_WORKSPACE_NAME, "now": _now},
+        )
+        logger.info("Created Admin Workspace id=%s", admin_ws_id[0])
+    admin_ws_id = admin_ws_id[0]
+
+    # 5. Backfill pipelines first (root of the tenant tree).
+    if table_exists(connection, "pipelines"):
+        connection.execute(
+            text(
+                "UPDATE pipelines SET workspace_id = :ws "
+                "WHERE workspace_id IS NULL"
+            ),
+            {"ws": admin_ws_id},
+        )
+
+    # 6. Backfill direct children of pipelines.
+    for _tbl in (
+        "destinations",
+        "pipeline_sources",
+        "douyin_sources",
+        "douyin_videos",
+        "publications",
+        "video_jobs",
+    ):
+        try:
+            if not table_exists(connection, _tbl):
+                continue
+            if _tbl == "video_jobs":
+                # Jobs may hang off pipeline OR destination.
+                connection.execute(
+                    text(
+                        "UPDATE video_jobs SET workspace_id = pipelines.workspace_id "
+                        "FROM pipelines WHERE video_jobs.workspace_id IS NULL "
+                        "AND video_jobs.pipeline_id = pipelines.id"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "UPDATE video_jobs SET workspace_id = destinations.workspace_id "
+                        "FROM destinations WHERE video_jobs.workspace_id IS NULL "
+                        "AND video_jobs.destination_id = destinations.id"
+                    )
+                )
+            elif _tbl == "publications":
+                connection.execute(
+                    text(
+                        "UPDATE publications SET workspace_id = pipelines.workspace_id "
+                        "FROM pipelines WHERE publications.workspace_id IS NULL "
+                        "AND publications.pipeline_id = pipelines.id"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "UPDATE publications SET workspace_id = destinations.workspace_id "
+                        "FROM destinations WHERE publications.workspace_id IS NULL "
+                        "AND publications.destination_id = destinations.id"
+                    )
+                )
+            elif _tbl in ("destinations", "pipeline_sources", "douyin_sources", "douyin_videos"):
+                connection.execute(
+                    text(
+                        f"UPDATE {_tbl} SET workspace_id = pipelines.workspace_id "
+                        f"FROM pipelines WHERE {_tbl}.workspace_id IS NULL "
+                        f"AND {_tbl}.pipeline_id = pipelines.id"
+                    )
+                )
+            # Any row that still has no workspace (orphan) falls into Admin.
+            connection.execute(
+                text(f"UPDATE {_tbl} SET workspace_id = :ws WHERE workspace_id IS NULL"),
+                {"ws": admin_ws_id},
+            )
+        except Exception as exc:
+            logger.warning("Backfill %s skipped: %s", _tbl, exc)
+
+    # 7. Backfill destination-scoped tables.
+    for _tbl in (
+        "youtube_comments",
+        "youtube_channel_analytics_daily",
+        "youtube_video_analytics_daily",
+        "youtube_research_runs",
+        "youtube_research_items",
+        "youtube_channel_dna",
+        "youtube_content_fingerprints",
+        "youtube_performance_snapshots",
+        "youtube_dna_suggestions",
+        "youtube_daily_publish_overrides",
+    ):
+        try:
+            if not table_exists(connection, _tbl):
+                continue
+            connection.execute(
+                text(
+                    f"UPDATE {_tbl} SET workspace_id = destinations.workspace_id "
+                    f"FROM destinations WHERE {_tbl}.workspace_id IS NULL "
+                    f"AND {_tbl}.destination_id = destinations.id"
+                )
+            )
+            if _tbl == "youtube_research_items":
+                connection.execute(
+                    text(
+                        "UPDATE youtube_research_items SET workspace_id = "
+                        "youtube_research_runs.workspace_id "
+                        "FROM youtube_research_runs "
+                        "WHERE youtube_research_items.workspace_id IS NULL "
+                        "AND youtube_research_items.run_id = youtube_research_runs.id"
+                    )
+                )
+            if _tbl == "youtube_content_fingerprints":
+                connection.execute(
+                    text(
+                        "UPDATE youtube_content_fingerprints SET workspace_id = "
+                        "publications.workspace_id FROM publications "
+                        "WHERE youtube_content_fingerprints.workspace_id IS NULL "
+                        "AND youtube_content_fingerprints.publication_id = publications.id"
+                    )
+                )
+            connection.execute(
+                text(f"UPDATE {_tbl} SET workspace_id = :ws WHERE workspace_id IS NULL"),
+                {"ws": admin_ws_id},
+            )
+        except Exception as exc:
+            logger.warning("Backfill %s skipped: %s", _tbl, exc)
+
+    # 8. Optional bootstrap of the first system-admin user from env.
+    try:
+        admin_email = (settings.admin_email or "").strip().lower()
+        admin_pw = settings.admin_initial_password or ""
+        if admin_email and admin_pw:
+            exists = connection.execute(
+                text("SELECT 1 FROM users WHERE email = :email LIMIT 1"),
+                {"email": admin_email},
+            ).fetchone()
+            if exists is None:
+                from app.auth import hash_password as _hash_pw
+
+                import uuid as _uuid
+
+                uid = str(_uuid.uuid4())
+                connection.execute(
+                    text(
+                        "INSERT INTO users (id, email, password_hash, display_name, "
+                        "status, is_system_admin, created_at, updated_at) "
+                        "VALUES (:id, :email, :pw, 'System Admin', 'active', TRUE, :now, :now)"
+                    ),
+                    {"id": uid, "email": admin_email, "pw": _hash_pw(admin_pw), "now": _now},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO workspace_members (id, workspace_id, user_id, role, created_at) "
+                        "VALUES (:id, :ws, :uid, 'owner', :now) "
+                        "ON CONFLICT (workspace_id, user_id) DO NOTHING"
+                    ),
+                    {"id": str(_uuid.uuid4()), "ws": admin_ws_id, "uid": uid, "now": _now},
+                )
+                logger.info("Bootstrapped system admin user %s", admin_email)
+    except Exception as exc:
+        logger.warning("Admin bootstrap skipped: %s", exc)

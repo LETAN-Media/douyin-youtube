@@ -797,6 +797,7 @@ def allocate_publication(
             return existing, existing.scheduled_at or slot_utc, day
         pub = Publication(
             pipeline_id=pipeline.id,
+            workspace_id=getattr(pipeline, "workspace_id", None) or getattr(destination, "workspace_id", None),
             douyin_video_id=douyin_video.id,
             destination_id=destination.id,
             platform=destination.platform,
@@ -910,6 +911,7 @@ def promote_due_publications(
             privacy_status=(pipeline.default_privacy if pipeline else "public"),
             status="pending",
             pipeline_id=pub.pipeline_id,
+            workspace_id=getattr(pub, "workspace_id", None) or getattr(destination, "workspace_id", None),
             source_video_id=video.video_id,
             destination_id=destination.id,
             publication_id=pub.id,
@@ -1281,6 +1283,7 @@ def schedule_for_destination(
 
         publication = Publication(
             pipeline_id=pipeline.id,
+            workspace_id=getattr(pipeline, "workspace_id", None) or getattr(destination, "workspace_id", None),
             douyin_video_id=video.id,
             destination_id=destination.id,
             platform=destination.platform,
@@ -1320,6 +1323,7 @@ def schedule_for_destination(
             privacy_status=yt_privacy,
             status="pending",
             pipeline_id=pipeline.id,
+            workspace_id=getattr(publication, "workspace_id", None) or getattr(pipeline, "workspace_id", None),
             source_video_id=video.video_id,
             destination_id=destination.id,
             publication_id=publication.id,

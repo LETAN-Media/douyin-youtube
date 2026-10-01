@@ -33,6 +33,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _dest_workspace_id(db, destination_id: str) -> str | None:
+    """Workspace propagation for service-layer rows (Phase 12)."""
+    try:
+        dest = db.get(Destination, destination_id)
+        return getattr(dest, "workspace_id", None) if dest is not None else None
+    except Exception:
+        return None
+
+
 FINGERPRINT_KEYS = {
     "topic", "subtopics", "characters", "setting", "story_angle",
     "emotion", "audience_intent", "primary_keywords", "language",
@@ -60,6 +69,7 @@ def get_or_create_dna(db, destination: Destination) -> YouTubeChannelDNA:
     lang = (destination.metadata_language or "en").lower()
     dna = YouTubeChannelDNA(
         destination_id=destination.id,
+        workspace_id=getattr(destination, "workspace_id", None),
         primary_niche=destination.metadata_profile or destination.name,
         secondary_topics=[],
         audience_profile="",
@@ -217,7 +227,8 @@ def save_fingerprint(
     ).scalar_one_or_none()
     if row is None:
         row = YouTubeContentFingerprint(
-            publication_id=publication_id, destination_id=destination_id
+            publication_id=publication_id, destination_id=destination_id,
+            workspace_id=_dest_workspace_id(db, destination_id),
         )
         db.add(row)
     row.fingerprint = fingerprint
@@ -368,7 +379,8 @@ def record_performance_snapshot(
     ).scalar_one_or_none()
     if row is None:
         row = YouTubePerformanceSnapshot(
-            destination_id=destination_id, video_id=video_id, checkpoint=checkpoint
+            destination_id=destination_id, video_id=video_id, checkpoint=checkpoint,
+            workspace_id=_dest_workspace_id(db, destination_id),
         )
         db.add(row)
     row.views = int(metrics.get("views") or 0)
@@ -425,7 +437,9 @@ def suggest_from_performance(db, destination_id: str) -> list[dict[str, Any]]:
             if any((e.payload or {}).get("video_id") == vid for e in exists):
                 continue
             row = YouTubeDNASuggestion(
-                destination_id=destination_id, kind="winning_topic",
+                destination_id=destination_id,
+                workspace_id=_dest_workspace_id(db, destination_id),
+                kind="winning_topic",
                 payload={"video_id": vid, "title": title[:200], "velocity_ratio": round(velocity_ratio, 2)},
                 reason=f"24h velocity {velocity_ratio:.1f}x the 7d daily average",
             )

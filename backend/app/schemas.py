@@ -1046,3 +1046,46 @@ class CommentActionResult(BaseModel):
     comment: YouTubeCommentOut | None = None
     error: str | None = None
 
+
+
+# =====================================================================
+# Multi-user auth + admin user management (Phase 4)
+# =====================================================================
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class LoginResponse(BaseModel):
+    token: str
+    expires_at: datetime
+    user: dict
+
+
+class MeResponse(BaseModel):
+    user: dict
+    workspaces: list[dict] = Field(default_factory=list)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
+class AdminUserCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=200)
+    display_name: str | None = Field(default=None, max_length=200)
+    workspace_name: str | None = Field(default=None, max_length=200)
+    is_system_admin: bool = False
+
+
+class AdminUserUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=200)
+    status: str | None = None
+    is_system_admin: bool | None = None
+
+
+class AdminPasswordReset(BaseModel):
+    new_password: str = Field(min_length=8, max_length=200)

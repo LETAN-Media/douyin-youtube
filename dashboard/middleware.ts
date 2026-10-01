@@ -43,6 +43,63 @@ async function verifyToken(
   }
 }
 
+// Multi-user session cookie: payload_b64.sig where payload is
+// {uid,email,exp,token}. Verified with the same DASHBOARD_SECRET.
+function b64urlDecode(input: string): string {
+  let s = input.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4 !== 0) s += "=";
+  try {
+    return atob(s);
+  } catch {
+    return "";
+  }
+}
+
+async function verifyUserToken(
+  token: string | undefined,
+  secret: string,
+): Promise<boolean> {
+  try {
+    if (!token || !secret) return false;
+    const dot = token.lastIndexOf(".");
+    if (dot <= 0) return false;
+    const payload = token.slice(0, dot);
+    const sigHex = token.slice(dot + 1);
+    const raw = b64urlDecode(payload);
+    if (!raw) return false;
+    const data = JSON.parse(raw) as {
+      uid?: string;
+      exp?: number;
+      token?: string;
+    };
+    if (!data.uid || !data.token) return false;
+    if (
+      !Number.isFinite(data.exp) ||
+      (data.exp as number) < Math.floor(Date.now() / 1000)
+    ) {
+      return false;
+    }
+    const sig = hexToBytes(sigHex);
+    if (!sig || sig.length !== 32) return false;
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    // Must match lib/session.ts createUserSession: HMAC(payload_b64).
+    return await crypto.subtle.verify(
+      "HMAC",
+      key,
+      sig.buffer as ArrayBuffer,
+      new TextEncoder().encode(payload),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -68,8 +125,13 @@ export async function middleware(request: NextRequest) {
   }
 
   const secret = process.env.DASHBOARD_SECRET ?? "";
-  const token = request.cookies.get("dy_session")?.value;
-  const authenticated = await verifyToken(token, secret);
+  // Either the legacy admin cookie OR a signed user session grants access.
+  // (Tenant isolation itself is enforced by the backend per request.)
+  const legacyToken = request.cookies.get("dy_session")?.value;
+  const userToken = request.cookies.get("dy_user")?.value;
+  const authenticated =
+    (await verifyToken(legacyToken, secret)) ||
+    (await verifyUserToken(userToken, secret));
 
   if (pathname === "/login") {
     if (authenticated) {

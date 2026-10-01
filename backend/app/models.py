@@ -32,6 +32,16 @@ def utcnow() -> datetime:
 class Pipeline(Base):
     __tablename__ = "pipelines"
 
+    # ---- Multi-tenant scope ----
+    # NULL = legacy row, backfilled to the Admin Workspace by migration.
+    # New rows MUST set this (from the authenticated request context).
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36),
         primary_key=True,
@@ -273,6 +283,14 @@ class PlatformAccount(Base):
 class PipelineSource(Base):
     __tablename__ = "pipeline_sources"
 
+    # ---- Multi-tenant scope (backfilled from parent pipeline) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36),
         primary_key=True,
@@ -359,6 +377,14 @@ class PipelineSource(Base):
 
 class DouyinSource(Base):
     __tablename__ = "douyin_sources"
+
+    # ---- Multi-tenant scope (backfilled from parent pipeline) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -643,6 +669,14 @@ class DouyinSource(Base):
 class DouyinVideo(Base):
     __tablename__ = "douyin_videos"
 
+    # ---- Multi-tenant scope (backfilled from parent pipeline) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36),
         primary_key=True,
@@ -764,11 +798,20 @@ class DouyinVideo(Base):
             "video_id",
             name="uq_douyin_video_source_video",
         ),
+        Index("ix_douyin_videos_workspace_created", "workspace_id", "created_at"),
     )
 
 
 class Destination(Base):
     __tablename__ = "destinations"
+
+    # ---- Multi-tenant scope (backfilled from parent pipeline) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -1062,6 +1105,14 @@ class YouTubeComment(Base):
 
     __tablename__ = "youtube_comments"
 
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36),
         primary_key=True,
@@ -1218,11 +1269,20 @@ class YouTubeComment(Base):
             "youtube_comment_id",
             name="uq_youtube_comment_id",
         ),
+        Index("ix_youtube_comments_workspace_dest", "workspace_id", "destination_id"),
     )
 
 
 class Publication(Base):
     __tablename__ = "publications"
+
+    # ---- Multi-tenant scope (backfilled from parent pipeline) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -1390,6 +1450,8 @@ class Publication(Base):
             "destination_id",
             name="uq_publication_video_destination",
         ),
+        Index("ix_publications_workspace_dest", "workspace_id", "destination_id"),
+        Index("ix_publications_workspace_created", "workspace_id", "created_at"),
         # One reservation per channel per minute, while the publication
         # still holds its slot. Published/failed/skipped rows leave the
         # index so history never blocks future inserts. NULL rows excluded.
@@ -1412,6 +1474,14 @@ class Publication(Base):
 
 class VideoJob(Base):
     __tablename__ = "video_jobs"
+
+    # ---- Multi-tenant scope (backfilled from parent pipeline/destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -1656,6 +1726,21 @@ class AppSetting(Base):
 class OAuthState(Base):
     __tablename__ = "oauth_states"
 
+    # ---- Multi-tenant scope: binds the OAuth flow to the requesting
+    # workspace/user so a callback can never attach credentials elsewhere. ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    initiated_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     state: Mapped[str] = mapped_column(
         String(255),
         primary_key=True,
@@ -1683,6 +1768,14 @@ class YouTubeChannelAnalyticsDaily(Base):
     """Daily OWNED-channel analytics snapshot (YouTube Analytics API)."""
 
     __tablename__ = "youtube_channel_analytics_daily"
+
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
@@ -1718,6 +1811,14 @@ class YouTubeVideoAnalyticsDaily(Base):
     """Per-video OWNED analytics snapshot (dimension=video top list)."""
 
     __tablename__ = "youtube_video_analytics_daily"
+
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
@@ -1756,6 +1857,14 @@ class YouTubeResearchRun(Base):
 
     __tablename__ = "youtube_research_runs"
 
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
@@ -1783,6 +1892,14 @@ class YouTubeResearchItem(Base):
     """One ranked trend item within a run (evidence-backed)."""
 
     __tablename__ = "youtube_research_items"
+
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
@@ -1820,6 +1937,14 @@ class YouTubeChannelDNA(Base):
 
     __tablename__ = "youtube_channel_dna"
 
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
@@ -1854,6 +1979,14 @@ class YouTubeContentFingerprint(Base):
 
     __tablename__ = "youtube_content_fingerprints"
 
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
@@ -1878,6 +2011,14 @@ class YouTubePerformanceSnapshot(Base):
     """Performance checkpoints per video: 1h/6h/24h/72h/7d."""
 
     __tablename__ = "youtube_performance_snapshots"
+
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
@@ -1912,6 +2053,14 @@ class YouTubeDNASuggestion(Base):
 
     __tablename__ = "youtube_dna_suggestions"
 
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
@@ -1943,6 +2092,14 @@ class YouTubeDailyPublishOverride(Base):
 
     __tablename__ = "youtube_daily_publish_overrides"
 
+    # ---- Multi-tenant scope (backfilled from parent destination) ----
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
@@ -1964,4 +2121,204 @@ class YouTubeDailyPublishOverride(Base):
     source: Mapped[str] = mapped_column(String(30), nullable=False, default="ui_confirmation")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+# =====================================================================
+# Multi-user / multi-tenant auth (Phase 1)
+# =====================================================================
+
+class User(Base):
+    """Dashboard login account (email + Argon2id password hash)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    email: Mapped[str] = mapped_column(
+        String(320),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    # Argon2id hash string (never plaintext, never returned by any API).
+    password_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    display_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
+    # active | disabled
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="active",
+    )
+
+    is_system_admin: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
+class Workspace(Base):
+    """Tenant root. Every tenant-sensitive row points here."""
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+
+class WorkspaceMember(Base):
+    """Membership of a user in a workspace. role: owner | admin | member."""
+
+    __tablename__ = "workspace_members"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    workspace_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="member",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "user_id",
+            name="uq_workspace_member_ws_user",
+        ),
+    )
+
+
+class UserSession(Base):
+    """Opaque login session. Only the SHA-256 hash of the token is stored."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    ip: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    user_agent: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
     )

@@ -274,6 +274,7 @@ def _upsert_videos(
             db.add(DouyinVideo(
                 source_id=source.id,
                 pipeline_id=pipeline.id,
+                workspace_id=getattr(source, "workspace_id", None) or getattr(pipeline, "workspace_id", None),
                 video_id=video_id,
                 title=title,
                 description=description,

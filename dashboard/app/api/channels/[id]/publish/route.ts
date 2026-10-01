@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServerEnv } from "@/lib/env";
+import { forwardAuthHeaders } from "@/lib/forward";
 
 // Proxy: POST /api/channels/:id/publish -> FastAPI
 // POST /api/channels/{destination_id}/publish (channel_workspace_publish_endpoint).
@@ -8,6 +9,7 @@ import { getServerEnv } from "@/lib/env";
 // "The string did not match the expected pattern."
 // Pass the backend status/body through untouched so the client keeps its
 // DUPLICATE_VIDEO handling (code + external_url).
+// Identity forwarding (Phase 18): user session, never escalated to admin.
 export async function POST(
   request: Request,
   props: { params: Promise<{ id: string }> },
@@ -15,18 +17,16 @@ export async function POST(
   const { id } = await props.params;
   try {
     const body = await request.json();
-    const { apiUrl, adminToken } = getServerEnv();
+    const { apiUrl } = getServerEnv();
     if (!apiUrl) {
       return NextResponse.json(
         { error: "DOUYIN_API_URL chưa được cấu hình." },
         { status: 500 },
       );
     }
-    if (!adminToken) {
-      return NextResponse.json(
-        { error: "DOUYIN_ADMIN_TOKEN chưa được cấu hình." },
-        { status: 500 },
-      );
+    const auth = await forwardAuthHeaders();
+    if (auth.kind === "none") {
+      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
 
     const res = await fetch(
@@ -34,7 +34,7 @@ export async function POST(
       {
         method: "POST",
         headers: {
-          "X-Admin-Token": adminToken,
+          ...auth.headers,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
