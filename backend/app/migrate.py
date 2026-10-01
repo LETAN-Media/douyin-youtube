@@ -943,9 +943,15 @@ def run_tenant_migration(connection: Any) -> None:
     # 3. Composite indexes for the hottest scoped queries.
     for _idx, _tbl, _cols in [
         ("ix_douyin_videos_workspace_created", "douyin_videos", "(workspace_id, created_at)"),
+        ("ix_douyin_videos_workspace_pipeline", "douyin_videos", "(workspace_id, pipeline_id)"),
         ("ix_youtube_comments_workspace_dest", "youtube_comments", "(workspace_id, destination_id)"),
         ("ix_publications_workspace_dest", "publications", "(workspace_id, destination_id)"),
         ("ix_publications_workspace_created", "publications", "(workspace_id, created_at)"),
+        ("ix_publications_workspace_pipeline", "publications", "(workspace_id, pipeline_id)"),
+        ("ix_video_jobs_workspace_pipeline", "video_jobs", "(workspace_id, pipeline_id)"),
+        ("ix_video_jobs_workspace_dest", "video_jobs", "(workspace_id, destination_id)"),
+        ("ix_destinations_workspace_pipeline", "destinations", "(workspace_id, pipeline_id)"),
+        ("ix_douyin_sources_workspace_pipeline", "douyin_sources", "(workspace_id, pipeline_id)"),
     ]:
         try:
             if table_exists(connection, _tbl):

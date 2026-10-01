@@ -10,6 +10,7 @@ overridden. Covers the spec matrix:
   publish, OAuth, update/delete).
 """
 
+import json
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/tenant_iso_test.db")
@@ -165,7 +166,14 @@ def _seed():
             profile_url="https://www.douyin.com/user/aaa",
             enabled=True,
         )
-        db.add(src_a)
+        src_b = DouyinSource(
+            pipeline_id=pipe_b.id,
+            workspace_id=ws_b.id,
+            name="Source B",
+            profile_url="https://www.douyin.com/user/bbb",
+            enabled=True,
+        )
+        db.add_all([src_a, src_b])
         db.flush()
 
         vid_a = DouyinVideo(
@@ -190,6 +198,43 @@ def _seed():
             status="queued",
         )
         db.add(pub_a)
+        db.flush()
+
+        vid_b = DouyinVideo(
+            source_id=src_b.id,
+            pipeline_id=pipe_b.id,
+            workspace_id=ws_b.id,
+            video_id="aweme-b-1",
+            title="Video B1",
+            description="desc b",
+            url="https://v.douyin.com/bbb/",
+            status="new",
+        )
+        db.add(vid_b)
+        db.flush()
+        pub_b = Publication(
+            pipeline_id=pipe_b.id,
+            workspace_id=ws_b.id,
+            douyin_video_id=vid_b.id,
+            destination_id=dest_b1.id,
+            platform="youtube",
+            status="queued",
+        )
+        db.add(pub_b)
+        db.flush()
+
+        from app.models import VideoJob as _VJ
+
+        job_b = _VJ(
+            source_url="https://v.douyin.com/bbb/",
+            title="Job B",
+            status="pending",
+            pipeline_id=pipe_b.id,
+            workspace_id=ws_b.id,
+            destination_id=dest_b1.id,
+            publication_id=pub_b.id,
+        )
+        db.add(job_b)
 
         comment_b = YouTubeComment(
             destination_id=dest_b1.id,
@@ -210,7 +255,11 @@ def _seed():
             "pipe_a": pipe_a.id,
             "pipe_b": pipe_b.id,
             "src_a": src_a.id,
+            "src_b": src_b.id,
             "pub_a": pub_a.id,
+            "pub_b": pub_b.id,
+            "job_b": job_b.id,
+            "vid_b": vid_b.video_id,
         }
 
 
@@ -348,14 +397,31 @@ def test_publication_job_isolation():
         ).status_code
         == 404
     )
-    # B's publication list must be empty (B has none)
+    # B cannot see A's publications or jobs (cross-tenant = 404 on direct id).
+    # B's own lists must contain ONLY B's rows, never A's.
+    assert (
+        client.get(
+            f"/api/publications/{IDS['pub_a']}", headers=HB
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/publications/{IDS['pub_a']}/retry", headers=HB
+        ).status_code
+        == 404
+    )
+    # B's publication list must contain only B's own publication, not A's.
     res = client.get("/api/publications", headers=HB)
     assert res.status_code == 200
-    assert res.json() == []
-    # B's jobs list must be empty
+    pub_ids = [p["id"] for p in res.json()]
+    assert IDS["pub_b"] in pub_ids, "B should see own publication"
+    assert IDS["pub_a"] not in pub_ids, "B must not see A's publication"
+    # B's jobs list must contain only B's own job, not A's.
     res = client.get("/api/jobs", headers=HB)
     assert res.status_code == 200
-    assert res.json() == []
+    job_ids = [j["id"] for j in res.json()]
+    assert IDS["job_b"] in job_ids, "B should see own job"
 
 
 def test_comments_isolation():
@@ -504,3 +570,264 @@ def test_logout_revokes_session():
     res = client.post("/api/auth/logout", headers=headers)
     assert res.status_code == 200
     assert client.get("/api/auth/me", headers=headers).status_code == 401
+
+
+# ---------------- §30 extended matrix ----------------
+
+def test_channel_patch_and_pipeline_delete_attack():
+    # A cannot PATCH B's channel
+    assert (
+        client.patch(
+            f"/api/channels/{IDS['dest_b1']}",
+            headers=HA,
+            json={"daily_upload_limit": 9},
+        ).status_code
+        == 404
+    )
+    # A cannot DELETE B's pipeline
+    assert (
+        client.delete(
+            f"/api/pipelines/{IDS['pipe_b']}", headers=HA
+        ).status_code
+        == 404
+    )
+    # A cannot read B's pipeline
+    assert (
+        client.get(f"/api/pipelines/{IDS['pipe_b']}", headers=HA).status_code
+        == 404
+    )
+    # A cannot list B's pipeline sources
+    assert (
+        client.get(
+            f"/api/pipelines/{IDS['pipe_b']}/sources", headers=HA
+        ).status_code
+        == 404
+    )
+
+
+def test_job_direct_attack():
+    # A cannot read/retry B's job
+    assert (
+        client.get(f"/api/jobs/{IDS['job_b']}", headers=HA).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/jobs/{IDS['job_b']}/retry", headers=HA
+        ).status_code
+        == 404
+    )
+    # A sees only own jobs (none) while B sees B's job
+    assert client.get("/api/jobs", headers=HA).json() == []
+    jobs_b = client.get("/api/jobs", headers=HB).json()
+    assert [j["id"] for j in jobs_b] == [IDS["job_b"]]
+
+
+def test_source_inventory_and_sync_attack():
+    # A cannot read B's source inventory
+    assert (
+        client.get(
+            f"/api/sources/{IDS['src_b']}/inventory", headers=HA
+        ).status_code
+        == 404
+    )
+    # A cannot trigger sync/import/refresh on B's source
+    for path in ("sync", "initial-import", "refresh"):
+        res = client.post(
+            f"/api/sources/{IDS['src_b']}/{path}", headers=HA
+        )
+        assert res.status_code == 404, path
+    # A cannot pause/resume/scan B's source
+    for path in ("pause", "resume", "scan"):
+        res = client.post(f"/api/sources/{IDS['src_b']}/{path}", headers=HA)
+        assert res.status_code == 404, path
+
+
+def test_publication_actions_attack():
+    # Skip/reschedule/schedule endpoints on B's publication
+    assert (
+        client.post(
+            f"/api/publications/{IDS['pub_b']}/skip", headers=HA
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/publications/{IDS['pub_b']}/reschedule",
+            headers=HA,
+            json={"scheduled_at": "2030-01-01T10:00:00+00:00"},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/api/manual/publications/{IDS['pub_b']}", headers=HA
+        ).status_code
+        == 404
+    )
+
+
+def test_comment_settings_and_overrides_attack():
+    assert (
+        client.get(
+            f"/api/channels/{IDS['dest_b1']}/comment-reply-settings",
+            headers=HA,
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/api/channels/{IDS['dest_b1']}/overrides", headers=HA
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/api/channels/{IDS['dest_b1']}/schedule-capacity",
+            headers=HA,
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/api/channels/{IDS['dest_b1']}/upcoming", headers=HA
+        ).status_code
+        == 404
+    )
+
+
+def test_rate_limit_blocks_brute_force():
+    # 10+ failures from a fresh identity trigger 429 (in-memory guard).
+    for _ in range(11):
+        res = client.post(
+            "/api/auth/login",
+            json={"email": "ghost@t.local", "password": "wrong-wrong-1"},
+        )
+    assert res.status_code == 429, res.status_code
+
+
+# ---------------- §31 channel AI isolation ----------------
+
+class _FakeResp:
+    def __init__(self, payload: dict):
+        import json as _json
+
+        self.text = _json.dumps(payload)
+
+    def raise_for_status(self):
+        return None
+
+
+def _canned_ai(title: str, tag: str):
+    inner = {
+        "match_level": "match",
+        "reason": "ok",
+        "title": title,
+        "description": f"desc {tag}",
+        "hashtags": [f"#{tag}", "#dynamic1", "#dynamic2", "#dynamic3", "#dynamic4"],
+        "final_description": f"desc {tag}\n\n#{tag}",
+        "content_match": True,
+    }
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(inner),
+                }
+            }
+        ]
+    }
+
+
+def test_channel_ai_prompt_and_locked_tags_isolation(monkeypatch):
+    """Three niches (pet / dance / handsome) must never leak into each
+    other's AI payload; locked hashtags/tags stay per-channel."""
+    import app.ai_metadata as am
+    from app.models import Destination as _Dest
+    from app.models import YouTubeChannelDNA as _DNA
+
+    captured: dict[str, str] = {}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        system = ""
+        try:
+            for m in (json or {}).get("messages", []):
+                if m.get("role") == "system":
+                    system += str(m.get("content") or "")
+        except Exception:
+            system = ""
+        # Tag the capture by destination marker embedded in the prompt.
+        for marker in ("FLUFFY-MARKER", "JOYBEAT-MARKER", "HBU-MARKER"):
+            if marker in system:
+                captured[marker] = system
+        # Figure out which channel from the marker in the prompt.
+        title = "Generated Title"
+        tag = "dynamicx"
+        if "FLUFFY-MARKER" in system:
+            title, tag = "Fluffy Title", "fluffy"
+        elif "JOYBEAT-MARKER" in system:
+            title, tag = "JoyBeat Title", "joybeat"
+        elif "HBU-MARKER" in system:
+            title, tag = "HBU Title", "handsome"
+        return _FakeResp(_canned_ai(title, tag))
+
+    monkeypatch.setattr(am, "httpx", type("X", (), {"post": staticmethod(_fake_post)}))
+
+    # Patch the DNA session to the isolated sqlite DB.
+    import app.db as _db
+
+    monkeypatch.setattr(_db, "SessionLocal", TestingSession)
+    monkeypatch.setattr(am, "settings", type(
+        "S",
+        (),
+        {
+            "ai_enabled": True,
+            "ai_api_key": "test",
+            "ai_base_url": "http://x",
+            "ai_model": "m",
+        },
+    )())
+
+    with TestingSession() as db:
+        specs = [
+            ("FLUFFY-MARKER", IDS["dest_a1"], ["#fluffy", "#cutepets"], "pet"),
+            ("JOYBEAT-MARKER", IDS["dest_b1"], ["#joybeat", "#dance"], "dance"),
+            ("HBU-MARKER", IDS["dest_admin"], ["#handsome", "#menstyle"], "style"),
+        ]
+        for marker, dest_id, locked, niche in specs:
+            d = db.get(_Dest, dest_id)
+            d.prompt_override = f"{marker} Write titles for {niche} only."
+            d.metadata_profile = f"{niche} profile"
+            if db.query(_DNA).filter(_DNA.destination_id == dest_id).first() is None:
+                db.add(
+                    _DNA(
+                        destination_id=dest_id,
+                        workspace_id=d.workspace_id,
+                        primary_niche=niche,
+                        locked_hashtags=locked,
+                        locked_tags=[f"{niche}-tag1", f"{niche}-tag2"],
+                    )
+                )
+        db.commit()
+
+        results = {}
+        for marker, dest_id, locked, niche in specs:
+            d = db.get(_Dest, dest_id)
+            out = am.generate_metadata_structured(
+                context_text=f"a cute video about {niche}",
+                pipeline=None,
+                destination=d,
+            )
+            assert out is not None, f"AI generation failed for {marker}"
+            results[marker] = out
+
+    # Each channel's system prompt contains ONLY its own marker.
+    assert set(captured.keys()) == {"FLUFFY-MARKER", "JOYBEAT-MARKER", "HBU-MARKER"}
+    assert "JOYBEAT-MARKER" not in captured["FLUFFY-MARKER"]
+    assert "FLUFFY-MARKER" not in captured["JOYBEAT-MARKER"]
+    assert "HBU-MARKER" not in captured["FLUFFY-MARKER"]
+    # Locked hashtags enforced per channel in final output.
+    assert "#fluffy" in results["FLUFFY-MARKER"]["hashtags"]
+    assert "#joybeat" in results["JOYBEAT-MARKER"]["hashtags"]
+    assert "#handsome" in results["HBU-MARKER"]["hashtags"]
+    assert "#joybeat" not in results["FLUFFY-MARKER"]["hashtags"]

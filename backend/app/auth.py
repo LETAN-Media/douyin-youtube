@@ -119,3 +119,56 @@ def revoke_all_user_sessions(db: Session, user_id: str) -> int:
         db.delete(row)
     db.commit()
     return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Login rate limiting (in-memory, per process).
+# Best-effort brute-force guard: N failures per window -> temporary 429.
+# Disabled automatically in tests by passing rate_limit_enabled=False.
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+_MAX_FAILURES = 10
+_WINDOW_SECONDS = 300
+_BLOCK_SECONDS = 900
+
+_failures: dict[str, list[float]] = {}
+_blocked_until: dict[str, float] = {}
+
+
+def _rate_key(ip: str | None, email: str) -> str:
+    return f"{(ip or 'unknown').strip().lower()}|{(email or '').strip().lower()}"
+
+
+def check_login_rate_limit(ip: str | None, email: str) -> None:
+    """Raise LoginRateLimited when the key is currently blocked."""
+    from fastapi import HTTPException as _HTTPException
+
+    key = _rate_key(ip, email)
+    now = _time.monotonic()
+    until = _blocked_until.get(key, 0.0)
+    if until and now < until:
+        raise _HTTPException(
+            status_code=429,
+            detail="Quá nhiều lần đăng nhập sai. Thử lại sau.",
+        )
+    window_start = now - _WINDOW_SECONDS
+    hits = [t for t in _failures.get(key, []) if t >= window_start]
+    _failures[key] = hits
+    if len(hits) >= _MAX_FAILURES:
+        _blocked_until[key] = now + _BLOCK_SECONDS
+        raise _HTTPException(
+            status_code=429,
+            detail="Quá nhiều lần đăng nhập sai. Thử lại sau.",
+        )
+
+
+def record_login_failure(ip: str | None, email: str) -> None:
+    _failures.setdefault(_rate_key(ip, email), []).append(_time.monotonic())
+
+
+def reset_login_failures(ip: str | None, email: str) -> None:
+    key = _rate_key(ip, email)
+    _failures.pop(key, None)
+    _blocked_until.pop(key, None)

@@ -307,7 +307,14 @@ def login_endpoint(
 
     email = normalize_email(str((payload or {}).get("email", "")))
     password = str((payload or {}).get("password", ""))
+    _ip = request.client.host if request.client else None
+    from app.auth import check_login_rate_limit as _check_rl
+    from app.auth import record_login_failure as _record_fail
+    from app.auth import reset_login_failures as _reset_fail
+
+    _check_rl(_ip, email)
     if not email or not password:
+        _record_fail(_ip, email)
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
 
     user = (
@@ -316,9 +323,12 @@ def login_endpoint(
         .first()
     )
     if user is None or (user.status or "active") != "active":
+        _record_fail(_ip, email)
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
     if not verify_password(password, user.password_hash):
+        _record_fail(_ip, email)
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu không đúng")
+    _reset_fail(_ip, email)
 
     _session_row, token = create_user_session(
         db,
