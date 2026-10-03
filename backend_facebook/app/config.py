@@ -12,5 +12,8 @@ class Settings(BaseSettings):
     ADMIN_TOKEN: str | None = None
     CORS_ORIGINS: str = "*"
 
+    TURSO_DATABASE_URL: str | None = None
+    TURSO_AUTH_TOKEN: str | None = None
+
 
 settings = Settings()
