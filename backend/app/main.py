@@ -1235,28 +1235,32 @@ def create_job(
 ) -> VideoJob:
     pipeline_id = payload.pipeline_id
     if not pipeline_id:
-        pipeline = db.execute(
-            select(Pipeline)
-            .where(Pipeline.slug == "vibe-men-world")
-            .limit(1)
-        ).scalar_one_or_none()
-
-        if not pipeline:
+        _ctx = tenant_ctx()
+        if _ctx.is_system_admin:
+            pipeline = db.execute(
+                select(Pipeline)
+                .order_by(Pipeline.created_at.asc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if pipeline is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Không tìm thấy pipeline nào",
+                )
+            pipeline_id = pipeline.id
+        else:
             raise HTTPException(
-                status_code=400,
-                detail="Không tìm thấy default pipeline",
+                status_code=422,
+                detail="Thiếu pipeline_id",
             )
-
-        pipeline_id = pipeline.id
 
     pipeline = db.get(Pipeline, pipeline_id)
     if pipeline is None:
         raise HTTPException(
-            status_code=400,
+            status_code=404,
             detail="Pipeline không tồn tại",
         )
 
-    # Tenant check: callers may only enqueue into their own workspace.
     _ctx = tenant_ctx()
     if not _ctx.is_system_admin and not (
         pipeline.workspace_id and pipeline.workspace_id in (_ctx.workspace_ids or [])
@@ -2423,11 +2427,10 @@ def youtube_status(
         get_db
     ),
 ) -> dict:
-    if pipeline_id:
-        require_pipeline(db, pipeline_id)
+    ctx = tenant_ctx()
+
     if destination_id:
         destination = require_destination(db, destination_id)
-
         return {
             "connected": destination.connected,
             "destination_id": destination.id,
@@ -2436,6 +2439,25 @@ def youtube_status(
             "name": destination.name,
             "callback_url": settings.youtube_callback_url,
         }
+
+    if pipeline_id:
+        require_pipeline(db, pipeline_id)
+        status = get_youtube_status(
+            db,
+            pipeline_id=pipeline_id,
+        )
+        status["callback_url"] = (
+            settings.youtube_callback_url
+        )
+        return status
+
+    # No destination_id and no pipeline_id: system-admin only.
+    # Regular users must specify which channel they are querying.
+    if not ctx.is_system_admin:
+        raise HTTPException(
+            status_code=404,
+            detail="Thiếu destination_id hoặc pipeline_id",
+        )
 
     status = get_youtube_status(
         db,
@@ -3229,8 +3251,13 @@ def get_source_inventory(
         Depends(authenticate_request)
     ],
 )
-def get_douyin_quota() -> DouyinQuotaOut:
-    """RapidAPI quota snapshot for the dashboard. Contains no secrets."""
+def get_douyin_quota(
+    db: Session = Depends(
+        get_db
+    ),
+) -> DouyinQuotaOut:
+    """RapidAPI quota snapshot for admins only. Contains no secrets."""
+    require_system_admin()
     from app import douyin_import
 
     return DouyinQuotaOut(**douyin_import.quota_status())

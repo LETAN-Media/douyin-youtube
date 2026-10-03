@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
-import { IconChannels, IconDashboard, IconLogout, IconMenu, IconPlus, IconX } from "./icons";
+import { IconChannels, IconDashboard, IconDrama, IconLogout, IconMenu, IconPlus, IconX } from "./icons";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: <IconDashboard size={17} /> },
   { href: "/channels", label: "Channels", icon: <IconChannels size={17} /> },
   { href: "/pipelines/new", label: "New Pipeline", icon: <IconPlus size={17} /> },
+  { href: "/drama", label: "Drama", icon: <IconDrama size={17} /> },
 ];
 
 const adminNav = [
@@ -73,30 +74,37 @@ function NavItems({ onNavigate, pathname }: { onNavigate?: () => void; pathname:
     };
   }, []);
   const items = isAdmin ? [...nav, ...adminNav] : nav;
+  const renderItem = (item: (typeof nav)[number]) => {
+    const active =
+      item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        onClick={onNavigate}
+        aria-current={active ? "page" : undefined}
+        className={`flex min-h-[44px] items-center gap-2.5 rounded-xl px-3 py-2 text-sm font-semibold transition ${
+          active
+            ? "bg-indigo-600 text-white shadow-[0_4px_12px_-4px_rgba(79,70,229,0.6)]"
+            : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+        }`}
+      >
+        <span aria-hidden className={active ? "text-white" : "text-slate-400"}>
+          {item.icon}
+        </span>
+        {item.label}
+      </Link>
+    );
+  };
   return (
     <nav className="flex flex-col gap-1">
-      {items.map((item) => {
-        const active =
-          item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            onClick={onNavigate}
-            aria-current={active ? "page" : undefined}
-            className={`flex min-h-[44px] items-center gap-2.5 rounded-xl px-3 py-2 text-sm font-semibold transition ${
-              active
-                ? "bg-indigo-600 text-white shadow-[0_4px_12px_-4px_rgba(79,70,229,0.6)]"
-                : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-            }`}
-          >
-            <span aria-hidden className={active ? "text-white" : "text-slate-400"}>
-              {item.icon}
-            </span>
-            {item.label}
-          </Link>
-        );
-      })}
+      {nav.map(renderItem)}
+      {isAdmin ? (
+        <>
+          <div aria-hidden className="my-1.5 border-t border-slate-200/80" />
+          {adminNav.map(renderItem)}
+        </>
+      ) : null}
     </nav>
   );
 }

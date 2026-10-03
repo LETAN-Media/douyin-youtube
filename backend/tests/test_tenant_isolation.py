@@ -252,6 +252,7 @@ def _seed():
             "dest_admin": dest_admin.id,
             "dest_a1": dest_a1.id,
             "dest_b1": dest_b1.id,
+            "pipe_admin": pipe_admin.id,
             "pipe_a": pipe_a.id,
             "pipe_b": pipe_b.id,
             "src_a": src_a.id,
@@ -293,6 +294,8 @@ def test_login_rejects_bad_credentials():
 
 def test_me_returns_workspace():
     res = client.get("/api/auth/me", headers=HA)
+    if res.status_code != 200:
+        print(f"DEBUG test_me status={res.status_code} body={res.text}")
     assert res.status_code == 200
     body = res.json()
     assert body["user"]["email"] == "a@test.local"
@@ -831,3 +834,60 @@ def test_channel_ai_prompt_and_locked_tags_isolation(monkeypatch):
     assert "#joybeat" in results["JOYBEAT-MARKER"]["hashtags"]
     assert "#handsome" in results["HBU-MARKER"]["hashtags"]
     assert "#joybeat" not in results["FLUFFY-MARKER"]["hashtags"]
+    assert "#fluffy" not in results["JOYBEAT-MARKER"]["hashtags"]
+    assert "#handsome" not in results["FLUFFY-MARKER"]["hashtags"]
+
+
+# ---------------- §32-34 remaining LOW fixes ----------------
+
+def test_user_cannot_create_job_with_admin_pipeline():
+    assert (
+        client.post(
+            "/api/jobs",
+            headers=HA,
+            json={
+                "pipeline_id": IDS["pipe_admin"],
+                "douyin_url": "https://v.douyin.com/abc123/",
+            },
+        ).status_code
+        == 404
+    )
+
+
+def test_user_cannot_fallback_job_without_pipeline_id():
+    res = client.post("/api/jobs", headers=HA, json={})
+    assert res.status_code == 422
+
+
+def test_user_cannot_see_admin_global_youtube_status():
+    assert (
+        client.get("/api/youtube/status", headers=HA).status_code
+        == 404
+    )
+
+
+def test_user_cannot_see_other_user_youtube_status():
+    assert (
+        client.get(
+            f"/api/youtube/status?destination_id={IDS['dest_b1']}",
+            headers=HA,
+        ).status_code
+        == 404
+    )
+
+
+def test_admin_can_still_see_global_youtube_status():
+    res = client.get("/api/youtube/status", headers=ADMIN_HEADERS)
+    assert res.status_code == 200
+
+
+def test_regular_user_cannot_read_global_quota():
+    assert (
+        client.get("/api/douyin/quota", headers=HA).status_code
+        == 404
+    )
+
+
+def test_admin_can_read_global_quota():
+    res = client.get("/api/douyin/quota", headers=ADMIN_HEADERS)
+    assert res.status_code == 200
