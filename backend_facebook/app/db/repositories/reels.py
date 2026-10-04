@@ -198,6 +198,16 @@ async def update_reel_status(reel_db_id: str, status: str) -> None:
     )
 
 
+async def record_reel_error(reel_db_id: str, error: str) -> None:
+    """Persist a failure note + bump retry_count. Never changes status."""
+    client = get_client()
+    await client.execute(
+        "UPDATE facebook_reels SET last_error = :error, retry_count = retry_count + 1, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {"error": (error or "")[:500], "id": reel_db_id},
+    )
+
+
 _REEL_COLUMNS = (
     "r.id, r.source_id, r.reel_id, r.reel_url, r.caption, r.thumbnail_url, "
     "r.source_published_at, r.discovered_at, r.status, r.retry_count, r.last_error, "

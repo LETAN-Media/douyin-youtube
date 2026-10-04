@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import require_admin
 from ..db.repositories import pipelines, reels, sources
+from ..services.facebook_download_worker import run_download_next
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-inventory"])
 
@@ -65,8 +66,6 @@ async def claim_next(pipeline_id: str, _: None = Depends(require_admin)) -> dict
     if not claimed or reel is None:
         return {"reel": None, "claimed": False, "reason": "INVENTORY_EMPTY"}
     return {"reel": reel, "claimed": True}
-
-
 @router.post("/reels/{reel_id}/release")
 async def release_reel(reel_id: str, _: None = Depends(require_admin)) -> dict:
     target = reel_id
@@ -79,6 +78,37 @@ async def release_reel(reel_id: str, _: None = Depends(require_admin)) -> dict:
     if not released:
         raise _err(409, "RELEASE_REJECTED", "Only queued reels can be released to new")
     return {"id": target, "released": True, "status": "new"}
+
+
+@router.post("/pipelines/{pipeline_id}/download-next")
+async def download_next(pipeline_id: str, _: None = Depends(require_admin)) -> dict:
+    """Internal test endpoint: claim 1 reel, resolve + stream-download it, clean up.
+
+    Never returns signed URLs or API keys. No YouTube, no loops.
+    """
+    await _require_pipeline(pipeline_id)
+    job = await run_download_next(pipeline_id)
+    if job.result == "busy":
+        raise _err(409, "DOWNLOAD_BUSY", "Another download job is already running.")
+    if job.result == "no_work":
+        if job.error_code == "PIPELINE_NOT_FOUND":
+            raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+        return {"ok": True, "result": "no_work"}
+    if job.result == "failed":
+        return {
+            "ok": False,
+            "result": "failed",
+            "reel_id": job.reel_id,
+            "error_code": job.error_code,
+            "error": job.error,
+        }
+    return {
+        "ok": True,
+        "result": "downloaded",
+        "reel_id": job.reel_id,
+        "bytes": job.file_bytes,
+        "elapsed_s": round(job.elapsed_s, 1),
+    }
 
 
 async def _get_by_db_id(reel_db_id: str) -> dict | None:

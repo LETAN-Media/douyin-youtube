@@ -1,3 +1,4 @@
+from .facebook_download_worker import DownloadJobResult, run_download_next
 from .facebook_media import (
     AUTH_ERROR as FASTSAVER_AUTH_ERROR,
     BAD_CONTENT_TYPE as MEDIA_BAD_CONTENT_TYPE,
@@ -76,4 +77,6 @@ __all__ = [
     "cleanup_job_dir",
     "job_dir",
     "sanitize_job_id",
+    "DownloadJobResult",
+    "run_download_next",
 ]
