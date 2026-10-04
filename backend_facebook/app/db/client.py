@@ -113,7 +113,7 @@ async def migrate() -> None:
             hashtags_json TEXT,
             model TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
-            source_caption_hash TEXT,
+            source_hash TEXT,
             generated_at TEXT,
             last_error TEXT,
             retry_count INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +123,20 @@ async def migrate() -> None:
         """,
     ]
     await _apply_migration(client, applied, "20241003_06", statements_06)
+    await _repair_ai_metadata_column(client)
+
+
+async def _repair_ai_metadata_column(client: Any) -> None:
+    """Rename legacy source_caption_hash -> source_hash on already-migrated DBs."""
+    try:
+        cols = await client.execute("PRAGMA table_info(facebook_ai_metadata)")
+        names = [row[1] for row in (cols.rows or [])]
+    except Exception:
+        return
+    if "source_caption_hash" in names and "source_hash" not in names:
+        await client.execute(
+            "ALTER TABLE facebook_ai_metadata RENAME COLUMN source_caption_hash TO source_hash"
+        )
 
 
 async def _apply_migration(

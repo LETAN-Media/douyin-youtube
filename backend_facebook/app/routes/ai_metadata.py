@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import require_admin
 from ..db.repositories import ai_metadata, reels
-from ..db.repositories.ai_metadata import caption_hash
+from ..db.repositories.ai_metadata import source_hash
 from ..services.facebook_ai_metadata import FacebookMetadataGenerator, MetadataError
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-ai"])
@@ -46,7 +46,9 @@ async def generate_metadata(reel_db_id: str, _: None = Depends(require_admin)) -
         raise _err(ERROR_STATUS.get(exc.code, 500), exc.code, str(exc))
 
     model = generator.config.model
-    if not await ai_metadata.needs_generation(reel_db_id, reel.get("caption"), model):
+    if not await ai_metadata.needs_generation(
+        reel_db_id, reel.get("caption"), model, reel.get("reel_id")
+    ):
         row = await ai_metadata.get_for_reel(reel_db_id)
         assert row is not None
         return {
@@ -68,15 +70,13 @@ async def generate_metadata(reel_db_id: str, _: None = Depends(require_admin)) -
         await ai_metadata.mark_failed(reel_db_id, f"{exc.code}: {exc}")
         raise _err(ERROR_STATUS.get(exc.code, 500), exc.code, str(exc))
 
-    from ..db.repositories.ai_metadata import caption_hash as _hash
-
     row = await ai_metadata.upsert_generated(
         reel_db_id=reel_db_id,
         title=generated.title,
         description=generated.description,
         hashtags=generated.hashtags,
         model=generated.model,
-        source_caption_hash=caption_hash(reel.get("caption")),
+        source_hash=source_hash(reel.get("caption"), reel.get("reel_id")),
     )
     return {
         "ok": True,

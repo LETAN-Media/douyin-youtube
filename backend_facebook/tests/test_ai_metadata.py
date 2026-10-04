@@ -331,15 +331,15 @@ def test_caption_changed_regenerates(db, monkeypatch) -> None:
         )
 
     asyncio.run(_change())
-    assert asyncio.run(ai_metadata.needs_generation(rid, "Một chú chó con hoàn toàn khác", "groq/qwen/qwen3.8-27b")) is True
+    assert asyncio.run(ai_metadata.needs_generation(rid, "Một chú chó con hoàn toàn khác", "groq/qwen/qwen3.8-27b", "r1")) is True
 
 
 def test_model_changed_regenerates(db, monkeypatch) -> None:
     rid = seed_reel()
     t = transport_for(lambda req: httpx.Response(200, json=make_completion(json.dumps(GOOD_JSON))))
     _run_generate(rid, t, monkeypatch)
-    assert asyncio.run(ai_metadata.needs_generation(rid, "Một chú mèo con chơi bóng len rất vui", "other-model")) is True
-    assert asyncio.run(ai_metadata.needs_generation(rid, "Một chú mèo con chơi bóng len rất vui", "groq/qwen/qwen3.8-27b")) is False
+    assert asyncio.run(ai_metadata.needs_generation(rid, "Một chú mèo con chơi bóng len rất vui", "other-model", "r1")) is True
+    assert asyncio.run(ai_metadata.needs_generation(rid, "Một chú mèo con chơi bóng len rất vui", "groq/qwen/qwen3.8-27b", "r1")) is False
 
 
 def test_caption_preserved(db, monkeypatch) -> None:
@@ -397,3 +397,32 @@ def test_migration_idempotent(db) -> None:
     asyncio.run(migrate())
     row = asyncio.run(ai_metadata.get_for_reel("nope"))
     assert row is None
+
+
+def test_source_hash_includes_reel_id(db) -> None:
+    from app.db.repositories.ai_metadata import source_hash
+
+    assert source_hash("cap", "r1") != source_hash("cap", "r2")
+    assert source_hash("cap", "r1") == source_hash("cap", "r1")
+    assert source_hash("cap", None) != source_hash("cap", "r1")
+
+
+def test_legacy_column_renamed(db) -> None:
+    async def _go():
+        from app.db.client import get_client
+
+        client = get_client()
+        await client.execute("DROP TABLE IF EXISTS facebook_ai_metadata")
+        await client.execute(
+            "CREATE TABLE facebook_ai_metadata (reel_db_id TEXT PRIMARY KEY, source_caption_hash TEXT)"
+        )
+        from app.db.client import migrate as _migrate
+
+        await _migrate()
+        cols = await client.execute("PRAGMA table_info(facebook_ai_metadata)")
+        names = [row[1] for row in (cols.rows or [])]
+        return names
+
+    names = asyncio.run(_go())
+    assert "source_hash" in names
+    assert "source_caption_hash" not in names

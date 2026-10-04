@@ -7,8 +7,14 @@ from typing import Any
 from ..client import get_client
 
 
-def caption_hash(caption: str | None) -> str:
-    return hashlib.sha256((caption or "").strip().encode("utf-8")).hexdigest()
+def source_hash(caption: str | None, reel_id: str | None) -> str:
+    material = (caption or "").strip() + "\n" + (reel_id or "").strip()
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def caption_hash(caption: str | None, reel_id: str | None = None) -> str:
+    """Legacy alias kept for compatibility; hashes caption + reel_id."""
+    return source_hash(caption, reel_id)
 
 
 def _row_to_dict(r: Any) -> dict[str, Any]:
@@ -26,7 +32,7 @@ def _row_to_dict(r: Any) -> dict[str, Any]:
         "hashtags": hashtags,
         "model": r[4],
         "status": r[5],
-        "source_caption_hash": r[6],
+        "source_hash": r[6],
         "generated_at": r[7],
         "last_error": r[8],
         "retry_count": r[9],
@@ -39,7 +45,7 @@ async def get_for_reel(reel_db_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
         "SELECT reel_db_id, title, description, hashtags_json, model, status, "
-        "source_caption_hash, generated_at, last_error, retry_count, created_at, updated_at "
+        "source_hash, generated_at, last_error, retry_count, created_at, updated_at "
         "FROM facebook_ai_metadata WHERE reel_db_id = :id",
         {"id": reel_db_id},
     )
@@ -55,14 +61,14 @@ async def upsert_generated(
     description: str,
     hashtags: list[str],
     model: str,
-    source_caption_hash: str,
+    source_hash: str,
 ) -> dict[str, Any]:
     client = get_client()
     await client.execute(
         """
         INSERT INTO facebook_ai_metadata
             (reel_db_id, title, description, hashtags_json, model, status,
-             source_caption_hash, generated_at, last_error, retry_count,
+             source_hash, generated_at, last_error, retry_count,
              updated_at)
         VALUES (:id, :title, :description, :hashtags, :model, 'generated',
                 :hash, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), NULL, 0,
@@ -73,7 +79,7 @@ async def upsert_generated(
             hashtags_json = excluded.hashtags_json,
             model = excluded.model,
             status = 'generated',
-            source_caption_hash = excluded.source_caption_hash,
+            source_hash = excluded.source_hash,
             generated_at = excluded.generated_at,
             last_error = NULL,
             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
@@ -84,7 +90,7 @@ async def upsert_generated(
             "description": description,
             "hashtags": json.dumps(hashtags, ensure_ascii=False),
             "model": model,
-            "hash": source_caption_hash,
+            "hash": source_hash,
         },
     )
     row = await get_for_reel(reel_db_id)
@@ -108,14 +114,16 @@ async def mark_failed(reel_db_id: str, error: str) -> None:
     )
 
 
-async def needs_generation(reel_db_id: str, caption: str | None, model: str) -> bool:
+async def needs_generation(
+    reel_db_id: str, caption: str | None, model: str, reel_id: str | None = None
+) -> bool:
     """True when no usable cached row exists (missing/failed/stale hash or model)."""
     existing = await get_for_reel(reel_db_id)
     if existing is None:
         return True
     if existing["status"] != "generated":
         return True
-    if existing["source_caption_hash"] != caption_hash(caption):
+    if existing["source_hash"] != source_hash(caption, reel_id):
         return True
     if (existing["model"] or "") != (model or ""):
         return True
