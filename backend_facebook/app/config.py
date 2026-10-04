@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     FASTSAVER_TIMEOUT: float = 60.0
     FACEBOOK_MEDIA_MAX_BYTES: int = 1_000_000_000
 
+    # Google OAuth (YouTube destinations). Read ONLY from existing env:
+    # GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET. Never logged, never committed.
+    GOOGLE_CLIENT_ID: str | None = None
+    GOOGLE_CLIENT_SECRET: str | None = None
+    FACEBOOK_YOUTUBE_CALLBACK_URL: str | None = None
+
     def require_fastsaver(self) -> tuple[str, str]:
         """Return (base_url, api_key) or fail fast with a clear config error."""
         if not self.FASTSAVER_API_KEY:

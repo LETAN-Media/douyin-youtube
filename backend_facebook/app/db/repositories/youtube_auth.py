@@ -1,0 +1,82 @@
+"""Server-side OAuth state + per-destination credentials (Task 7A).
+
+Credentials live in their own table, never joined into public reads.
+"""
+
+from typing import Any
+
+from ..client import get_client
+
+
+async def create_oauth_state(
+    *,
+    state: str,
+    destination_id: str,
+    pipeline_id: str,
+    expires_at: str,
+) -> None:
+    client = get_client()
+    await client.execute(
+        """
+        INSERT INTO youtube_oauth_states (state, destination_id, pipeline_id, expires_at)
+        VALUES (:state, :destination_id, :pipeline_id, :expires_at)
+        """,
+        {
+            "state": state,
+            "destination_id": destination_id,
+            "pipeline_id": pipeline_id,
+            "expires_at": expires_at,
+        },
+    )
+
+
+async def get_oauth_state(state: str) -> dict[str, Any] | None:
+    client = get_client()
+    rows = await client.execute(
+        "SELECT state, destination_id, pipeline_id, expires_at, created_at "
+        "FROM youtube_oauth_states WHERE state = :state",
+        {"state": state},
+    )
+    if not rows.rows:
+        return None
+    r = rows.rows[0]
+    return {
+        "state": r[0],
+        "destination_id": r[1],
+        "pipeline_id": r[2],
+        "expires_at": r[3],
+        "created_at": r[4],
+    }
+
+
+async def delete_oauth_state(state: str) -> None:
+    client = get_client()
+    await client.execute(
+        "DELETE FROM youtube_oauth_states WHERE state = :state", {"state": state}
+    )
+
+
+async def get_credentials(destination_id: str) -> str | None:
+    """Raw credentials JSON for exactly one destination. Never expose via API."""
+    client = get_client()
+    rows = await client.execute(
+        "SELECT credentials_json FROM youtube_credentials WHERE destination_id = :id",
+        {"id": destination_id},
+    )
+    if not rows.rows:
+        return None
+    return rows.rows[0][0]
+
+
+async def save_credentials(destination_id: str, credentials_json: str) -> None:
+    client = get_client()
+    await client.execute(
+        """
+        INSERT INTO youtube_credentials (destination_id, credentials_json, updated_at)
+        VALUES (:id, :credentials_json, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(destination_id) DO UPDATE SET
+            credentials_json = excluded.credentials_json,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        """,
+        {"id": destination_id, "credentials_json": credentials_json},
+    )

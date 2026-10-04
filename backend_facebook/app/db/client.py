@@ -81,6 +81,29 @@ async def migrate() -> None:
         statements_04.append("ALTER TABLE scan_runs ADD COLUMN scan_mode TEXT")
     statements_04.append("UPDATE scan_runs SET scan_mode = 'initial' WHERE scan_mode IS NULL")
     await _apply_migration(client, applied, "20241003_04", statements_04)
+    statements_05: list[str] = [
+        """
+        CREATE TABLE IF NOT EXISTS youtube_oauth_states (
+            state TEXT PRIMARY KEY,
+            destination_id TEXT NOT NULL,
+            pipeline_id TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS youtube_credentials (
+            destination_id TEXT PRIMARY KEY,
+            credentials_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+    ]
+    if not await _has_column(client, "youtube_destinations", "connected"):
+        statements_05.append("ALTER TABLE youtube_destinations ADD COLUMN connected INTEGER NOT NULL DEFAULT 0")
+    if not await _has_column(client, "youtube_destinations", "connected_at"):
+        statements_05.append("ALTER TABLE youtube_destinations ADD COLUMN connected_at TEXT")
+    await _apply_migration(client, applied, "20241003_05", statements_05)
 
 
 async def _apply_migration(

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db.client import migrate
-from .routes import facebook, flow, health, inventory, scan
+from .routes import facebook, flow, health, inventory, scan, youtube
 
 logger = logging.getLogger("backend-facebook.main")
 
@@ -66,6 +66,7 @@ def create_app() -> FastAPI:
     app.include_router(flow.router)
     app.include_router(scan.router)
     app.include_router(inventory.router)
+    app.include_router(youtube.router)
 
     return app
 

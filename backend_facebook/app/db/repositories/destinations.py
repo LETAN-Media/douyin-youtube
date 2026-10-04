@@ -2,16 +2,50 @@ from typing import Any
 
 from ..client import get_client
 
+_COLUMNS = (
+    "id, pipeline_id, channel_id, channel_name, visibility, enabled, "
+    "connected, connected_at, created_at, updated_at"
+)
+
+
+def _row_to_dict(r: Any) -> dict[str, Any]:
+    return {
+        "id": r[0],
+        "pipeline_id": r[1],
+        "channel_id": r[2],
+        "channel_name": r[3],
+        "visibility": r[4],
+        "enabled": bool(r[5]),
+        "connected": bool(r[6]) if len(r) > 6 and r[6] is not None else False,
+        "connected_at": r[7] if len(r) > 7 else None,
+        "created_at": r[8] if len(r) > 8 else None,
+        "updated_at": r[9] if len(r) > 9 else None,
+    }
+
+
+def to_safe_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """Public API shape. Never includes credentials or secrets."""
+    return {
+        "id": row["id"],
+        "pipeline_id": row["pipeline_id"],
+        "channel_id": row.get("channel_id"),
+        "channel_name": row.get("channel_name"),
+        "visibility": row.get("visibility", "public"),
+        "enabled": row.get("enabled", True),
+        "connected": row.get("connected", False),
+    }
+
 
 async def create_destination(
     *,
     destination_id: str,
     pipeline_id: str,
-    channel_id: str,
-    channel_name: str,
+    channel_id: str | None = None,
+    channel_name: str | None = None,
     visibility: str = "public",
     enabled: bool = True,
 ) -> dict[str, Any]:
+    """Create an unconnected destination. Channel identity is filled by OAuth."""
     client = get_client()
     await client.execute(
         """
@@ -27,6 +61,9 @@ async def create_destination(
             "enabled": 1 if enabled else 0,
         },
     )
+    created = await get_destination(destination_id)
+    if created is not None:
+        return created
     return {
         "id": destination_id,
         "pipeline_id": pipeline_id,
@@ -34,46 +71,50 @@ async def create_destination(
         "channel_name": channel_name,
         "visibility": visibility,
         "enabled": enabled,
+        "connected": False,
+        "connected_at": None,
     }
 
 
 async def get_destination(destination_id: str) -> dict[str, Any] | None:
     client = get_client()
-    rows = await client.execute(
-        "SELECT id, pipeline_id, channel_id, channel_name, visibility, enabled, created_at, updated_at FROM youtube_destinations WHERE id = :id",
-        {"id": destination_id},
-    )
+    try:
+        rows = await client.execute(
+            f"SELECT {_COLUMNS} FROM youtube_destinations WHERE id = :id",
+            {"id": destination_id},
+        )
+    except Exception:
+        rows = await client.execute(
+            "SELECT id, pipeline_id, channel_id, channel_name, visibility, enabled, created_at, updated_at FROM youtube_destinations WHERE id = :id",
+            {"id": destination_id},
+        )
     if not rows.rows:
         return None
-    r = rows.rows[0]
-    return {
-        "id": r[0],
-        "pipeline_id": r[1],
-        "channel_id": r[2],
-        "channel_name": r[3],
-        "visibility": r[4],
-        "enabled": bool(r[5]),
-        "created_at": r[6],
-        "updated_at": r[7],
-    }
+    return _row_to_dict(rows.rows[0])
 
 
 async def list_destinations(pipeline_id: str) -> list[dict[str, Any]]:
     client = get_client()
-    rows = await client.execute(
-        "SELECT id, pipeline_id, channel_id, channel_name, visibility, enabled, created_at, updated_at FROM youtube_destinations WHERE pipeline_id = :pipeline_id",
-        {"pipeline_id": pipeline_id},
+    try:
+        rows = await client.execute(
+            f"SELECT {_COLUMNS} FROM youtube_destinations WHERE pipeline_id = :pipeline_id",
+            {"pipeline_id": pipeline_id},
+        )
+    except Exception:
+        rows = await client.execute(
+            "SELECT id, pipeline_id, channel_id, channel_name, visibility, enabled, created_at, updated_at FROM youtube_destinations WHERE pipeline_id = :pipeline_id",
+            {"pipeline_id": pipeline_id},
+        )
+    return [_row_to_dict(r) for r in rows.rows]
+
+
+async def set_connected(
+    destination_id: str, *, channel_id: str, channel_name: str
+) -> None:
+    client = get_client()
+    await client.execute(
+        "UPDATE youtube_destinations SET channel_id = :channel_id, channel_name = :channel_name, "
+        "connected = 1, connected_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {"channel_id": channel_id, "channel_name": channel_name, "id": destination_id},
     )
-    return [
-        {
-            "id": r[0],
-            "pipeline_id": r[1],
-            "channel_id": r[2],
-            "channel_name": r[3],
-            "visibility": r[4],
-            "enabled": bool(r[5]),
-            "created_at": r[6],
-            "updated_at": r[7],
-        }
-        for r in rows.rows
-    ]
