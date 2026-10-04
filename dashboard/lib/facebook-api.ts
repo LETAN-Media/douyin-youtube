@@ -126,14 +126,20 @@ function requireEnv(): { base: string; token: string } {
   return { base, token };
 }
 
-async function fbFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function fbFetch<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const { base, token } = requireEnv();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(`${base}${path}`, {
       ...init,
-      headers: { "X-Admin-Token": token, ...(init.headers ?? {}) },
+      headers: {
+        "X-Admin-Token": token,
+        ...(init.headers ?? {}),
+      },
       cache: "no-store",
       signal: controller.signal,
     });
@@ -141,10 +147,20 @@ async function fbFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
       throw new FacebookApiError(401, "Facebook backend authentication failed.");
     }
     if (res.status === 404) {
-      throw new FacebookApiError(404, "Không tìm thấy pipeline.");
+      throw new FacebookApiError(404, "Không tìm thấy resource.");
     }
     if (!res.ok) {
-      throw new FacebookApiError(res.status, "Backend Facebook gặp lỗi.");
+      const text = await res.text().catch(() => "");
+      let detail: unknown = text;
+      try {
+        detail = JSON.parse(text);
+      } catch {
+        // keep raw text
+      }
+      throw new FacebookApiError(
+        res.status,
+        typeof detail === "string" ? detail : (detail as Record<string, unknown>)?.error as string || "Backend Facebook gặp lỗi.",
+      );
     }
     return (await res.json()) as T;
   } catch (err) {
@@ -261,4 +277,51 @@ export async function getFacebookReelAiMetadata(
     if (err instanceof FacebookApiError && err.status === 404) return null;
     throw err;
   }
+}
+
+export interface FacebookSkipResult {
+  ok: boolean;
+  reel_id: string;
+  status: string;
+}
+
+export interface FacebookRestoreResult {
+  ok: boolean;
+  reel_id: string;
+  status: string;
+}
+
+export interface FacebookBulkSkipResult {
+  ok: boolean;
+  skipped: number;
+  unchanged: number;
+  rejected: string[];
+}
+
+export async function skipFacebookReel(reelDbId: string): Promise<FacebookSkipResult> {
+  return fbFetch<FacebookSkipResult>(
+    `/api/facebook/reels/${encodeURIComponent(reelDbId)}/skip`,
+    { method: "POST" },
+  );
+}
+
+export async function restoreFacebookReel(reelDbId: string): Promise<FacebookRestoreResult> {
+  return fbFetch<FacebookRestoreResult>(
+    `/api/facebook/reels/${encodeURIComponent(reelDbId)}/restore`,
+    { method: "POST" },
+  );
+}
+
+export async function bulkSkipFacebookReels(
+  pipelineId: string,
+  reelDbIds: string[],
+): Promise<FacebookBulkSkipResult> {
+  return fbFetch<FacebookBulkSkipResult>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/inventory/skip`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reel_ids: reelDbIds }),
+    },
+  );
 }

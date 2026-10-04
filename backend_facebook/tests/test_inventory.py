@@ -553,3 +553,140 @@ def test_ready_no_secret_leak(db) -> None:
         assert "SECRETKEY123" not in out
     finally:
         settings.RAPIDAPI_KEY = "test_key_1"
+
+
+# ---------- 19-27. skip / restore / bulk skip ----------
+
+
+def test_skip_new_reel(db) -> None:
+    pipe = make_pipeline("skip1")
+    src = make_source("skip1")
+    seed_reel(src["id"], "s1", status="new")
+    client = TestClient(create_app())
+    r = client.post(f"/api/facebook/reels/{src['id']}_s1/skip", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"ok": True, "reel_id": f"{src['id']}_s1", "status": "skipped"}
+    row = asyncio.run(reels.get_reel(f"{src['id']}_s1"))
+    assert row["status"] == "skipped"
+
+
+def test_skip_skipped_idempotent(db) -> None:
+    pipe = make_pipeline("skip2")
+    src = make_source("skip2")
+    seed_reel(src["id"], "s1", status="skipped")
+    client = TestClient(create_app())
+    r = client.post(f"/api/facebook/reels/{src['id']}_s1/skip", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    row = asyncio.run(reels.get_reel(f"{src['id']}_s1"))
+    assert row["status"] == "skipped"
+
+
+def test_skip_published_rejected(db) -> None:
+    pipe = make_pipeline("skip3")
+    src = make_source("skip3")
+    seed_reel(src["id"], "s1", status="published")
+    client = TestClient(create_app())
+    r = client.post(f"/api/facebook/reels/{src['id']}_s1/skip", headers=AUTH_HEADERS)
+    assert r.status_code == 409, r.text
+
+
+def test_skip_processing_rejected(db) -> None:
+    pipe = make_pipeline("skip4")
+    src = make_source("skip4")
+    seed_reel(src["id"], "s1", status="processing")
+    client = TestClient(create_app())
+    r = client.post(f"/api/facebook/reels/{src['id']}_s1/skip", headers=AUTH_HEADERS)
+    assert r.status_code == 409, r.text
+
+
+def test_restore_skipped_to_new(db) -> None:
+    pipe = make_pipeline("rest1")
+    src = make_source("rest1")
+    seed_reel(src["id"], "s1", status="skipped")
+    client = TestClient(create_app())
+    r = client.post(f"/api/facebook/reels/{src['id']}_s1/restore", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"ok": True, "reel_id": f"{src['id']}_s1", "status": "new"}
+    row = asyncio.run(reels.get_reel(f"{src['id']}_s1"))
+    assert row["status"] == "new"
+
+
+def test_restore_non_skipped_rejected(db) -> None:
+    pipe = make_pipeline("rest2")
+    src = make_source("rest2")
+    seed_reel(src["id"], "s1", status="new")
+    client = TestClient(create_app())
+    r = client.post(f"/api/facebook/reels/{src['id']}_s1/restore", headers=AUTH_HEADERS)
+    assert r.status_code == 409, r.text
+
+
+def test_bulk_skip(db) -> None:
+    pipe = make_pipeline("bulk1")
+    src = make_source("bulk1")
+    seed_reel(src["id"], "s1", status="new")
+    seed_reel(src["id"], "s2", status="new")
+    seed_reel(src["id"], "s3", status="failed")
+    client = TestClient(create_app())
+    r = client.post(
+        f"/api/facebook/pipelines/{pipe['id']}/inventory/skip",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"reel_ids": [f"{src['id']}_s1", f"{src['id']}_s2", f"{src['id']}_s3"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["skipped"] == 3
+    assert body["unchanged"] == 0
+    assert body["rejected"] == []
+    for s in ("s1", "s2", "s3"):
+        row = asyncio.run(reels.get_reel(f"{src['id']}_{s}"))
+        assert row["status"] == "skipped", s
+
+
+def test_bulk_skip_wrong_pipeline_rejected(db) -> None:
+    pipe_a = make_pipeline("bulk_a")
+    pipe_b = make_pipeline("bulk_b")
+    src_a = make_source("bulk_a")
+    src_b = make_source("bulk_b")
+    seed_reel(src_a["id"], "s1", status="new")
+    seed_reel(src_b["id"], "s2", status="new")
+    client = TestClient(create_app())
+    r = client.post(
+        f"/api/facebook/pipelines/{pipe_a['id']}/inventory/skip",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"reel_ids": [f"{src_b['id']}_s2"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["skipped"] == 0
+    assert body["rejected"] == [f"{src_b['id']}_s2"]
+    row = asyncio.run(reels.get_reel(f"{src_b['id']}_s2"))
+    assert row["status"] == "new"
+
+
+def test_bulk_skip_over_limit_rejected(db) -> None:
+    pipe = make_pipeline("bulk_limit")
+    src = make_source("bulk_limit")
+    client = TestClient(create_app())
+    r = client.post(
+        f"/api/facebook/pipelines/{pipe['id']}/inventory/skip",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"reel_ids": [f"rid{i}" for i in range(101)]},
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_skipped_never_claimed(db) -> None:
+    pipe = make_pipeline("skip_claim")
+    src = make_source("skip_claim")
+    seed_reel(src["id"], "s1", status="skipped")
+    client = TestClient(create_app())
+    r = client.post(
+        f"/api/facebook/pipelines/{pipe['id']}/inventory/claim-next",
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["claimed"] is False
+    assert body["reason"] == "INVENTORY_EMPTY"

@@ -66,6 +66,68 @@ async def claim_next(pipeline_id: str, _: None = Depends(require_admin)) -> dict
     if not claimed or reel is None:
         return {"reel": None, "claimed": False, "reason": "INVENTORY_EMPTY"}
     return {"reel": reel, "claimed": True}
+
+
+@router.post("/reels/{reel_id}/skip")
+async def skip_reel(reel_id: str, _: None = Depends(require_admin)) -> dict:
+    target = reel_id
+    existing = await _get_by_db_id(reel_id)
+    if existing is None:
+        matches = await _find_by_reel_id(reel_id)
+        if len(matches) != 1:
+            raise _err(404, "REEL_NOT_FOUND", "Reel not found")
+        target = matches[0]["id"]
+    row = await reels.get_reel(target)
+    if row is None:
+        raise _err(404, "REEL_NOT_FOUND", "Reel not found")
+    status = row.get("status", "new")
+    if status in ("processing", "published"):
+        raise _err(409, "SKIP_REJECTED", f"Cannot skip reel in status '{status}'")
+    updated = await reels.skip_reel(target)
+    if updated is None:
+        return {"ok": True, "reel_id": target, "status": "skipped"}
+    return {"ok": True, "reel_id": target, "status": "skipped"}
+
+
+@router.post("/reels/{reel_id}/restore")
+async def restore_reel(reel_id: str, _: None = Depends(require_admin)) -> dict:
+    target = reel_id
+    existing = await _get_by_db_id(reel_id)
+    if existing is None:
+        matches = await _find_by_reel_id(reel_id)
+        if len(matches) != 1:
+            raise _err(404, "REEL_NOT_FOUND", "Reel not found")
+        target = matches[0]["id"]
+    row = await reels.get_reel(target)
+    if row is None:
+        raise _err(404, "REEL_NOT_FOUND", "Reel not found")
+    if row.get("status") != "skipped":
+        raise _err(409, "RESTORE_REJECTED", "Only skipped reels can be restored")
+    updated = await reels.restore_reel(target)
+    if updated is None:
+        raise _err(409, "RESTORE_REJECTED", "Reel was not in skipped status")
+    return {"ok": True, "reel_id": target, "status": "new"}
+
+
+@router.post("/pipelines/{pipeline_id}/inventory/skip")
+async def bulk_skip(
+    pipeline_id: str,
+    body: dict,
+    _: None = Depends(require_admin),
+) -> dict:
+    await _require_pipeline(pipeline_id)
+    reel_ids = body.get("reel_ids", [])
+    if not isinstance(reel_ids, list):
+        raise _err(400, "INVALID_BODY", "reel_ids must be a list")
+    if len(reel_ids) > 100:
+        raise _err(400, "TOO_MANY", "Maximum 100 reel_ids per request")
+    result = await reels.bulk_skip_reels(pipeline_id, [str(r) for r in reel_ids])
+    return {
+        "ok": True,
+        "skipped": result["skipped"],
+        "unchanged": result["unchanged"],
+        "rejected": result["rejected"],
+    }
 @router.post("/reels/{reel_id}/release")
 async def release_reel(reel_id: str, _: None = Depends(require_admin)) -> dict:
     target = reel_id

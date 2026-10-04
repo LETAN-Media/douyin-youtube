@@ -403,3 +403,100 @@ async def recover_stale_queued(max_age_minutes: int = 120) -> int:
         {"cutoff": f"-{max(1, max_age_minutes)} minutes"},
     )
     return res.rows_affected or 0
+
+
+async def skip_reel(reel_db_id: str) -> dict[str, Any] | None:
+    """Set status to skipped. Returns the updated row or None if not found."""
+    client = get_client()
+    rows = await client.execute(
+        "SELECT id, source_id, reel_id, status FROM facebook_reels WHERE id = :id",
+        {"id": reel_db_id},
+    )
+    if not rows.rows:
+        return None
+    await client.execute(
+        "UPDATE facebook_reels SET status = 'skipped', "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id",
+        {"id": reel_db_id},
+    )
+    r = rows.rows[0]
+    return {"id": r[0], "source_id": r[1], "reel_id": r[2], "status": "skipped"}
+
+
+async def restore_reel(reel_db_id: str) -> dict[str, Any] | None:
+    """Restore skipped -> new. Returns the updated row or None if not found."""
+    client = get_client()
+    rows = await client.execute(
+        "SELECT id, source_id, reel_id, status FROM facebook_reels WHERE id = :id",
+        {"id": reel_db_id},
+    )
+    if not rows.rows:
+        return None
+    await client.execute(
+        "UPDATE facebook_reels SET status = 'new', "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id AND status = 'skipped'",
+        {"id": reel_db_id},
+    )
+    updated = await client.execute(
+        "SELECT id, source_id, reel_id, status FROM facebook_reels WHERE id = :id",
+        {"id": reel_db_id},
+    )
+    if not updated.rows or updated.rows[0][3] != "new":
+        return None
+    r = updated.rows[0]
+    return {"id": r[0], "source_id": r[1], "reel_id": r[2], "status": "new"}
+
+
+async def bulk_skip_reels(pipeline_id: str, reel_db_ids: list[str]) -> dict[str, Any]:
+    """Skip reels by DB IDs, validating pipeline ownership.
+    
+    Returns dict with skipped count, unchanged count, and rejected IDs array.
+    Only allows skip from 'new' or 'failed' status.
+    """
+    client = get_client()
+    if not reel_db_ids:
+        return {"skipped": 0, "unchanged": 0, "rejected": []}
+    
+    placeholders = ",".join(f":id{i}" for i in range(len(reel_db_ids)))
+    params: dict[str, Any] = {"pipeline_id": pipeline_id}
+    for i, rid in enumerate(reel_db_ids):
+        params[f"id{i}"] = rid
+    
+    rows = await client.execute(
+        f"SELECT id, status FROM facebook_reels r "
+        f"WHERE r.id IN ({placeholders}) AND {_pipeline_scope(pipeline_id)}",
+        params,
+    )
+    found_ids = {r[0]: r[1] for r in rows.rows}
+    valid_ids = {rid for rid, status in found_ids.items() if status in ("new", "failed")}
+    
+    rejected: list[str] = []
+    for rid in reel_db_ids:
+        if rid not in found_ids:
+            rejected.append(rid)
+        elif rid not in valid_ids:
+            rejected.append(rid)
+    
+    if not valid_ids:
+        return {"skipped": 0, "unchanged": 0, "rejected": rejected}
+    
+    skip_placeholders = ",".join(f":sid{i}" for i in range(len(valid_ids)))
+    skip_params: dict[str, Any] = {}
+    for i, vid in enumerate(valid_ids):
+        skip_params[f"sid{i}"] = vid
+    
+    res = await client.execute(
+        f"UPDATE facebook_reels SET status = 'skipped', "
+        f"updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        f"WHERE id IN ({skip_placeholders}) AND status IN ('new', 'failed')",
+        skip_params,
+    )
+    skipped = res.rows_affected or 0
+    unchanged = len(valid_ids) - skipped
+    return {
+        "skipped": skipped,
+        "unchanged": unchanged,
+        "rejected": rejected,
+    }
