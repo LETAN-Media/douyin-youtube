@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -69,15 +69,17 @@ async def oauth_start(destination_id: str, _: None = Depends(require_admin)) -> 
 
 
 @router.get("/youtube/oauth/callback", response_class=HTMLResponse)
-async def oauth_callback(request: Request, state: str = "", code: str = "") -> str:
+async def oauth_callback(state: str = "", code: str = "") -> str:
     if not state or not code:
         raise _err(400, "OAUTH_INVALID_STATE", "Missing state or code")
     try:
-        info = await yt_oauth.complete_oauth(state, str(request.url))
+        info = await yt_oauth.complete_oauth(state, code)
     except RuntimeError as exc:
         message = str(exc) or "OAuth failed"
-        code_name = "OAUTH_STATE_EXPIRED" if "expired" in message.lower() else (
-            "OAUTH_INVALID_STATE" if "not exist" in message.lower() or "match" in message.lower()
+        lowered = message.lower()
+        code_name = "OAUTH_STATE_EXPIRED" if "expired" in lowered else (
+            "OAUTH_INVALID_STATE" if "not exist" in lowered or "match" in lowered
+            or "missing" in lowered
             else "OAUTH_FAILED"
         )
         raise _err(400, code_name, message)
