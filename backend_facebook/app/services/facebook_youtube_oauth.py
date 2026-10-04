@@ -33,6 +33,20 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _redact_oauth_error(exc: Exception) -> str:
+    """Keep the OAuth2 error code/description, strip anything secret-looking."""
+    text = f"{type(exc).__name__}: {exc}"
+    for secret in (
+        settings.GOOGLE_CLIENT_SECRET,
+        settings.GOOGLE_CLIENT_ID,
+        settings.ADMIN_TOKEN,
+    ):
+        if secret and len(secret) > 4 and secret in text:
+            text = text.replace(secret, "***")
+    # client_id prefix (project number) is a public identifier; keep error short
+    return text[:300]
+
+
 def validate_google_config() -> tuple[str, str, str]:
     """Fail fast from existing env. Never logs secrets."""
     client_id = (settings.GOOGLE_CLIENT_ID or "").strip()
@@ -165,7 +179,10 @@ async def complete_oauth(
     try:
         await asyncio.to_thread(flow.fetch_token, authorization_response=authorization_response)
     except Exception as exc:
-        raise RuntimeError("Google token exchange failed") from exc
+        # Diagnostic only: token exchange failures carry OAuth2 error codes
+        # (invalid_grant, invalid_client, ...), never tokens (none exist yet).
+        detail = _redact_oauth_error(exc)
+        raise RuntimeError(f"Google token exchange failed: {detail}") from exc
     credentials = flow.credentials
 
     refresh_token = getattr(credentials, "refresh_token", None) or old_refresh_token
