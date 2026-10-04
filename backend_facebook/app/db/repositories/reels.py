@@ -198,6 +198,33 @@ async def update_reel_status(reel_db_id: str, status: str) -> None:
     )
 
 
+async def advance_status(reel_db_id: str, from_status: str, to_status: str) -> bool:
+    """Conditional transition. Returns True only if the row was in from_status."""
+    client = get_client()
+    res = await client.execute(
+        "UPDATE facebook_reels SET status = :to_status, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id AND status = :from_status",
+        {"to_status": to_status, "from_status": from_status, "id": reel_db_id},
+    )
+    return (res.rows_affected or 0) > 0
+
+
+async def release_processing(reel_db_id: str) -> bool:
+    """processing -> new only. Never touches published/failed."""
+    return await advance_status(reel_db_id, "processing", "new")
+
+
+async def mark_reel_published(reel_db_id: str, youtube_video_id: str) -> None:
+    client = get_client()
+    await client.execute(
+        "UPDATE facebook_reels SET status = 'published', youtube_video_id = :youtube_video_id, "
+        "youtube_published_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), last_error = NULL, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {"youtube_video_id": youtube_video_id, "id": reel_db_id},
+    )
+
+
 async def record_reel_error(reel_db_id: str, error: str) -> None:
     """Persist a failure note + bump retry_count. Never changes status."""
     client = get_client()

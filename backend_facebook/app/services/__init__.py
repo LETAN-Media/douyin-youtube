@@ -1,4 +1,17 @@
 from .facebook_download_worker import DownloadJobResult, run_download_next
+from .facebook_publish_worker import PublishJobResult, run_publish_next
+from .facebook_youtube_publisher import (
+    AUTH_FAILED as YOUTUBE_AUTH_FAILED,
+    NETWORK_ERROR as YOUTUBE_NETWORK_ERROR,
+    QUOTA_EXCEEDED as YOUTUBE_QUOTA_EXCEEDED,
+    UPLOAD_FAILED as YOUTUBE_UPLOAD_FAILED,
+    YouTubePublisherError,
+    build_metadata,
+    load_destination_credentials_async,
+    refresh_if_needed,
+    upload_video,
+    validate_visibility,
+)
 from .facebook_media import (
     AUTH_ERROR as FASTSAVER_AUTH_ERROR,
     BAD_CONTENT_TYPE as MEDIA_BAD_CONTENT_TYPE,
@@ -79,4 +92,16 @@ __all__ = [
     "sanitize_job_id",
     "DownloadJobResult",
     "run_download_next",
+    "PublishJobResult",
+    "run_publish_next",
+    "YOUTUBE_AUTH_FAILED",
+    "YOUTUBE_NETWORK_ERROR",
+    "YOUTUBE_QUOTA_EXCEEDED",
+    "YOUTUBE_UPLOAD_FAILED",
+    "YouTubePublisherError",
+    "build_metadata",
+    "load_destination_credentials_async",
+    "refresh_if_needed",
+    "upload_video",
+    "validate_visibility",
 ]

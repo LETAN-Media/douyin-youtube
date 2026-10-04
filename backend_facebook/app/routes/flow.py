@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from ..db.repositories import pipelines, reels, scan_runs, sources
+from ..db.repositories import destinations, pipelines, publications, reels, scan_runs, sources
 from .facebook import _err
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-flow"])
@@ -54,6 +54,25 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
     else:
         inventory_status = "idle"
 
+    yt_destinations = await destinations.list_destinations(pipeline_id)
+    if any(
+        d.get("connected") and d.get("enabled", True) and d.get("channel_id")
+        for d in yt_destinations
+    ):
+        youtube_destination_status = "done"
+    else:
+        youtube_destination_status = "idle"
+
+    pub_counts = await publications.status_counts_for_pipeline(pipeline_id)
+    if pub_counts.get("processing", 0) > 0:
+        publisher_status = "running"
+    elif pub_counts.get("failed", 0) > 0:
+        publisher_status = "error"
+    elif pub_counts.get("published", 0) > 0:
+        publisher_status = "done"
+    else:
+        publisher_status = "idle"
+
     return {
         "pipeline_id": pipeline_id,
         "live": bool(pipeline.get("enabled", True)),
@@ -67,8 +86,8 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
             "inventory": inventory_status,
             "ai_metadata": "not_configured",
             "scheduler": "not_configured",
-            "publisher": "not_configured",
-            "youtube_destination": "not_configured",
+            "publisher": publisher_status,
+            "youtube_destination": youtube_destination_status,
         },
     }
 
