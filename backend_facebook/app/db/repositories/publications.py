@@ -192,3 +192,71 @@ async def list_publications(destination_id: str) -> list[dict[str, Any]]:
         }
         for r in rows.rows
     ]
+
+
+async def list_publications_for_pipeline(
+    pipeline_id: str, *, limit: int = 100, offset: int = 0
+) -> tuple[list[dict[str, Any]], int]:
+    """Publications joined with reels + destinations. Safe fields only, no credentials."""
+    client = get_client()
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    params: dict[str, Any] = {"pipeline_id": pipeline_id, "limit": limit, "offset": offset}
+    rows = await client.execute(
+        "SELECT p.id, p.reel_db_id, p.destination_id, p.status, p.youtube_video_id, "
+        "p.started_at, p.published_at, p.last_error, p.retry_count, "
+        "r.reel_id, d.channel_name "
+        "FROM publications p "
+        "JOIN facebook_reels r ON r.id = p.reel_db_id "
+        "JOIN youtube_destinations d ON d.id = p.destination_id "
+        "WHERE d.pipeline_id = :pipeline_id "
+        "ORDER BY p.created_at DESC, p.id LIMIT :limit OFFSET :offset",
+        params,
+    )
+    total_rows = await client.execute(
+        "SELECT COUNT(*) FROM publications p "
+        "JOIN youtube_destinations d ON d.id = p.destination_id "
+        "WHERE d.pipeline_id = :pipeline_id",
+        {"pipeline_id": pipeline_id},
+    )
+    total = total_rows.rows[0][0] if total_rows.rows else 0
+    return (
+        [
+            {
+                "id": r[0],
+                "reel_db_id": r[1],
+                "destination_id": r[2],
+                "status": r[3],
+                "youtube_video_id": r[4],
+                "started_at": r[5],
+                "published_at": r[6],
+                "last_error": r[7],
+                "retry_count": r[8],
+                "reel_id": r[9],
+                "channel_name": r[10],
+            }
+            for r in rows.rows
+        ],
+        total,
+    )
+    client = get_client()
+    rows = await client.execute(
+        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, started_at, published_at, last_error, retry_count, created_at, updated_at FROM publications WHERE destination_id = :destination_id",
+        {"destination_id": destination_id},
+    )
+    return [
+        {
+            "id": r[0],
+            "reel_db_id": r[1],
+            "destination_id": r[2],
+            "status": r[3],
+            "youtube_video_id": r[4],
+            "started_at": r[5],
+            "published_at": r[6],
+            "last_error": r[7],
+            "retry_count": r[8],
+            "created_at": r[9],
+            "updated_at": r[10],
+        }
+        for r in rows.rows
+    ]

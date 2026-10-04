@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
-from ..db.repositories import pipelines, sources
+from ..db.repositories import destinations, pipelines, publications, reels, sources
 from ..services.facebook_url import (
     SOURCE_TYPE,
     InvalidFacebookUrlError,
@@ -155,3 +155,45 @@ async def get_one_source(source_id: str) -> dict:
     if source is None:
         raise _err(404, "SOURCE_NOT_FOUND", "Source not found")
     return _source_response(source)
+
+
+# ---------- Aggregates ----------
+
+
+@router.get("/pipelines/{pipeline_id}/summary")
+async def get_pipeline_summary(pipeline_id: str) -> dict:
+    pipeline = await pipelines.get_pipeline(pipeline_id)
+    if pipeline is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+    fb_sources = await sources.list_sources(pipeline_id)
+    stats = await reels.inventory_stats(pipeline_id)
+    yt_destinations = await destinations.list_destinations(pipeline_id)
+    return {
+        "pipeline": {
+            "id": pipeline["id"],
+            "name": pipeline["name"],
+            "slug": pipeline["slug"],
+            "enabled": bool(pipeline.get("enabled", True)),
+            "auto_publish": bool(pipeline.get("auto_publish", True)),
+        },
+        "sources": len(fb_sources),
+        "inventory": stats["total"],
+        "destinations": len(yt_destinations),
+        "published": stats["published"],
+        "failed": stats["failed"],
+        "queued": stats["queued"],
+        "processing": stats["processing"],
+    }
+
+
+@router.get("/pipelines/{pipeline_id}/publications")
+async def list_pipeline_publications(
+    pipeline_id: str, limit: int = 100, offset: int = 0
+) -> dict:
+    pipeline = await pipelines.get_pipeline(pipeline_id)
+    if pipeline is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+    items, total = await publications.list_publications_for_pipeline(
+        pipeline_id, limit=limit, offset=offset
+    )
+    return {"items": items, "total": total}

@@ -1,20 +1,40 @@
 "use client";
 
+import { useState } from "react";
 import { Card, CardHeader, Badge, btnSmall } from "@/components/ui";
 import { IconDestinations } from "@/components/icons";
+import type { FacebookDestinationDto } from "@/lib/facebook-api";
 
-export function FacebookDestinations({ pipelineId }: { pipelineId: string }) {
-  const destinations = [
-    {
-      id: `${pipelineId}-yt-1`,
-      name: "JoyBeat Dance",
-      channelId: "UC_mock_channel_1",
-      connected: true,
-      autoUpload: true,
-      visibility: "public",
-      schedule: "Auto / Scheduled",
-    },
-  ];
+export function FacebookDestinations({
+  initial,
+}: {
+  initial: FacebookDestinationDto[];
+}) {
+  const [destinations] = useState(initial);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [authUrls, setAuthUrls] = useState<Record<string, string>>({});
+
+  async function connect(destinationId: string) {
+    setBusy(destinationId);
+    setError(null);
+    try {
+      const res = await fetch("/api/facebook/oauth/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ destinationId }),
+      });
+      const data = (await res.json()) as { authorization_url?: string; error?: string };
+      if (!res.ok || !data.authorization_url) {
+        throw new Error(data.error ?? `HTTP ${res.status}`);
+      }
+      setAuthUrls((m) => ({ ...m, [destinationId]: data.authorization_url as string }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Không bắt đầu được OAuth.");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   return (
     <Card>
@@ -23,6 +43,9 @@ export function FacebookDestinations({ pipelineId }: { pipelineId: string }) {
         subtitle="YouTube channel đích nhận video từ Facebook"
         icon={<IconDestinations size={16} />}
       />
+      {error ? (
+        <p className="border-b border-slate-100 px-4 py-2 text-xs text-rose-600 sm:px-5">{error}</p>
+      ) : null}
       {destinations.length === 0 ? (
         <div className="p-6 text-center text-sm text-slate-500">Chưa có destination</div>
       ) : (
@@ -32,21 +55,40 @@ export function FacebookDestinations({ pipelineId }: { pipelineId: string }) {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-extrabold text-slate-900">YouTube Channel</p>
-                  <p className="mt-1 text-xs text-slate-500">Channel: {d.name}</p>
-                  <p className="text-xs text-slate-500">Channel ID: {d.channelId}</p>
+                  <p className="mt-1 text-xs text-slate-500">Channel: {d.channel_name ?? "—"}</p>
+                  <p className="text-xs text-slate-500">Channel ID: {d.channel_id ?? "—"}</p>
                 </div>
                 <Badge tone={d.connected ? "green" : "slate"} dot>
                   {d.connected ? "Connected" : "Not Connected"}
                 </Badge>
               </div>
               <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-600">
-                <span>Auto Upload: {d.autoUpload ? "ON" : "OFF"}</span>
+                <span>Enabled: {d.enabled ? "ON" : "OFF"}</span>
                 <span>Visibility: {d.visibility}</span>
-                <span>Schedule: {d.schedule}</span>
               </div>
               <div className="mt-3 flex flex-wrap gap-1.5">
-                <button type="button" className={btnSmall}>Đổi kênh YouTube</button>
-                <button type="button" className={btnSmall}>Cài đặt</button>
+                <button
+                  type="button"
+                  className={btnSmall}
+                  disabled={busy === d.id}
+                  onClick={() => connect(d.id)}
+                >
+                  {busy === d.id
+                    ? "Đang tạo link…"
+                    : d.connected
+                      ? "Đổi kênh YouTube"
+                      : "Kết nối YouTube"}
+                </button>
+                {authUrls[d.id] ? (
+                  <a
+                    href={authUrls[d.id]}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={btnSmall}
+                  >
+                    Tiếp tục tới Google →
+                  </a>
+                ) : null}
               </div>
             </div>
           ))}
