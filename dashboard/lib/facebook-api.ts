@@ -260,6 +260,23 @@ export interface FacebookAiMetadataDto {
   model: string | null;
 }
 
+export interface FacebookScheduleStatus {
+  date: string;
+  weekday: number;
+  timezone: string;
+  batch_time: string;
+  batch_status: string;
+  scheduled_today: number;
+  daily_limit: number;
+  next_batch_at: string | null;
+  slots: Array<{
+    weekday: number;
+    time: string;
+    enabled: boolean;
+  }>;
+  scheduler_enabled: boolean;
+}
+
 export async function getFacebookAiStats(pipelineId: string): Promise<FacebookAiStatsDto> {
   return fbFetch<FacebookAiStatsDto>(
     `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/ai-metadata/stats`,
@@ -277,6 +294,12 @@ export async function getFacebookReelAiMetadata(
     if (err instanceof FacebookApiError && err.status === 404) return null;
     throw err;
   }
+}
+
+export async function getFacebookScheduleStatus(pipelineId: string): Promise<FacebookScheduleStatus> {
+  return fbFetch<FacebookScheduleStatus>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/schedule/status`,
+  );
 }
 
 export interface FacebookSkipResult {

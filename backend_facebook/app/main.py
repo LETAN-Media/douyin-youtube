@@ -36,6 +36,13 @@ async def lifespan(app: FastAPI):
             settings.FACEBOOK_SCHEDULER_POLL_SECONDS,
             settings.FACEBOOK_SCHEDULER_SLOT_WINDOW_MINUTES,
         )
+    reconciler_task = None
+    if settings.FACEBOOK_RECONCILE_ENABLED:
+        reconciler_task = asyncio.create_task(_reconciler_loop())
+        logger.info(
+            "reconciler loop started (poll=%ss)",
+            settings.FACEBOOK_RECONCILE_POLL_SECONDS,
+        )
     yield
     if scheduler_task is not None:
         scheduler_task.cancel()
@@ -45,6 +52,14 @@ async def lifespan(app: FastAPI):
             pass
         except Exception as exc:
             logger.warning("scheduler loop stop skipped: %s", exc)
+    if reconciler_task is not None:
+        reconciler_task.cancel()
+        try:
+            await reconciler_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("reconciler loop stop skipped: %s", exc)
     try:
         from .db.client import close_client
 
@@ -64,6 +79,21 @@ async def _scheduler_loop() -> None:
         except Exception as exc:
             logger.warning("scheduler tick failed: %s", exc)
         await asyncio.sleep(max(5, settings.FACEBOOK_SCHEDULER_POLL_SECONDS))
+
+
+async def _reconciler_loop() -> None:
+    from .services.youtube_schedule_reconciler import reconcile_due_scheduled_publications
+
+    while True:
+        try:
+            result = await reconcile_due_scheduled_publications()
+            if result.get("published") or result.get("errors"):
+                logger.info("reconciler result: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("reconciler tick failed: %s", exc)
+        await asyncio.sleep(max(5, settings.FACEBOOK_RECONCILE_POLL_SECONDS))
 
 
 def create_app() -> FastAPI:

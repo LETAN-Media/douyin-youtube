@@ -95,7 +95,12 @@ def _seed_reel(sid: str, reel_id: str, reel_status: str = "new") -> None:
 
 def test_no_sources(db) -> None:
     _make_pipeline()
-    body = TestClient(create_app()).get("/api/facebook/pipelines/pl_flow/flow-state").json()
+    prev_ai = settings.TOOLNET_AI_ENABLED
+    settings.TOOLNET_AI_ENABLED = False
+    try:
+        body = TestClient(create_app()).get("/api/facebook/pipelines/pl_flow/flow-state").json()
+    finally:
+        settings.TOOLNET_AI_ENABLED = prev_ai
     assert body["live"] is True
     assert body["sources"] == 0 and body["inventory"] == 0
     assert body["steps"]["source"] == "idle"

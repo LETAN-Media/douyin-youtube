@@ -1,4 +1,5 @@
 from typing import Any
+from datetime import datetime, timezone
 
 from ..client import get_client
 
@@ -283,3 +284,38 @@ async def list_publications_for_pipeline(
         ],
         total,
     )
+
+
+async def list_due_scheduled_publications(limit: int = 20) -> list[dict[str, Any]]:
+    """Scheduled publications whose scheduled_publish_at has arrived or passed."""
+    client = get_client()
+    cutoff = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = await client.execute(
+        "SELECT p.id, p.reel_db_id, p.destination_id, p.status, p.youtube_video_id, "
+        "p.started_at, p.published_at, p.last_error, p.retry_count, "
+        "p.scheduled_publish_at, r.reel_id, d.channel_name, d.pipeline_id "
+        "FROM publications p "
+        "JOIN facebook_reels r ON r.id = p.reel_db_id "
+        "JOIN youtube_destinations d ON d.id = p.destination_id "
+        "WHERE p.status = 'scheduled' AND p.scheduled_publish_at <= :cutoff "
+        "ORDER BY p.scheduled_publish_at ASC, p.id ASC LIMIT :limit",
+        {"cutoff": cutoff, "limit": max(1, min(limit, 100))},
+    )
+    return [
+        {
+            "id": r[0],
+            "reel_db_id": r[1],
+            "destination_id": r[2],
+            "status": r[3],
+            "youtube_video_id": r[4],
+            "started_at": r[5],
+            "published_at": r[6],
+            "last_error": r[7],
+            "retry_count": r[8],
+            "scheduled_publish_at": r[9],
+            "reel_id": r[10],
+            "channel_name": r[11],
+            "pipeline_id": r[12],
+        }
+        for r in rows.rows
+    ]

@@ -66,13 +66,23 @@ export function FacebookPublications({
                     </p>
                     <p className="mt-1 text-xs text-slate-500">
                       {p.channel_name ? `${p.channel_name} · ` : ""}
-                      Published: {p.published_at ? new Date(p.published_at).toLocaleString() : "—"}
+                      {p.status === "published" && p.published_at
+                        ? `Published: ${new Date(p.published_at).toLocaleString()}`
+                        : p.status === "scheduled" && p.started_at
+                        ? `Scheduled: ${new Date(p.started_at).toLocaleString()}`
+                        : `Status: ${p.status}`}
                     </p>
                     {p.last_error ? (
                       <p className="mt-1 text-xs text-rose-600">{p.last_error}</p>
                     ) : null}
                   </div>
-                  <Badge tone={p.status === "published" ? "green" : p.status === "failed" ? "red" : "amber"}>
+                  <Badge tone={
+                    p.status === "published" ? "green" :
+                    p.status === "scheduled" ? "indigo" :
+                    p.status === "failed" ? "red" :
+                    p.status === "processing" ? "amber" :
+                    "slate"
+                  }>
                     {p.status}
                   </Badge>
                 </div>

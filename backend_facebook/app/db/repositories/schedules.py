@@ -169,7 +169,6 @@ async def upsert_schedule(
                  "day": day, "slot": slot_time},
             )
     result = await get_schedule(pipeline_id)
-    print(f"DEBUG get_schedule result: {result}")
     assert result is not None
     return result
 
@@ -314,6 +313,29 @@ async def get_batch(pipeline_id: str, destination_id: str, local_date: str) -> d
         "FROM facebook_scheduler_batches "
         "WHERE pipeline_id = :pipeline_id AND destination_id = :destination_id AND local_date = :local_date",
         {"pipeline_id": pipeline_id, "destination_id": destination_id, "local_date": local_date},
+    )
+    if not rows.rows:
+        return None
+    r = rows.rows[0]
+    return {
+        "id": r[0], "pipeline_id": r[1], "destination_id": r[2], "local_date": r[3],
+        "scheduled_batch_time": r[4], "started_at": r[5], "completed_at": r[6],
+        "status": r[7], "planned_count": r[8], "uploaded_count": r[9], "failed_count": r[10],
+        "last_error": r[11], "created_at": r[12],
+    }
+
+
+async def get_batch_for_pipeline_date(pipeline_id: str, local_date: str) -> dict[str, Any] | None:
+    """Return the most recent batch for a pipeline on a given local date, regardless of destination."""
+    client = get_client()
+    rows = await client.execute(
+        "SELECT id, pipeline_id, destination_id, local_date, scheduled_batch_time, "
+        "started_at, completed_at, status, planned_count, uploaded_count, failed_count, "
+        "last_error, created_at "
+        "FROM facebook_scheduler_batches "
+        "WHERE pipeline_id = :pipeline_id AND local_date = :local_date "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        {"pipeline_id": pipeline_id, "local_date": local_date},
     )
     if not rows.rows:
         return None

@@ -8,6 +8,7 @@ import {
   getFacebookAiStats,
   getFacebookPipelineDetail,
   getFacebookReelAiMetadata,
+  getFacebookScheduleStatus,
   listFacebookDestinations,
   listFacebookInventory,
   listFacebookPublications,
@@ -22,6 +23,7 @@ import { FacebookInventory } from "@/components/facebook/FacebookInventory";
 import { FacebookDestinations } from "@/components/facebook/FacebookDestinations";
 import { FacebookPublications } from "@/components/facebook/FacebookPublications";
 import { FacebookAiProcessing } from "@/components/facebook/FacebookAiProcessing";
+import { FacebookScheduler } from "@/components/facebook/FacebookScheduler";
 
 const TABS: FacebookTabKey[] = [
   "overview",
@@ -30,6 +32,7 @@ const TABS: FacebookTabKey[] = [
   "destinations",
   "publications",
   "ai-processing",
+  "scheduler",
 ];
 
 function MissingPipeline() {
@@ -85,7 +88,7 @@ export default async function FacebookPipelinePage({
   }
 
   // Tab data from backend_facebook. Each fetch degrades independently.
-  const [sourcesRes, inventoryRes, destinationsRes, publicationsRes, flowRes] = await Promise.all([
+  const [sourcesRes, inventoryRes, destinationsRes, publicationsRes, flowRes, scheduleRes] = await Promise.all([
     listFacebookSources(pipelineId).then(
       (v) => ({ ok: true as const, v }),
       (e) => ({ ok: false as const, e: e instanceof Error ? e.message : "Lỗi tải sources." }),
@@ -105,6 +108,10 @@ export default async function FacebookPipelinePage({
     getFacebookFlowState(pipelineId).then(
       (v) => ({ ok: true as const, v }),
       (e) => ({ ok: false as const, e: e instanceof Error ? e.message : "Không tải được flow-state." }),
+    ),
+    getFacebookScheduleStatus(pipelineId).then(
+      (v) => ({ ok: true as const, v }),
+      (e) => ({ ok: false as const, e: e instanceof Error ? e.message : "Không tải được scheduler status." }),
     ),
   ]);
 
@@ -210,6 +217,16 @@ export default async function FacebookPipelinePage({
               <FacebookAiProcessing stats={aiStats} sample={aiSample} />
             ) : (
               <TabError message={aiStatsError ?? "Không tải được AI metadata."} />
+            )
+          ) : null}
+          {activeTab === "scheduler" ? (
+            scheduleRes.ok ? (
+              <FacebookScheduler
+                initialSchedule={{ enabled: pipeline.enabled }}
+                initialStatus={scheduleRes.v}
+              />
+            ) : (
+              <TabError message={scheduleRes.e} />
             )
           ) : null}
         </div>

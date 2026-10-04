@@ -136,7 +136,6 @@ async def run_scheduler_tick(
     for schedule in await schedules.list_enabled_schedules():
         result["checked"] += 1
         pipeline_id = schedule["pipeline_id"]
-        print(f"DEBUG schedule: pipeline={pipeline_id} batch_time={schedule.get('batch_time')!r}")
         try:
             tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
         except Exception:
@@ -431,10 +430,10 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
         }
     now_local = utc_now.astimezone(ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE))
     date_iso = now_local.date().isoformat()
-    batch = await schedules.get_batch(pipeline_id, "", date_iso)
+    batch = await schedules.get_batch_for_pipeline_date(pipeline_id, date_iso)
     batch_status = "idle"
     if batch:
-        if batch["status"] == "queued" or batch["status"] == "running":
+        if batch["status"] in ("queued", "running"):
             batch_status = "running"
         elif batch["status"] == "completed":
             batch_status = "completed"
@@ -453,13 +452,27 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
                 "enabled": True,
             })
 
+    utc_today = utc_now.date().isoformat()
+    next_batch_dt = None
+    if schedule.get("enabled"):
+        batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
+        batch_hour, batch_minute = _parse_time(batch_time)
+        tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
+        local_now = utc_now.astimezone(tz)
+        candidate = local_now.replace(hour=batch_hour, minute=batch_minute, second=0, microsecond=0)
+        if candidate <= local_now:
+            candidate = candidate + timedelta(days=1)
+        next_batch_dt = candidate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     return {
         "date": date_iso,
+        "weekday": now_local.weekday(),
         "timezone": schedule.get("timezone") or _DEFAULT_TIMEZONE,
         "batch_time": schedule.get("batch_time") or _DEFAULT_BATCH_TIME,
         "batch_status": batch_status,
         "scheduled_today": batch["uploaded_count"] if batch else 0,
         "daily_limit": schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY,
+        "next_batch_at": next_batch_dt,
         "slots": slots,
         "scheduler_enabled": bool(schedule.get("enabled")),
     }

@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useTransition, useState } from "react";
 
-export type FacebookTabKey = "overview" | "sources" | "inventory" | "destinations" | "publications" | "ai-processing";
+export type FacebookTabKey = "overview" | "sources" | "inventory" | "destinations" | "publications" | "ai-processing" | "scheduler";
 
 const TABS: { key: FacebookTabKey; label: string }[] = [
   { key: "overview", label: "Overview" },
@@ -12,6 +12,7 @@ const TABS: { key: FacebookTabKey; label: string }[] = [
   { key: "destinations", label: "Destinations" },
   { key: "publications", label: "Publications" },
   { key: "ai-processing", label: "AI Processing" },
+  { key: "scheduler", label: "Scheduler" },
 ];
 
 export function FacebookTabs({

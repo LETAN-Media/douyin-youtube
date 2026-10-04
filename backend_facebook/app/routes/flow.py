@@ -5,7 +5,9 @@ GET /api/facebook/pipelines/{pipeline_id}/flow-state
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from fastapi import APIRouter
+from zoneinfo import ZoneInfo
 
 from ..db.repositories import destinations, pipelines, publications, reels, scan_runs, schedules, sources
 from .facebook import _err
@@ -73,6 +75,27 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
     else:
         publisher_status = "idle"
 
+    from ..db.repositories import ai_metadata as ai_metadata_repo
+    from ..config import settings as app_settings
+
+    ai_configured = bool(
+        app_settings.TOOLNET_AI_ENABLED
+        and app_settings.TOOLNET_BASE_URL
+        and app_settings.TOOLNET_API_KEY
+        and app_settings.TOOLNET_MODEL
+    )
+    ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
+    if not ai_configured:
+        ai_metadata_status = "not_configured"
+    elif ai_stats.get("pending", 0) > 0:
+        ai_metadata_status = "running"
+    elif ai_stats.get("failed", 0) > 0:
+        ai_metadata_status = "error"
+    elif ai_stats.get("generated", 0) > 0:
+        ai_metadata_status = "done"
+    else:
+        ai_metadata_status = "idle"
+
     schedule = await schedules.get_schedule(pipeline_id)
     if schedule is None or not schedule.get("enabled"):
         scheduler_status = "not_configured"
@@ -81,7 +104,7 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         tz = ZoneInfo(schedule.get("timezone") or "Asia/Ho_Chi_Minh")
         now_local = utc_now.astimezone(tz)
         date_iso = now_local.date().isoformat()
-        batch = await schedules.get_batch(pipeline_id, "", date_iso)
+        batch = await schedules.get_batch_for_pipeline_date(pipeline_id, date_iso)
         if batch and batch.get("status") in ("queued", "running"):
             scheduler_status = "running"
         elif batch and batch.get("status") == "failed":
@@ -102,7 +125,7 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         "steps": {
             "source": source_status,
             "inventory": inventory_status,
-            "ai_metadata": "not_configured",
+            "ai_metadata": ai_metadata_status,
             "scheduler": scheduler_status,
             "publisher": publisher_status,
             "youtube_destination": youtube_destination_status,

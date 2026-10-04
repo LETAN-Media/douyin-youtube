@@ -218,3 +218,10 @@ export const IconTrash = (p: P) => (
     <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
   </Svg>
 );
+
+export const IconCalendar = (p: P) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="17" rx="2" />
+    <path d="M16 2v4M8 2v4M3 9h18" />
+  </Svg>
+);

@@ -57,7 +57,6 @@ async def get_schedule(pipeline_id: str, _: None = Depends(require_admin)) -> di
 async def put_schedule(
     pipeline_id: str, body: ScheduleUpsert, _: None = Depends(require_admin)
 ) -> dict:
-    print(f"DEBUG put_schedule: pipeline={pipeline_id} batch_time={body.batch_time!r}")
     if await pipelines.get_pipeline(pipeline_id) is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
     try:
@@ -85,6 +84,13 @@ async def get_schedule_status(pipeline_id: str) -> dict:
 @router.post("/scheduler/tick")
 async def manual_tick(_: None = Depends(require_admin)) -> dict:
     return await run_scheduler_tick()
+
+
+@router.post("/scheduler/reconcile")
+async def manual_reconcile(_: None = Depends(require_admin)) -> dict:
+    from ..services.youtube_schedule_reconciler import reconcile_due_scheduled_publications
+    result = await reconcile_due_scheduled_publications()
+    return result
 
 
 @router.post("/pipelines/{pipeline_id}/youtube-destinations/{destination_id}/schedule-today")

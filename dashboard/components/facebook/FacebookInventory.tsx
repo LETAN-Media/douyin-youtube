@@ -10,6 +10,7 @@ const STATUS_TONE: Record<string, string> = {
   queued: "amber",
   processing: "indigo",
   published: "green",
+  scheduled: "indigo",
   failed: "red",
   skipped: "slate",
 };
@@ -19,6 +20,7 @@ const STATUS_LABEL: Record<string, string> = {
   queued: "Queued",
   processing: "Processing",
   published: "Published",
+  scheduled: "Scheduled",
   failed: "Failed",
   skipped: "Skipped",
 };
@@ -75,7 +77,9 @@ function MobileCard({
 }) {
   const isSkipped = v.status === "skipped";
   const isPublished = v.status === "published";
+  const isScheduled = v.status === "scheduled";
   const isProcessing = v.status === "processing" || v.status === "queued";
+  const disabled = isPublished || isScheduled || isProcessing;
   return (
     <div
       className={`flex items-start gap-3 rounded-2xl border border-slate-200/90 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.05)] ${isSkipped ? "opacity-75" : ""}`}
@@ -97,7 +101,7 @@ function MobileCard({
               type="checkbox"
               checked={selected}
               onChange={onToggle}
-              disabled={isPublished || isProcessing}
+              disabled={disabled}
               className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
             />
             Chọn
@@ -110,7 +114,7 @@ function MobileCard({
             >
               Khôi phục
             </button>
-          ) : !isPublished && !isProcessing ? (
+          ) : !disabled ? (
             <button
               type="button"
               onClick={onSkip}
@@ -426,7 +430,9 @@ export function FacebookInventory({
                 {items.map((v) => {
                   const isSkipped = v.status === "skipped";
                   const isPublished = v.status === "published";
+                  const isScheduled = v.status === "scheduled";
                   const isProcessing = v.status === "processing" || v.status === "queued";
+                  const disabled = isPublished || isScheduled || isProcessing;
                   return (
                     <tr key={v.id} className={`transition hover:bg-indigo-50/40 ${isSkipped ? "opacity-75" : ""}`}>
                       <td className="px-3 py-3">
@@ -434,7 +440,7 @@ export function FacebookInventory({
                           type="checkbox"
                           checked={selectedIds.has(v.id)}
                           onChange={() => toggleSelect(v.id)}
-                          disabled={isPublished || isProcessing}
+                          disabled={disabled}
                           className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                         />
                       </td>
@@ -458,7 +464,7 @@ export function FacebookInventory({
                         <Badge tone={STATUS_TONE[v.status] ?? "slate"}>{STATUS_LABEL[v.status] ?? v.status}</Badge>
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-xs text-slate-600">{v.youtube_video_id ?? "—"}</td>
-                      <td className="whitespace-nowrap px-3 py-3">
+                      <td className="px-3 py-3">
                         {isSkipped ? (
                           <button
                             type="button"
@@ -468,7 +474,7 @@ export function FacebookInventory({
                           >
                             Khôi phục
                           </button>
-                        ) : isPublished || isProcessing ? (
+                        ) : disabled ? (
                           <span className="text-xs text-slate-400">—</span>
                         ) : (
                           <button
