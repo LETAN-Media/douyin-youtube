@@ -62,6 +62,10 @@ def fresh_db() -> None:
     settings.TURSO_AUTH_TOKEN = "test_token"
     settings.FASTSAVER_API_KEY = "test_fs_key"
     settings.FASTSAVER_BASE_URL = "https://api.example.com"
+    settings.TOOLNET_BASE_URL = "https://toolnet.example.com/v1"
+    settings.TOOLNET_API_KEY = "test_toolnet_key"
+    settings.TOOLNET_MODEL = "groq/qwen/qwen3.8-27b"
+    settings.TOOLNET_AI_ENABLED = True
     if TEST_DB_PATH.exists():
         TEST_DB_PATH.unlink()
     for suffix in ("-wal", "-shm", "-journal"):
@@ -79,6 +83,10 @@ def db(tmp_path):
         "settings_url": settings.TURSO_DATABASE_URL,
         "fs_key": settings.FASTSAVER_API_KEY,
         "fs_base": settings.FASTSAVER_BASE_URL,
+        "tn_base": settings.TOOLNET_BASE_URL,
+        "tn_key": settings.TOOLNET_API_KEY,
+        "tn_model": settings.TOOLNET_MODEL,
+        "tn_enabled": settings.TOOLNET_AI_ENABLED,
     }
     fresh_db()
     yield tmp_path
@@ -92,6 +100,10 @@ def db(tmp_path):
     settings.TURSO_DATABASE_URL = prev["settings_url"]
     settings.FASTSAVER_API_KEY = prev["fs_key"]
     settings.FASTSAVER_BASE_URL = prev["fs_base"]
+    settings.TOOLNET_BASE_URL = prev["tn_base"]
+    settings.TOOLNET_API_KEY = prev["tn_key"]
+    settings.TOOLNET_MODEL = prev["tn_model"]
+    settings.TOOLNET_AI_ENABLED = prev["tn_enabled"]
     client_module._client = None
 
 
@@ -125,7 +137,19 @@ def mock_transport(handler) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+GOOD_AI_JSON = {
+    "title": "AI Generated Title Number One",
+    "description": "AI generated description.",
+    "hashtags": ["#ai", "#test", "#reels"],
+}
+
+
 def ok_media_handler(request: httpx.Request) -> httpx.Response:
+    if "chat/completions" in request.url.path:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": json.dumps(GOOD_AI_JSON)}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+        })
     if request.url.path == "/fetch":
         return httpx.Response(200, json=MEDIA_JSON)
     return httpx.Response(200, content=b"V" * 4096, headers={"Content-Type": "video/mp4"})
@@ -362,12 +386,14 @@ def _run_publish(pid, did, tmp_path, factory, transport=None):
 
 
 def _factory_for(behaviors):
-    state = {"i": 0}
+    state = {"i": 0, "services": []}
 
     def _factory(creds):
         req = FakeInsertRequest(behaviors[state["i"]])
         state["i"] += 1
-        return FakeYouTube(req)
+        svc = FakeYouTube(req)
+        state["services"].append(svc)
+        return svc
 
     _factory.calls = state
     return _factory
@@ -376,11 +402,15 @@ def _factory_for(behaviors):
 def test_publish_success(db, tmp_path) -> None:
     pid, did = seed(n=1)
     t = mock_transport(ok_media_handler)
-    job = _run_publish(pid, did, tmp_path, _factory_for([[("ok", "yt_success")]]), transport=t)
+    factory = _factory_for([[("ok", "yt_success")]])
+    job = _run_publish(pid, did, tmp_path, factory, transport=t)
     assert job.result == "published"
     assert job.youtube_video_id == "yt_success"
     assert job.file_bytes == 4096
     assert job.channel_id == "UC_TEST"
+    assert job.ai_cached is False
+    assert job.ai_model == "groq/qwen/qwen3.8-27b"
+    assert job.title == GOOD_AI_JSON["title"]
     row = reel_state(f"{pid}_r0")
     assert row["status"] == "published" and row["youtube_video_id"] == "yt_success"
 
@@ -389,6 +419,15 @@ def test_publish_success(db, tmp_path) -> None:
 
     pub = asyncio.run(_check_pub())
     assert pub["status"] == "published" and pub["youtube_video_id"] == "yt_success"
+    assert pub["youtube_title"] == GOOD_AI_JSON["title"]
+    assert "#ai" in (pub["youtube_description"] or "")
+    assert pub["ai_model"] == "groq/qwen/qwen3.8-27b"
+    # generated title/description actually sent to YouTube
+    sent = factory.calls["services"][0]._videos.kwargs
+    assert sent["body"]["snippet"]["title"] == GOOD_AI_JSON["title"]
+    assert "cap 0" not in sent["body"]["snippet"]["title"]
+    assert len(sent["body"]["snippet"]["title"]) <= 100
+    assert len(sent["body"]["snippet"]["description"]) <= 5000
     assert list(tmp_path.iterdir()) == []
 
 
@@ -412,9 +451,19 @@ def test_already_published_no_second_upload(db, tmp_path) -> None:
 
 def test_resolve_fail_releases(db, tmp_path) -> None:
     pid, did = seed(n=1)
-    t = mock_transport(lambda req: httpx.Response(500, text="boom"))
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "chat/completions" in req.url.path:
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps(GOOD_AI_JSON)}}],
+                "usage": {},
+            })
+        return httpx.Response(500, text="boom")
+
+    t = mock_transport(handler)
     job = _run_publish(pid, did, tmp_path, _factory_for([[("ok", "x")]]), transport=t)
     assert job.result == "failed" and "FASTSAVER" in (job.error_code or "")
+    assert job.ai_cached is False  # AI succeeded before the download stage
     row = reel_state(f"{pid}_r0")
     assert row["status"] == "new" and row["retry_count"] == 1
     assert list(tmp_path.iterdir()) == []
@@ -506,3 +555,145 @@ def test_flow_state_publisher_mapping(db) -> None:
     asyncio.run(_make_failed())
     state = asyncio.run(build_flow_state(pid))
     assert state["steps"]["publisher"] == "error"
+
+
+# ---------- Task 8B: AI-first publish ----------
+
+
+def test_cached_ai_no_toolnet_call(db, tmp_path) -> None:
+    from app.db.repositories import ai_metadata
+    from app.db.repositories.ai_metadata import source_hash
+
+    pid, did = seed(n=1)
+    calls = {"n": 0}
+
+    async def _seed_ai():
+        await ai_metadata.upsert_generated(
+            reel_db_id=f"{pid}_r0", title="Cached AI Title", description="Cached desc",
+            hashtags=["#c", "#d", "#e"], model="groq/qwen/qwen3.8-27b",
+            source_hash=source_hash("cap 0", "r0"),
+        )
+
+    asyncio.run(_seed_ai())
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "chat/completions" in req.url.path:
+            calls["n"] += 1
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "{}"}}], "usage": {}})
+        return ok_media_handler(req)
+
+    job = _run_publish(pid, did, tmp_path, _factory_for([[("ok", "yt_c")]]),
+                       transport=mock_transport(handler))
+    assert job.result == "published"
+    assert job.ai_cached is True
+    assert job.title == "Cached AI Title"
+    assert calls["n"] == 0
+
+
+def test_ai_fail_never_touches_media_or_youtube(db, tmp_path) -> None:
+    pid, did = seed(n=1)
+    seen = {"fetch": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "chat/completions" in req.url.path:
+            return httpx.Response(500, json={"error": "boom"})
+        if req.url.path == "/fetch":
+            seen["fetch"] += 1
+        return httpx.Response(500, text="boom")
+
+    factory_calls = {"n": 0}
+
+    def _counting(creds):
+        factory_calls["n"] += 1
+        return FakeYouTube(FakeInsertRequest([("ok", "x")]))
+
+    job = _run_publish(pid, did, tmp_path, _counting, transport=mock_transport(handler))
+    assert job.result == "failed"
+    assert job.error_code == "TOOLNET_UPSTREAM_ERROR"
+    assert seen["fetch"] == 0
+    assert factory_calls["n"] == 0
+    row = reel_state(f"{pid}_r0")
+    assert row["status"] == "new"  # released, never published
+
+    async def _check_pub():
+        return await publications.get_by_reel_destination(f"{pid}_r0", did)
+
+    pub = asyncio.run(_check_pub())
+    assert pub["status"] == "failed"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ai_disabled_fails_before_download(db, tmp_path, monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "TOOLNET_AI_ENABLED", False)
+    pid, did = seed(n=1)
+    seen = {"fetch": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/fetch":
+            seen["fetch"] += 1
+        return ok_media_handler(req)
+
+    job = _run_publish(pid, did, tmp_path, _factory_for([[("ok", "x")]]),
+                       transport=mock_transport(handler))
+    assert job.result == "failed"
+    assert job.error_code == "TOOLNET_CONFIG_MISSING"
+    assert seen["fetch"] == 0
+    assert reel_state(f"{pid}_r0")["status"] == "new"
+
+
+def test_stale_hash_regenerates_for_upload(db, tmp_path) -> None:
+    from app.db.repositories import ai_metadata
+
+    pid, did = seed(n=1)
+
+    async def _seed_stale():
+        await ai_metadata.upsert_generated(
+            reel_db_id=f"{pid}_r0", title="Old", description="Old",
+            hashtags=["#o", "#p", "#q"], model="other-model",
+            source_hash="stale",
+        )
+
+    asyncio.run(_seed_stale())
+    t = mock_transport(ok_media_handler)
+    job = _run_publish(pid, did, tmp_path, _factory_for([[("ok", "yt_new")]]), transport=t)
+    assert job.result == "published"
+    assert job.ai_cached is False
+    assert job.title == GOOD_AI_JSON["title"]
+
+
+def test_hashtags_appended_once(db, tmp_path) -> None:
+    from app.services.facebook_youtube_publisher import finalize_description
+
+    out = finalize_description("Hello world #ai", ["#ai", "#test", "#reels"])
+    assert out.count("#ai") == 1
+    assert "#test" in out and "#reels" in out
+    assert finalize_description(None, ["#a", "#b", "#c"]) == "#a #b #c"
+    long_desc = "x" * 6000
+    assert len(finalize_description(long_desc, ["#a", "#b", "#c"])) <= 5000
+
+
+def test_skipped_never_claimed(db, tmp_path) -> None:
+    pid, did = seed(n=1)
+    asyncio.run(reels.update_reel_status(f"{pid}_r0", "skipped"))
+    t = mock_transport(ok_media_handler)
+    job = _run_publish(pid, did, tmp_path, _factory_for([[("ok", "x")]]), transport=t)
+    assert job.result == "no_work"
+    assert reel_state(f"{pid}_r0")["status"] == "skipped"
+
+
+def test_snapshot_not_overwritten(db, tmp_path) -> None:
+    pid, did = seed(n=1)
+    t = mock_transport(ok_media_handler)
+    job = _run_publish(pid, did, tmp_path, _factory_for([[("ok", "yt_snap")]]), transport=t)
+    assert job.result == "published"
+
+    async def _check():
+        return await publications.get_by_reel_destination(f"{pid}_r0", did)
+
+    pub = asyncio.run(_check())
+    assert pub["youtube_title"] == GOOD_AI_JSON["title"]
+    assert pub["ai_model"] == "groq/qwen/qwen3.8-27b"
+    assert "yt_snap" in (pub["youtube_video_id"] or "")

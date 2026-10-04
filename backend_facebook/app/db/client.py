@@ -124,6 +124,16 @@ async def migrate() -> None:
     ]
     await _apply_migration(client, applied, "20241003_06", statements_06)
     await _repair_ai_metadata_column(client)
+    statements_07: list[str] = []
+    for _col, _ddl in (
+        ("youtube_title", "ALTER TABLE publications ADD COLUMN youtube_title TEXT"),
+        ("youtube_description", "ALTER TABLE publications ADD COLUMN youtube_description TEXT"),
+        ("youtube_hashtags_json", "ALTER TABLE publications ADD COLUMN youtube_hashtags_json TEXT"),
+        ("ai_model", "ALTER TABLE publications ADD COLUMN ai_model TEXT"),
+    ):
+        if not await _has_column(client, "publications", _col):
+            statements_07.append(_ddl)
+    await _apply_migration(client, applied, "20241003_07", statements_07)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

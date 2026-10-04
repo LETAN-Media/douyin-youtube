@@ -286,3 +286,62 @@ class FacebookMetadataGenerator:
                 await limiter.release(estimate)
         assert last_error is not None
         raise last_error
+
+
+@dataclass
+class EnsureMetadataResult:
+    metadata: GeneratedMetadata
+    cached: bool
+    model: str
+    usage: dict
+
+
+async def ensure_ai_metadata(
+    reel: dict,
+    *,
+    transport=None,
+) -> EnsureMetadataResult:
+    """Shared path for manual API and publish worker: cache-first, else 1 ToolNet call.
+
+    Raises MetadataError (incl. TOOLNET_CONFIG_MISSING when AI is off).
+    Persists generated rows; never touches facebook_reels.caption.
+    """
+    from ..db.repositories import ai_metadata
+    from ..db.repositories.ai_metadata import source_hash
+
+    reel_db_id = reel["id"]
+    generator = FacebookMetadataGenerator.from_settings(transport=transport)
+    model = generator.config.model
+    if not await ai_metadata.needs_generation(
+        reel_db_id, reel.get("caption"), model, reel.get("reel_id")
+    ):
+        row = await ai_metadata.get_for_reel(reel_db_id)
+        assert row is not None
+        return EnsureMetadataResult(
+            metadata=GeneratedMetadata(
+                title=row.get("title") or "",
+                description=row.get("description") or "",
+                hashtags=row.get("hashtags", []),
+                model=row.get("model") or model,
+                usage={},
+            ),
+            cached=True,
+            model=row.get("model") or model,
+            usage={},
+        )
+    generated = await generator.generate(
+        reel.get("reel_id") or reel_db_id,
+        reel.get("caption"),
+        reel.get("reel_url"),
+    )
+    await ai_metadata.upsert_generated(
+        reel_db_id=reel_db_id,
+        title=generated.title,
+        description=generated.description,
+        hashtags=generated.hashtags,
+        model=generated.model,
+        source_hash=source_hash(reel.get("caption"), reel.get("reel_id")),
+    )
+    return EnsureMetadataResult(
+        metadata=generated, cached=False, model=generated.model, usage=generated.usage
+    )

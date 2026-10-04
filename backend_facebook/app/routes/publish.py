@@ -52,6 +52,9 @@ async def publish_next(
         "publication_id": job.publication_id,
         "youtube_video_id": job.youtube_video_id,
         "channel_id": job.channel_id,
+        "ai_model": job.ai_model,
+        "ai_cached": job.ai_cached,
+        "title": job.title,
         "bytes": job.file_bytes,
         "elapsed_s": round(job.elapsed_s, 1),
     }

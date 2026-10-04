@@ -294,16 +294,59 @@ class FakeGenerator:
         return await real.generate(reel_id, caption, reel_url)
 
 
+async def _real_with_transport(reel, transport):
+    from app.db.repositories import ai_metadata as repo
+    from app.db.repositories.ai_metadata import source_hash
+    from app.services.facebook_ai_metadata import (
+        EnsureMetadataResult,
+        FacebookMetadataGenerator as Gen,
+        GeneratedMetadata,
+    )
+
+    generator = Gen(
+        ToolNetConfig(
+            base_url="https://toolnet.example.com/v1",
+            api_key="test_toolnet_key",
+            model="groq/qwen/qwen3.8-27b",
+        ),
+        transport=transport,
+    )
+    model = generator.config.model
+    if not await repo.needs_generation(reel["id"], reel.get("caption"), model, reel.get("reel_id")):
+        row = await repo.get_for_reel(reel["id"])
+        assert row is not None
+        return EnsureMetadataResult(
+            metadata=GeneratedMetadata(
+                title=row.get("title") or "", description=row.get("description") or "",
+                hashtags=row.get("hashtags", []), model=row.get("model") or model, usage={},
+            ),
+            cached=True, model=row.get("model") or model, usage={},
+        )
+    generated = await generator.generate(
+        reel.get("reel_id") or reel["id"], reel.get("caption"), reel.get("reel_url")
+    )
+    await repo.upsert_generated(
+        reel_db_id=reel["id"], title=generated.title, description=generated.description,
+        hashtags=generated.hashtags, model=generated.model,
+        source_hash=source_hash(reel.get("caption"), reel.get("reel_id")),
+    )
+    return EnsureMetadataResult(metadata=generated, cached=False, model=generated.model, usage=generated.usage)
+
+
 def _run_generate(reel_db_id: str, transport, monkeypatch) -> tuple[int, dict]:
     import app.routes.ai_metadata as route_mod
     from fastapi.testclient import TestClient
     from app.main import create_app
 
-    fake = FakeGenerator(transport)
-    monkeypatch.setattr(
-        route_mod, "FacebookMetadataGenerator",
-        type("FG", (), {"from_settings": staticmethod(lambda transport=None: fake)}),
-    )
+    async def _patched(reel, transport=None):
+        return await _real_with_transport(reel, transport)
+
+    # route calls ensure_ai_metadata(reel) without transport; smuggle ours in
+    async def _bound(reel):
+        return await _real_with_transport(reel, _bound.transport)
+
+    _bound.transport = transport
+    monkeypatch.setattr(route_mod, "ensure_ai_metadata", _bound)
     client = TestClient(create_app())
     r = client.post(f"/api/facebook/reels/{reel_db_id}/ai-metadata/generate", headers=AUTH_HEADERS)
     return r.status_code, r.json()

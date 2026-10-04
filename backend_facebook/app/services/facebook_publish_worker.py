@@ -1,9 +1,11 @@
-"""Single-shot Facebook -> YouTube publish worker (Task 7B).
+"""Single-shot Facebook -> YouTube publish worker (Task 8B).
 
-new -> queued (atomic claim) -> processing -> resolve once -> download once
--> resumable upload -> publication published + reel published -> cleanup.
+new -> queued (atomic claim) -> processing -> AI metadata ensure (cache or
+1 ToolNet call) -> resolve once -> download once -> resumable upload with
+AI title/description/hashtags -> publication published + reel published.
 
-One job per instance (asyncio guard). No scheduler, no loops, no AI.
+AI failure releases the reel BEFORE any download. No raw-caption fallback
+when AI is enabled. One job per instance. No scheduler, no loops.
 No signed URLs or tokens in responses/logs.
 """
 
@@ -20,6 +22,7 @@ import httpx
 
 from ..config import settings
 from ..db.repositories import destinations, pipelines, publications, reels, youtube_auth
+from .facebook_ai_metadata import MetadataError, ensure_ai_metadata
 from .facebook_media import (
     TMP_ROOT,
     FacebookMediaError,
@@ -29,7 +32,7 @@ from .facebook_media import (
 )
 from .facebook_youtube_publisher import (
     YouTubePublisherError,
-    build_metadata,
+    finalize_description,
     load_destination_credentials_async,
     refresh_if_needed,
     upload_video,
@@ -53,6 +56,9 @@ class PublishJobResult:
     elapsed_s: float = 0.0
     error_code: str | None = None
     error: str | None = None
+    ai_cached: bool | None = None
+    ai_model: str | None = None
+    title: str | None = None
 
 
 def _redact(message: str) -> str:
@@ -179,12 +185,35 @@ async def _run_guarded(
             "CLAIM_LOST", "Reel left queued state before processing.", **base,
         )
 
+    # AI metadata FIRST: cache hit or exactly one ToolNet call. Any failure
+    # releases the reel before a single byte is downloaded. No raw fallback.
+    try:
+        ensured = await ensure_ai_metadata(reel, transport=transport)
+    except MetadataError as exc:
+        return await _fail(
+            publication["id"], target_dir, started,
+            exc.code, str(exc), **base,
+        )
+    ai_title = (ensured.metadata.title or "").strip()
+    if not ai_title or len(ai_title) > 100:
+        return await _fail(
+            publication["id"], target_dir, started,
+            "AI_METADATA_INVALID", "Generated title is empty or over 100 chars.",
+            **{**base, "ai_cached": ensured.cached, "ai_model": ensured.model},
+        )
+    ai_description = finalize_description(ensured.metadata.description, ensured.metadata.hashtags)
+    ai_info = {
+        "ai_cached": ensured.cached,
+        "ai_model": ensured.model,
+        "title": ai_title,
+    }
+
     try:
         resolver = FacebookMediaResolver.from_settings(transport=transport)
     except FacebookMediaError as exc:
         return await _fail(
             publication["id"], target_dir, started,
-            exc.code, str(exc), **base,
+            exc.code, str(exc), **{**base, **ai_info},
         )
 
     try:
@@ -196,40 +225,39 @@ async def _run_guarded(
     except FacebookMediaError as exc:
         return await _fail(
             publication["id"], target_dir, started,
-            exc.code, str(exc), **base,
+            exc.code, str(exc), **{**base, **ai_info},
         )
     except Exception as exc:
         return await _fail(
             publication["id"], target_dir, started,
-            "UNEXPECTED", type(exc).__name__, **base,
+            "UNEXPECTED", type(exc).__name__, **{**base, **ai_info},
         )
 
-    title, description = build_metadata(
-        title=reel.get("caption"), description=reel.get("caption"),
-        reel_id=reel_id, reel_url=reel.get("reel_url"),
-        visibility=destination.get("visibility") or "public",
-    )
     try:
         credentials = await load_destination_credentials_async(destination_id)
         credentials = await refresh_if_needed(destination_id, credentials)
         youtube_video_id = await asyncio.to_thread(
-            upload_video, credentials, output, title, description,
+            upload_video, credentials, output, ai_title, ai_description,
             destination.get("visibility") or "public",
             youtube_factory=youtube_factory,
         )
     except YouTubePublisherError as exc:
         return await _fail(
             publication["id"], target_dir, started,
-            exc.code, str(exc), **{**base, "file_bytes": file_bytes},
+            exc.code, str(exc), **{**base, "file_bytes": file_bytes, **ai_info},
         )
     except Exception as exc:
         return await _fail(
             publication["id"], target_dir, started,
-            "UNEXPECTED", type(exc).__name__, **{**base, "file_bytes": file_bytes},
+            "UNEXPECTED", type(exc).__name__, **{**base, "file_bytes": file_bytes, **ai_info},
         )
 
     try:
-        await publications.mark_published(publication["id"], youtube_video_id)
+        await publications.mark_published(
+            publication["id"], youtube_video_id,
+            title=ai_title, description=ai_description,
+            hashtags=ensured.metadata.hashtags, ai_model=ensured.model,
+        )
         await reels.mark_reel_published(reel_db_id, youtube_video_id)
     except Exception as exc:
         # Uploaded on YouTube but DB persist failed: keep the video id in the
@@ -254,5 +282,6 @@ async def _run_guarded(
     return PublishJobResult(
         result="published", publication_id=publication["id"],
         youtube_video_id=youtube_video_id, channel_id=destination.get("channel_id"),
-        file_bytes=file_bytes, elapsed_s=time.monotonic() - started, **base,
+        file_bytes=file_bytes, elapsed_s=time.monotonic() - started,
+        **{**base, **ai_info},
     )

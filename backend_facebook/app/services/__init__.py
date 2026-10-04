@@ -5,10 +5,12 @@ from .ai_rate_limit import (
     reset_shared_limiter,
 )
 from .facebook_ai_metadata import (
+    EnsureMetadataResult,
     FacebookMetadataGenerator,
     GeneratedMetadata,
     MetadataError,
     ToolNetConfig,
+    ensure_ai_metadata,
 )
 from .facebook_download_worker import DownloadJobResult, run_download_next
 from .facebook_publish_worker import PublishJobResult, run_publish_next
@@ -19,6 +21,7 @@ from .facebook_youtube_publisher import (
     UPLOAD_FAILED as YOUTUBE_UPLOAD_FAILED,
     YouTubePublisherError,
     build_metadata,
+    finalize_description,
     load_destination_credentials_async,
     refresh_if_needed,
     upload_video,
@@ -106,10 +109,12 @@ __all__ = [
     "cleanup_job_dir",
     "job_dir",
     "sanitize_job_id",
+    "EnsureMetadataResult",
     "FacebookMetadataGenerator",
     "GeneratedMetadata",
     "MetadataError",
     "ToolNetConfig",
+    "ensure_ai_metadata",
     "DownloadJobResult",
     "run_download_next",
     "PublishJobResult",
@@ -120,6 +125,7 @@ __all__ = [
     "YOUTUBE_UPLOAD_FAILED",
     "YouTubePublisherError",
     "build_metadata",
+    "finalize_description",
     "load_destination_credentials_async",
     "refresh_if_needed",
     "upload_video",

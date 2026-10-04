@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -61,6 +62,25 @@ def build_metadata(
     if reel_url:
         parts.append(f"Source: {reel_url}")
     return final_title, "\n\n".join(parts)[:5000]
+
+
+def finalize_description(description: str | None, hashtags: list[str] | None) -> str:
+    """AI description + hashtags appended once each, hard 5000-char cap."""
+    base = (description or "").strip()
+    tags: list[str] = []
+    for raw in hashtags or []:
+        tag = str(raw or "").strip()
+        if not tag.startswith("#"):
+            tag = "#" + tag.lstrip("#")
+        tag = "#" + re.sub(r"\s+", "", tag[1:])
+        if tag != "#" and tag not in tags:
+            tags.append(tag)
+    lowered = base.lower()
+    fresh = [t for t in tags if t.lower() not in lowered]
+    parts = [base] if base else []
+    if fresh:
+        parts.append(" ".join(fresh))
+    return "\n\n".join(parts)[:5000]
 
 
 async def load_destination_credentials_async(destination_id: str) -> Any:
