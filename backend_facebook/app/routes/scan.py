@@ -26,6 +26,10 @@ from ..services.facebook_rapidapi import (
     RapidApiError,
 )
 
+KNOWN_REELS_REACHED = "KNOWN_REELS_REACHED"
+
+SCAN_MODES = ("auto", "full", "incremental")
+
 logger = logging.getLogger("backend-facebook.scan")
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-scan"])
@@ -48,7 +52,16 @@ def _scan_response(row: dict) -> dict:
         "error": row.get("error"),
         "started_at": row.get("started_at"),
         "completed_at": row.get("completed_at"),
+        "scan_mode": row.get("scan_mode"),
     }
+
+
+def _resolve_mode(requested: str, source: dict) -> str:
+    if requested == "incremental":
+        return "incremental"
+    if requested in ("full", "initial"):
+        return "initial"
+    return "incremental" if source.get("initial_scan_completed") else "initial"
 
 
 def _client_from_settings() -> FacebookRapidApiClient:
@@ -96,8 +109,14 @@ async def _persist_reel(source_id: str, reel: dict) -> str:
 async def run_initial_scan(
     scan_run_id: str,
     transport: httpx.AsyncBaseTransport | None = None,
+    mode: str = "auto",
 ) -> None:
-    """Background worker: page Page ID -> RapidAPI -> Turso inventory."""
+    """Background worker: page Page ID -> RapidAPI -> Turso inventory.
+
+    mode auto: initial scan until initial_scan_completed, then incremental.
+    Incremental stops after K consecutive pages with zero new reels
+    (KNOWN_REELS_REACHED) — never on a single known reel (pins/reorders).
+    """
     run = await scan_runs.get_scan_run(scan_run_id)
     if run is None:
         logger.warning("scan run %s not found, skipping", scan_run_id)
@@ -120,6 +139,9 @@ async def run_initial_scan(
         return
 
     await scan_runs.mark_running(scan_run_id)
+    scan_mode = _resolve_mode(mode, source)
+    await scan_runs.set_scan_mode(scan_run_id, scan_mode)
+    known_stop = max(1, settings.FACEBOOK_INCREMENTAL_KNOWN_PAGES_STOP)
     discovered = inserted = existing = 0
     pages = 0
     stop_reason = END_OF_RESULTS
@@ -135,6 +157,7 @@ async def run_initial_scan(
         cursor: str | None = None
         seen_cursors: set[str] = set()
         seen_ids: set[str] = set()
+        known_streak = 0
         complete = False
 
         while True:
@@ -147,6 +170,7 @@ async def run_initial_scan(
             )
             pages += 1
 
+            inserted_this_page = 0
             chunk = max(1, settings.FACEBOOK_SCAN_WRITE_CHUNK)
             for i in range(0, len(page.items), chunk):
                 for reel in page.items[i : i + chunk]:
@@ -157,6 +181,7 @@ async def run_initial_scan(
                     state = await _persist_reel(source["id"], reel)
                     if state == "INSERTED":
                         inserted += 1
+                        inserted_this_page += 1
                     elif state == "ALREADY_EXISTS":
                         existing += 1
                 await scan_runs.update_progress(
@@ -165,6 +190,13 @@ async def run_initial_scan(
                     inserted_count=inserted,
                     existing_count=existing,
                 )
+
+            if scan_mode == "incremental":
+                known_streak = known_streak + 1 if inserted_this_page == 0 else 0
+                if known_streak >= known_stop:
+                    complete = True
+                    stop_reason = KNOWN_REELS_REACHED
+                    break
 
             if not page.has_more:
                 complete = True
@@ -261,8 +293,11 @@ async def run_initial_scan(
 async def start_scan(
     source_id: str,
     background: BackgroundTasks,
+    mode: str = "auto",
     _: None = Depends(require_admin),
 ) -> dict:
+    if mode not in SCAN_MODES:
+        raise _err(400, "INVALID_SCAN_MODE", "mode must be auto, full or incremental")
     source = await sources.get_source(source_id)
     if source is None:
         raise _err(404, "SOURCE_NOT_FOUND", "Source not found")
@@ -274,8 +309,11 @@ async def start_scan(
         raise _err(409, "SCAN_ALREADY_RUNNING", "A scan is already queued or running for this source")
 
     scan_run_id = f"scan_{uuid.uuid4().hex[:12]}"
-    await scan_runs.create_scan_run(scan_run_id=scan_run_id, source_id=source_id, status="queued")
-    background.add_task(run_initial_scan, scan_run_id)
+    effective_mode = _resolve_mode(mode, source)
+    await scan_runs.create_scan_run(
+        scan_run_id=scan_run_id, source_id=source_id, status="queued", scan_mode=effective_mode
+    )
+    background.add_task(run_initial_scan, scan_run_id, None, effective_mode)
     return {"scan_run_id": scan_run_id, "source_id": source_id, "status": "queued"}
 
 

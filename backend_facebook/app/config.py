@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     FACEBOOK_RAPIDAPI_MAX_REELS: int = 5000
     FACEBOOK_RAPIDAPI_TIMEOUT: float = 20.0
     FACEBOOK_SCAN_WRITE_CHUNK: int = 100
+    FACEBOOK_INCREMENTAL_KNOWN_PAGES_STOP: int = 2
 
 
 settings = Settings()

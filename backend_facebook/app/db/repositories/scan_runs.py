@@ -4,7 +4,7 @@ from ..client import get_client
 
 _COLUMNS = (
     "id, source_id, started_at, completed_at, discovered_count, inserted_count, "
-    "existing_count, crawl_complete, status, error, stop_reason"
+    "existing_count, crawl_complete, status, error, stop_reason, scan_mode"
 )
 
 
@@ -21,6 +21,7 @@ def _row_to_dict(r: Any) -> dict[str, Any]:
         "status": r[8],
         "error": r[9],
         "stop_reason": r[10] if len(r) > 10 else None,
+        "scan_mode": r[11] if len(r) > 11 else None,
     }
 
 
@@ -29,17 +30,19 @@ async def create_scan_run(
     scan_run_id: str,
     source_id: str,
     status: str = "running",
+    scan_mode: str = "initial",
 ) -> dict[str, Any]:
     client = get_client()
     await client.execute(
         """
-        INSERT INTO scan_runs (id, source_id, status)
-        VALUES (:id, :source_id, :status)
+        INSERT INTO scan_runs (id, source_id, status, scan_mode)
+        VALUES (:id, :source_id, :status, :scan_mode)
         """,
         {
             "id": scan_run_id,
             "source_id": source_id,
             "status": status,
+            "scan_mode": scan_mode,
         },
     )
     return {
@@ -52,6 +55,7 @@ async def create_scan_run(
         "crawl_complete": False,
         "error": None,
         "stop_reason": None,
+        "scan_mode": scan_mode,
     }
 
 
@@ -93,6 +97,14 @@ async def mark_running(scan_run_id: str) -> None:
     await client.execute(
         "UPDATE scan_runs SET status = 'running' WHERE id = :id AND status = 'queued'",
         {"id": scan_run_id},
+    )
+
+
+async def set_scan_mode(scan_run_id: str, scan_mode: str) -> None:
+    client = get_client()
+    await client.execute(
+        "UPDATE scan_runs SET scan_mode = :scan_mode WHERE id = :id",
+        {"scan_mode": scan_mode, "id": scan_run_id},
     )
 
 

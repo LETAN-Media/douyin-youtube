@@ -401,7 +401,7 @@ def test_invalid_schema(db, no_sleep) -> None:
 def test_scan_already_running_409(db, monkeypatch) -> None:
     src = make_source("l")
 
-    async def _noop(scan_run_id: str, transport=None) -> None:
+    async def _noop(scan_run_id: str, transport=None, mode: str = "auto") -> None:
         return None
 
     monkeypatch.setattr(scan_module, "run_initial_scan", _noop)

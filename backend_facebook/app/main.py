@@ -8,13 +8,17 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db.client import migrate
-from .routes import facebook, health, scan
+from .routes import facebook, health, inventory, scan
 
 logger = logging.getLogger("backend-facebook.main")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        await migrate()
+    except Exception as exc:
+        logger.warning("startup migrate skipped: %s", exc)
     # Never leave a scan_run stuck in queued/running across restarts.
     try:
         from .db.repositories import scan_runs
@@ -54,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(facebook.router)
     app.include_router(scan.router)
+    app.include_router(inventory.router)
 
     return app
 
