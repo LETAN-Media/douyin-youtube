@@ -1,12 +1,13 @@
 import logging
 import sys
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db.client import migrate
-from .routes import health
+from .routes import facebook, health
 
 
 def create_app() -> FastAPI:
@@ -17,6 +18,13 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        detail = exc.detail
+        if isinstance(detail, dict) and "error" in detail:
+            return JSONResponse(status_code=exc.status_code, content=detail)
+        return JSONResponse(status_code=exc.status_code, content={"detail": detail})
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()] or ["*"],
@@ -26,6 +34,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(facebook.router)
 
     return app
 
@@ -59,4 +68,3 @@ if __name__ == "__main__":
     main()
 
 app = create_app()
-

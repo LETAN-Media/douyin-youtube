@@ -40,15 +40,21 @@ async def migrate() -> None:
     )
     rows = await client.execute("SELECT version FROM schema_migrations ORDER BY id")
     applied = {row[0] for row in rows.rows}
-    statements = _load_schema()
-    version = "20241003_01"
-    if version not in applied:
-        for sql_stmt in statements:
+    if "20241003_01" not in applied:
+        for sql_stmt in _load_schema():
             if sql_stmt.strip():
                 await client.execute(sql_stmt)
         await client.execute(
             "INSERT INTO schema_migrations (version) VALUES (:version)",
-            {"version": version},
+            {"version": "20241003_01"},
+        )
+    if "20241003_02" not in applied:
+        for sql_stmt in _migration_02_statements(await _facebook_sources_notnull(client)):
+            if sql_stmt.strip():
+                await client.execute(sql_stmt)
+        await client.execute(
+            "INSERT INTO schema_migrations (version) VALUES (:version)",
+            {"version": "20241003_02"},
         )
 
 
@@ -70,7 +76,7 @@ def _load_schema() -> list[str]:
             id TEXT PRIMARY KEY,
             pipeline_id TEXT NOT NULL,
             page_id TEXT NOT NULL,
-            page_name TEXT NOT NULL,
+            page_name TEXT,
             reels_url TEXT,
             enabled INTEGER NOT NULL DEFAULT 1,
             initial_scan_completed INTEGER NOT NULL DEFAULT 0,
@@ -149,6 +155,65 @@ def _load_schema() -> list[str]:
         "CREATE INDEX IF NOT EXISTS idx_facebook_reels_source_id_status ON facebook_reels(source_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_facebook_reels_status_discovered_at ON facebook_reels(status, discovered_at)",
         "CREATE INDEX IF NOT EXISTS idx_facebook_sources_pipeline_id ON facebook_sources(pipeline_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_sources_pipeline_page ON facebook_sources(pipeline_id, page_id)",
         "CREATE INDEX IF NOT EXISTS idx_publications_destination_id_status ON publications(destination_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_scan_runs_source_id_started_at ON scan_runs(source_id, started_at)",
     ]
+
+
+async def _facebook_sources_notnull(client: Any) -> bool:
+    """True if existing facebook_sources.page_name still has a NOT NULL constraint."""
+    try:
+        info = await client.execute("PRAGMA table_info(facebook_sources)")
+    except Exception:
+        return False
+    for row in info.rows or []:
+        # PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
+        if len(row) >= 4 and row[1] == "page_name":
+            return bool(row[3])
+    return False
+
+
+def _migration_02_statements(page_name_notnull: bool) -> list[str]:
+    statements = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_sources_pipeline_page "
+        "ON facebook_sources(pipeline_id, page_id)",
+    ]
+    if page_name_notnull:
+        # SQLite cannot DROP a NOT NULL constraint; rebuild the table (data-preserving).
+        statements += [
+            """
+            CREATE TABLE IF NOT EXISTS facebook_sources_new (
+                id TEXT PRIMARY KEY,
+                pipeline_id TEXT NOT NULL,
+                page_id TEXT NOT NULL,
+                page_name TEXT,
+                reels_url TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                initial_scan_completed INTEGER NOT NULL DEFAULT 0,
+                crawl_complete INTEGER NOT NULL DEFAULT 0,
+                discovered_total INTEGER NOT NULL DEFAULT 0,
+                last_scan_at TEXT,
+                last_scan_status TEXT,
+                last_scan_error TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            """
+            INSERT OR IGNORE INTO facebook_sources_new
+                (id, pipeline_id, page_id, page_name, reels_url, enabled,
+                 initial_scan_completed, crawl_complete, discovered_total,
+                 last_scan_at, last_scan_status, last_scan_error, created_at, updated_at)
+            SELECT id, pipeline_id, page_id, page_name, reels_url, enabled,
+                 initial_scan_completed, crawl_complete, discovered_total,
+                 last_scan_at, last_scan_status, last_scan_error, created_at, updated_at
+            FROM facebook_sources
+            """,
+            "DROP TABLE facebook_sources",
+            "ALTER TABLE facebook_sources_new RENAME TO facebook_sources",
+            "CREATE INDEX IF NOT EXISTS idx_facebook_sources_pipeline_id ON facebook_sources(pipeline_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_sources_pipeline_page "
+            "ON facebook_sources(pipeline_id, page_id)",
+        ]
+    return statements
