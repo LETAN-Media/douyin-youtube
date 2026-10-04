@@ -534,3 +534,22 @@ def test_health(db) -> None:
     client = TestClient(create_app())
     r = client.get("/health")
     assert r.status_code == 200
+
+
+def test_ready_db_ok(db) -> None:
+    client = TestClient(create_app())
+    r = client.get("/ready")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["db"] == "ok" and body["ok"] is True
+
+
+def test_ready_no_secret_leak(db) -> None:
+    import app.routes.health as health_module
+
+    settings.RAPIDAPI_KEY = "SECRETKEY123"
+    try:
+        out = health_module._redact("connect SECRETKEY123 failed at tail SECRETKEY123")
+        assert "SECRETKEY123" not in out
+    finally:
+        settings.RAPIDAPI_KEY = "test_key_1"
