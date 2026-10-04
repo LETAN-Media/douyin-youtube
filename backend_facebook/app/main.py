@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
     try:
         await migrate()
     except Exception as exc:
-        logger.warning("startup migrate skipped: %s", exc)
+        logger.error("startup migrate FAILED: %s", exc)
     # Never leave a scan_run stuck in queued/running across restarts.
     try:
         from .db.repositories import scan_runs

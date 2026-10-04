@@ -38,6 +38,25 @@ async def test_migration_idempotent() -> None:
         teardown()
 
 
+async def test_migration_partial_state_recovers() -> None:
+    """Simulate production partial state: columns exist but version rows missing."""
+    from app.db.client import get_client
+
+    setup_env()
+    try:
+        await migrate()
+        client = get_client()
+        # drop one version row but keep the column (partial-state simulation)
+        await client.execute("DELETE FROM schema_migrations WHERE version = '20241003_04'")
+        await migrate()  # must not fail with duplicate-column
+        rows = await client.execute("SELECT version FROM schema_migrations ORDER BY id")
+        versions = [r[0] for r in rows.rows]
+        assert versions == ["20241003_01", "20241003_02", "20241003_03", "20241003_04"]
+        await migrate()  # fully idempotent afterwards
+    finally:
+        teardown()
+
+
 async def test_pipeline_repository() -> None:
     setup_env()
     try:

@@ -65,39 +65,41 @@ async def migrate() -> None:
     )
     rows = await client.execute("SELECT version FROM schema_migrations ORDER BY id")
     applied = {row[0] for row in rows.rows}
-    if "20241003_01" not in applied:
-        for sql_stmt in _load_schema():
+    await _apply_migration(client, applied, "20241003_01", _load_schema())
+    await _apply_migration(
+        client,
+        applied,
+        "20241003_02",
+        _migration_02_statements(await _facebook_sources_notnull(client)),
+    )
+    statements_03: list[str] = []
+    if not await _has_column(client, "scan_runs", "stop_reason"):
+        statements_03.append("ALTER TABLE scan_runs ADD COLUMN stop_reason TEXT")
+    await _apply_migration(client, applied, "20241003_03", statements_03)
+    statements_04: list[str] = []
+    if not await _has_column(client, "scan_runs", "scan_mode"):
+        statements_04.append("ALTER TABLE scan_runs ADD COLUMN scan_mode TEXT")
+    statements_04.append("UPDATE scan_runs SET scan_mode = 'initial' WHERE scan_mode IS NULL")
+    await _apply_migration(client, applied, "20241003_04", statements_04)
+
+
+async def _apply_migration(
+    client: Any, applied: set, version: str, statements: list[str]
+) -> None:
+    if version in applied:
+        logger.debug("migration %s already applied, skipping", version)
+        return
+    try:
+        for sql_stmt in statements:
             if sql_stmt.strip():
                 await client.execute(sql_stmt)
         await client.execute(
             "INSERT INTO schema_migrations (version) VALUES (:version)",
-            {"version": "20241003_01"},
+            {"version": version},
         )
-    if "20241003_02" not in applied:
-        for sql_stmt in _migration_02_statements(await _facebook_sources_notnull(client)):
-            if sql_stmt.strip():
-                await client.execute(sql_stmt)
-        await client.execute(
-            "INSERT INTO schema_migrations (version) VALUES (:version)",
-            {"version": "20241003_02"},
-        )
-    if "20241003_03" not in applied:
-        if not await _has_column(client, "scan_runs", "stop_reason"):
-            await client.execute("ALTER TABLE scan_runs ADD COLUMN stop_reason TEXT")
-        await client.execute(
-            "INSERT INTO schema_migrations (version) VALUES (:version)",
-            {"version": "20241003_03"},
-        )
-    if "20241003_04" not in applied:
-        if not await _has_column(client, "scan_runs", "scan_mode"):
-            await client.execute("ALTER TABLE scan_runs ADD COLUMN scan_mode TEXT")
-        await client.execute(
-            "UPDATE scan_runs SET scan_mode = 'initial' WHERE scan_mode IS NULL"
-        )
-        await client.execute(
-            "INSERT INTO schema_migrations (version) VALUES (:version)",
-            {"version": "20241003_04"},
-        )
+    except Exception as exc:
+        raise RuntimeError(f"migration {version} failed: {exc}") from exc
+    logger.info("migration %s applied", version)
 
 
 async def _has_column(client: Any, table: str, column: str) -> bool:
