@@ -3,6 +3,10 @@
 import { Card } from "@/components/ui";
 import { IconAlert, IconClock } from "@/components/icons";
 import type { FacebookPipeline } from "@/lib/facebook-mock";
+import {
+  FacebookPipelineFlowCard,
+  type FacebookFlowStep,
+} from "./FacebookPipelineFlow";
 
 function SummaryStat({ label, value, tone }: { label: string; value: number; tone?: string }) {
   const cls = tone === "red" ? "text-rose-600" : tone === "amber" ? "text-amber-600" : "text-slate-900";
@@ -16,6 +20,26 @@ function SummaryStat({ label, value, tone }: { label: string; value: number; ton
 
 export function FacebookOverview({ pipeline }: { pipeline: FacebookPipeline }) {
   const live = pipeline.enabled;
+  // Frontend mock until the backend exposes per-step state.
+  // Later: map API step states 1:1 into this array.
+  const steps: FacebookFlowStep[] = [
+    {
+      key: "source",
+      title: "Source",
+      subtitle: "Facebook Fanpage",
+      status: pipeline.sources > 0 ? "done" : "idle",
+    },
+    {
+      key: "inventory",
+      title: "Inventory",
+      subtitle: "Videos",
+      status: live ? "active" : "idle",
+    },
+    { key: "ai", title: "AI Metadata", subtitle: "Title / Desc / Tags", status: "idle" },
+    { key: "scheduler", title: "Scheduler", subtitle: "Slots", status: "idle" },
+    { key: "publisher", title: "Publisher", subtitle: "Upload", status: "idle" },
+    { key: "destination", title: "YouTube Destination", subtitle: "Channel", status: "idle" },
+  ];
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-x-4 gap-y-1 overflow-x-auto whitespace-nowrap rounded-2xl border border-slate-200/90 bg-white px-4 py-2 text-[13px] shadow-[0_1px_2px_rgba(15,23,42,0.05)] sm:px-5">
@@ -33,30 +57,9 @@ export function FacebookOverview({ pipeline }: { pipeline: FacebookPipeline }) {
         <SummaryStat label="FAILED" value={pipeline.failed} tone={pipeline.failed > 0 ? "red" : undefined} />
       </div>
 
+      <FacebookPipelineFlowCard steps={steps} />
+
       <Card className="p-0">
-        <div className="border-b border-slate-100 px-4 py-2.5 sm:px-5">
-          <p className="text-[11px] font-extrabold uppercase tracking-[0.12em] text-slate-400">
-            FACEBOOK PIPELINE FLOW
-          </p>
-        </div>
-        <div className="flex flex-col gap-1 p-4 sm:flex-row sm:items-center sm:justify-between sm:gap-0 sm:px-5">
-          {[
-            { label: "SOURCE", sub: "Facebook Fanpage" },
-            { label: "INVENTORY", sub: "Videos" },
-            { label: "AI METADATA", sub: "Title / Desc / Tags" },
-            { label: "SCHEDULER", sub: "Slots" },
-            { label: "PUBLISHER", sub: "Upload" },
-            { label: "YOUTUBE DESTINATION", sub: "Channel" },
-          ].map((step, idx) => (
-            <div key={step.label} className="flex items-center gap-2 sm:flex-col sm:items-center sm:gap-1">
-              <span className="text-[11px] font-black uppercase tracking-wider text-slate-900">{step.label}</span>
-              <span className="text-[11px] font-medium text-slate-500">{step.sub}</span>
-              {idx < 5 ? (
-                <span className="hidden text-slate-300 sm:inline">↓</span>
-              ) : null}
-            </div>
-          ))}
-        </div>
         <div className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500 sm:px-5">
           <div className="flex flex-wrap items-center gap-3">
             <span className="flex items-center gap-1.5">
