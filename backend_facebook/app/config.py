@@ -26,5 +26,21 @@ class Settings(BaseSettings):
     FACEBOOK_SCAN_WRITE_CHUNK: int = 100
     FACEBOOK_INCREMENTAL_KNOWN_PAGES_STOP: int = 2
 
+    # Primary Facebook media resolver (Task 6B). Key lives only in env/Northflank,
+    # never hard-coded, never logged, never committed.
+    FASTSAVER_BASE_URL: str = "https://api.fastsaver.io/v1"
+    FASTSAVER_API_KEY: str | None = None
+    FASTSAVER_TIMEOUT: float = 60.0
+    FACEBOOK_MEDIA_MAX_BYTES: int = 1_000_000_000
+
+    def require_fastsaver(self) -> tuple[str, str]:
+        """Return (base_url, api_key) or fail fast with a clear config error."""
+        if not self.FASTSAVER_API_KEY:
+            raise RuntimeError(
+                "FASTSAVER_API_KEY is not configured. "
+                "Set it in backend_facebook/.env or the Northflank environment."
+            )
+        return self.FASTSAVER_BASE_URL.rstrip("/"), self.FASTSAVER_API_KEY
+
 
 settings = Settings()
