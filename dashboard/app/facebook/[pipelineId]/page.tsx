@@ -10,6 +10,8 @@ import {
   getFacebookPublications,
   getFacebookAiSettings,
 } from "@/lib/facebook-mock";
+import { FacebookApiError, getFacebookFlowState } from "@/lib/facebook-api";
+import type { FacebookFlowState } from "@/lib/facebook-api";
 import { FacebookTabs, type FacebookTabKey } from "@/components/facebook/FacebookTabs";
 import { FacebookOverview } from "@/components/facebook/FacebookOverview";
 import { FacebookSources } from "@/components/facebook/FacebookSources";
@@ -71,6 +73,16 @@ export default async function FacebookPipelinePage({
   const publications = getFacebookPublications(pipelineId);
   const aiSettings = getFacebookAiSettings(pipelineId);
 
+  // Realtime flow-state from backend_facebook (server-side, token never exposed).
+  // On failure the Overview shows a degraded state — never mock fallback.
+  let initialFlow: FacebookFlowState | null = null;
+  let flowError: string | null = null;
+  try {
+    initialFlow = await getFacebookFlowState(pipelineId);
+  } catch (err) {
+    flowError = err instanceof FacebookApiError ? err.message : "Không tải được flow-state.";
+  }
+
   return (
     <Shell>
       <div className="w-full min-w-0">
@@ -103,7 +115,12 @@ export default async function FacebookPipelinePage({
 
         <div className="mt-4">
           {activeTab === "overview" ? (
-            <FacebookOverview pipeline={pipeline} />
+            <FacebookOverview
+              pipeline={pipeline}
+              pipelineId={pipelineId}
+              initialFlow={initialFlow}
+              flowError={flowError}
+            />
           ) : null}
           {activeTab === "sources" ? (
             <FacebookSources sources={sources} />

@@ -79,6 +79,19 @@ async def list_scan_runs(source_id: str) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows.rows]
 
 
+async def latest_scan_run(source_id: str) -> dict[str, Any] | None:
+    """Most recent scan run for a source (any status), or None if never scanned."""
+    client = get_client()
+    rows = await client.execute(
+        f"SELECT {_COLUMNS} FROM scan_runs WHERE source_id = :source_id "
+        "ORDER BY started_at DESC LIMIT 1",
+        {"source_id": source_id},
+    )
+    if not rows.rows:
+        return None
+    return _row_to_dict(rows.rows[0])
+
+
 async def get_active_scan_run(source_id: str) -> dict[str, Any] | None:
     """The single queued/running scan for a source, if any."""
     client = get_client()

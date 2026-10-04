@@ -16,16 +16,29 @@ import { FlowEdge, type FlowEdgeLook } from "@/components/pipeline/FlowConnector
 import { vPath } from "@/lib/flowLayout";
 
 // Visual pipeline flow for a Facebook pipeline.
-// Data-driven: pass `steps` (later mapped 1:1 from API); defaults are
-// frontend mock until the backend exposes per-step state.
+// Data-driven: pass `steps` mapped 1:1 from GET flow-state.
+// Backend statuses "running"/"not_configured" normalize to the existing
+// visual states (active/idle) so the UI system stays unchanged.
 export type FacebookFlowStatus = "idle" | "active" | "done" | "error";
+export type FacebookFlowBackendStatus =
+  | FacebookFlowStatus
+  | "running"
+  | "not_configured";
 
 export type FacebookFlowStep = {
   key: string;
   title: string;
   subtitle: string;
-  status: FacebookFlowStatus;
+  status: FacebookFlowStatus | FacebookFlowBackendStatus;
 };
+
+/** Backend -> visual mapping (single place, unit-testable via build). */
+export function normalizeFlowStatus(s: string): FacebookFlowStatus {
+  if (s === "running" || s === "active") return "active";
+  if (s === "done") return "done";
+  if (s === "error") return "error";
+  return "idle"; // idle + not_configured + unknown -> gray
+}
 
 const STEP_ICONS: Record<string, (size: number) => React.ReactNode> = {
   source: (s) => (
@@ -112,23 +125,24 @@ function edgeLook(a: FacebookFlowStatus, b: FacebookFlowStatus, gradientId: stri
 }
 
 function StepBox({ step }: { step: FacebookFlowStep }) {
-  const meta = STATUS_META[step.status];
+  const status = normalizeFlowStatus(step.status);
+  const meta = STATUS_META[status];
   const icon = (STEP_ICONS[step.key] ?? STEP_ICONS.inventory)(17);
   return (
     <div
       className={`flex w-full min-w-0 items-center gap-3 rounded-2xl border bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all duration-200 sm:p-3.5 ${
-        step.status === "active"
+        status === "active"
           ? "border-indigo-400 ring-2 ring-indigo-200"
-          : step.status === "error"
+          : status === "error"
             ? "border-rose-400 ring-2 ring-rose-200"
-            : step.status === "done"
+            : status === "done"
               ? "border-emerald-200"
               : "border-slate-200/90"
       }`}
       style={
-        step.status === "active"
+        status === "active"
           ? { filter: "drop-shadow(0 0 8px rgba(99,102,241,0.30))" }
-          : step.status === "error"
+          : status === "error"
             ? { filter: "drop-shadow(0 0 8px rgba(244,63,94,0.30))" }
             : undefined
       }
@@ -195,7 +209,14 @@ export function FacebookPipelineFlow({
           <div key={step.key} className="w-full min-w-0">
             <StepBox step={step} />
             {idx < steps.length - 1 ? (
-              <Connector d={d} look={edgeLook(step.status, steps[idx + 1].status, gradientId)} />
+              <Connector
+                d={d}
+                look={edgeLook(
+                  normalizeFlowStatus(step.status),
+                  normalizeFlowStatus(steps[idx + 1].status),
+                  gradientId,
+                )}
+              />
             ) : null}
           </div>
         ))}
