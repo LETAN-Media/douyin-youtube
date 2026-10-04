@@ -35,15 +35,15 @@ const FILTERS = [
   { key: "failed", label: "Lỗi" },
 ];
 
-function Thumbnail({ url, size = 80 }: { url: string | null; size?: number }) {
+function Thumbnail({ url, size = 80, fill = false }: { url: string | null; size?: number; fill?: boolean }) {
   const [errored, setErrored] = useState(false);
   if (!url || errored) {
     return (
       <div
-        className="flex items-center justify-center rounded-xl bg-slate-100"
-        style={{ width: size, height: size }}
+        className={`flex items-center justify-center rounded-xl bg-slate-100 ${fill ? "h-full w-full" : ""}`}
+        style={fill ? undefined : { width: size, height: size }}
       >
-        <IconDrama size={size > 60 ? 24 : 16} className="text-slate-400" />
+        <IconDrama size={fill ? 24 : size > 60 ? 24 : 16} className="text-slate-400" />
       </div>
     );
   }
@@ -55,7 +55,7 @@ function Thumbnail({ url, size = 80 }: { url: string | null; size?: number }) {
       referrerPolicy="no-referrer"
       onError={() => setErrored(true)}
       className="h-full w-full rounded-xl object-cover"
-      style={{ width: size, height: size }}
+      style={fill ? undefined : { width: size, height: size }}
     />
   );
 }
@@ -78,12 +78,10 @@ function MobileCard({
   const isProcessing = v.status === "processing" || v.status === "queued";
   return (
     <div
-      className={`flex gap-3 rounded-2xl border border-slate-200/90 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.05)] ${isSkipped ? "opacity-75" : ""}`}
+      className={`flex items-start gap-3 rounded-2xl border border-slate-200/90 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.05)] ${isSkipped ? "opacity-75" : ""}`}
     >
-      <div className="w-[110px] shrink-0">
-        <div className="aspect-[9/16] w-full overflow-hidden rounded-xl bg-slate-100">
-          <Thumbnail url={v.thumbnail_url} size={110} />
-        </div>
+      <div className="aspect-[9/16] w-[96px] shrink-0 overflow-hidden rounded-xl bg-slate-100">
+        <Thumbnail url={v.thumbnail_url} fill />
       </div>
       <div className="flex-1 min-w-0">
         <p className="line-clamp-2 text-sm font-bold text-slate-900">
