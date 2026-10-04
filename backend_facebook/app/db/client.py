@@ -10,16 +10,41 @@ logger = logging.getLogger("backend-facebook.db")
 _client: Client | None = None
 
 
+def normalize_db_url(url: str) -> str:
+    """Use HTTP transport for remote Turso (libsql:// needs ws, often blocked).
+
+    Local file: URLs are untouched (tests + local dev).
+    """
+    if url.startswith("libsql://"):
+        return "https://" + url[len("libsql://") :]
+    return url
+
+
 def get_client() -> Client:
     global _client
     if _client is None:
         if not settings.TURSO_DATABASE_URL:
             raise RuntimeError("TURSO_DATABASE_URL is not configured")
         _client = create_client(
-            settings.TURSO_DATABASE_URL,
+            normalize_db_url(settings.TURSO_DATABASE_URL),
             auth_token=settings.TURSO_AUTH_TOKEN,
         )
     return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None:
+        try:
+            close = getattr(_client, "close", None)
+            if close is not None:
+                result = close()
+                if result is not None:
+                    await result
+        except Exception as exc:
+            logger.warning("db client close skipped: %s", exc)
+        finally:
+            _client = None
 
 
 async def execute(sql: str, params: dict[str, Any] | None = None) -> Any:

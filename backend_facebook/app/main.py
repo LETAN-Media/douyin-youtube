@@ -29,6 +29,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("stale scan recovery skipped: %s", exc)
     yield
+    try:
+        from .db.client import close_client
+
+        await close_client()
+    except Exception as exc:
+        logger.warning("db close skipped: %s", exc)
 
 
 def create_app() -> FastAPI:
