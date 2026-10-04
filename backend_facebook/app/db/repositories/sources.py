@@ -146,3 +146,31 @@ async def list_sources(pipeline_id: str) -> list[dict[str, Any]]:
         }
         for r in rows.rows
     ]
+
+
+async def record_scan_finished(
+    source_id: str,
+    *,
+    status: str,
+    error: str | None,
+    discovered_total: int,
+    crawl_complete: bool,
+) -> None:
+    """Persist scan outcome on the source. Completion flags only set on full crawl."""
+    client = get_client()
+    if crawl_complete:
+        await client.execute(
+            "UPDATE facebook_sources SET last_scan_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+            "last_scan_status = :status, last_scan_error = :error, "
+            "discovered_total = :total, initial_scan_completed = 1, crawl_complete = 1, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+            {"status": status, "error": error, "total": discovered_total, "id": source_id},
+        )
+    else:
+        await client.execute(
+            "UPDATE facebook_sources SET last_scan_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+            "last_scan_status = :status, last_scan_error = :error, "
+            "discovered_total = :total, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+            {"status": status, "error": error, "total": discovered_total, "id": source_id},
+        )

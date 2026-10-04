@@ -1,5 +1,6 @@
 import logging
 import sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +8,23 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db.client import migrate
-from .routes import facebook, health
+from .routes import facebook, health, scan
+
+logger = logging.getLogger("backend-facebook.main")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Never leave a scan_run stuck in queued/running across restarts.
+    try:
+        from .db.repositories import scan_runs
+
+        recovered = await scan_runs.fail_stale_scan_runs()
+        if recovered:
+            logger.warning("marked %d stale scan run(s) as failed", recovered)
+    except Exception as exc:
+        logger.warning("stale scan recovery skipped: %s", exc)
+    yield
 
 
 def create_app() -> FastAPI:
@@ -16,6 +33,7 @@ def create_app() -> FastAPI:
         version=settings.VERSION,
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     @app.exception_handler(HTTPException)
@@ -35,6 +53,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(facebook.router)
+    app.include_router(scan.router)
 
     return app
 

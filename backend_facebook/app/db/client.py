@@ -56,6 +56,12 @@ async def migrate() -> None:
             "INSERT INTO schema_migrations (version) VALUES (:version)",
             {"version": "20241003_02"},
         )
+    if "20241003_03" not in applied:
+        await client.execute("ALTER TABLE scan_runs ADD COLUMN stop_reason TEXT")
+        await client.execute(
+            "INSERT INTO schema_migrations (version) VALUES (:version)",
+            {"version": "20241003_03"},
+        )
 
 
 def _load_schema() -> list[str]:

@@ -60,6 +60,9 @@ def _source_response(row: dict) -> dict:
         "initial_scan_completed": row.get("initial_scan_completed", False),
         "crawl_complete": row.get("crawl_complete", False),
         "discovered_total": row.get("discovered_total", 0),
+        "last_scan_at": row.get("last_scan_at"),
+        "last_scan_status": row.get("last_scan_status"),
+        "last_scan_error": row.get("last_scan_error"),
     }
 
 
