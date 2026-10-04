@@ -225,6 +225,16 @@ async def mark_reel_published(reel_db_id: str, youtube_video_id: str) -> None:
     )
 
 
+async def mark_reel_scheduled(reel_db_id: str, youtube_video_id: str) -> None:
+    """Mark reel as scheduled (uploaded private, waiting for publishAt)."""
+    client = get_client()
+    await client.execute(
+        "UPDATE facebook_reels SET status = 'scheduled', youtube_video_id = :youtube_video_id, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {"youtube_video_id": youtube_video_id, "id": reel_db_id},
+    )
+
+
 async def record_reel_error(reel_db_id: str, error: str) -> None:
     """Persist a failure note + bump retry_count. Never changes status."""
     client = get_client()

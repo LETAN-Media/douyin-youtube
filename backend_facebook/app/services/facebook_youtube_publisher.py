@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +47,25 @@ def validate_visibility(visibility: str | None) -> str:
             UPLOAD_FAILED, f"Invalid visibility: {visibility!r}."
         )
     return value
+
+
+def validate_publish_at(value: str | None) -> str | None:
+    """Accept RFC3339 UTC timestamps only. Reject past times."""
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        raise YouTubePublisherError(UPLOAD_FAILED, f"Invalid publishAt RFC3339 timestamp: {value!r}.")
+    if dt.tzinfo is None:
+        raise YouTubePublisherError(UPLOAD_FAILED, "publishAt must include timezone (RFC3339).")
+    now = datetime.now(timezone.utc)
+    if dt <= now:
+        raise YouTubePublisherError(UPLOAD_FAILED, "publishAt must be in the future.")
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def build_metadata(
@@ -157,6 +177,7 @@ def upload_video(
     description: str,
     visibility: str,
     *,
+    publish_at: str | None = None,
     youtube_factory: Callable[..., Any] | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> str:
@@ -164,6 +185,9 @@ def upload_video(
 
     Takes an already-loaded destination Credentials object (loaded + refreshed
     by the worker). Returns the YouTube video ID. Raises YouTubePublisherError.
+
+    When publish_at is provided (RFC3339 UTC), the video is uploaded as private
+    with status.publishAt set to the given timestamp.
     """
     path = Path(file_path)
     if not path.exists():
@@ -176,16 +200,21 @@ def upload_video(
     factory = youtube_factory or (lambda creds: build("youtube", "v3", credentials=creds, cache_discovery=False))
     youtube = factory(credentials)
 
+    status_body: dict[str, Any] = {
+        "privacyStatus": privacy,
+        "selfDeclaredMadeForKids": False,
+    }
+    if publish_at:
+        status_body["privacyStatus"] = "private"
+        status_body["publishAt"] = publish_at
+
     body = {
         "snippet": {
             "title": title[:100],
             "description": description[:5000],
             "categoryId": "22",
         },
-        "status": {
-            "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,
-        },
+        "status": status_body,
     }
     media = MediaFileUpload(str(path), chunksize=_CHUNK_SIZE, resumable=True)
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)

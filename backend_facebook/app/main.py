@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db.client import migrate
-from .routes import ai_metadata, facebook, flow, health, inventory, publish, scan, youtube
+from .routes import ai_metadata, facebook, flow, health, inventory, publish, scan, schedule, youtube
 
 logger = logging.getLogger("backend-facebook.main")
 
@@ -28,13 +28,42 @@ async def lifespan(app: FastAPI):
             logger.warning("marked %d stale scan run(s) as failed", recovered)
     except Exception as exc:
         logger.warning("stale scan recovery skipped: %s", exc)
+    scheduler_task = None
+    if settings.FACEBOOK_SCHEDULER_ENABLED:
+        scheduler_task = asyncio.create_task(_scheduler_loop())
+        logger.info(
+            "scheduler loop started (poll=%ss, window=%sm)",
+            settings.FACEBOOK_SCHEDULER_POLL_SECONDS,
+            settings.FACEBOOK_SCHEDULER_SLOT_WINDOW_MINUTES,
+        )
     yield
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("scheduler loop stop skipped: %s", exc)
     try:
         from .db.client import close_client
 
         await close_client()
     except Exception as exc:
         logger.warning("db close skipped: %s", exc)
+
+
+async def _scheduler_loop() -> None:
+    from .services.facebook_scheduler import run_scheduler_tick
+
+    while True:
+        try:
+            await run_scheduler_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("scheduler tick failed: %s", exc)
+        await asyncio.sleep(max(5, settings.FACEBOOK_SCHEDULER_POLL_SECONDS))
 
 
 def create_app() -> FastAPI:
@@ -68,6 +97,7 @@ def create_app() -> FastAPI:
     app.include_router(inventory.router)
     app.include_router(youtube.router)
     app.include_router(publish.router)
+    app.include_router(schedule.router)
     app.include_router(ai_metadata.router)
 
     return app

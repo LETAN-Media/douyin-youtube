@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from ..db.repositories import destinations, pipelines, publications, reels, scan_runs, sources
+from ..db.repositories import destinations, pipelines, publications, reels, scan_runs, schedules, sources
 from .facebook import _err
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-flow"])
@@ -73,6 +73,24 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
     else:
         publisher_status = "idle"
 
+    schedule = await schedules.get_schedule(pipeline_id)
+    if schedule is None or not schedule.get("enabled"):
+        scheduler_status = "not_configured"
+    else:
+        utc_now = datetime.now(timezone.utc)
+        tz = ZoneInfo(schedule.get("timezone") or "Asia/Ho_Chi_Minh")
+        now_local = utc_now.astimezone(tz)
+        date_iso = now_local.date().isoformat()
+        batch = await schedules.get_batch(pipeline_id, "", date_iso)
+        if batch and batch.get("status") in ("queued", "running"):
+            scheduler_status = "running"
+        elif batch and batch.get("status") == "failed":
+            scheduler_status = "error"
+        elif batch and batch.get("status") == "completed":
+            scheduler_status = "done"
+        else:
+            scheduler_status = "idle"
+
     return {
         "pipeline_id": pipeline_id,
         "live": bool(pipeline.get("enabled", True)),
@@ -85,7 +103,7 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
             "source": source_status,
             "inventory": inventory_status,
             "ai_metadata": "not_configured",
-            "scheduler": "not_configured",
+            "scheduler": scheduler_status,
             "publisher": publisher_status,
             "youtube_destination": youtube_destination_status,
         },

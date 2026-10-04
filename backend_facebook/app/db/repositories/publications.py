@@ -125,6 +125,39 @@ async def mark_processing(publication_id: str) -> None:
     )
 
 
+async def mark_scheduled(
+    publication_id: str,
+    youtube_video_id: str,
+    scheduled_publish_at: str | None = None,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+    hashtags: list[str] | None = None,
+    ai_model: str | None = None,
+) -> None:
+    """Mark publication as scheduled with YouTube video ID and publishAt."""
+    import json as _json
+
+    client = get_client()
+    await client.execute(
+        "UPDATE publications SET status = 'scheduled', youtube_video_id = :youtube_video_id, "
+        "scheduled_publish_at = :scheduled_publish_at, "
+        "youtube_title = :title, youtube_description = :description, "
+        "youtube_hashtags_json = :hashtags, ai_model = :ai_model, "
+        "started_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {
+            "youtube_video_id": youtube_video_id,
+            "scheduled_publish_at": scheduled_publish_at,
+            "title": title,
+            "description": description,
+            "hashtags": _json.dumps(hashtags or [], ensure_ascii=False),
+            "ai_model": ai_model,
+            "id": publication_id,
+        },
+    )
+
+
 async def mark_published(
     publication_id: str,
     youtube_video_id: str,

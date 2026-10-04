@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     TOOLNET_MAX_REQUESTS_PER_MINUTE: int = 30
     TOOLNET_MAX_TOKENS_PER_MINUTE: int = 8000
 
+    # Weekly smart scheduler (Task 9). One batch per day per pipeline/destination.
+    FACEBOOK_SCHEDULER_ENABLED: bool = False
+    FACEBOOK_SCHEDULER_BATCH_TIME: str = "06:00"
+    FACEBOOK_SCHEDULER_POLL_SECONDS: int = 30
+    SCHEDULER_JITTER_MINUTES: int = 0
+
     def require_toolnet(self) -> tuple[str, str, str]:
         """Return (base_url, api_key, model) or fail fast with a clear config error."""
         if not self.TOOLNET_AI_ENABLED:

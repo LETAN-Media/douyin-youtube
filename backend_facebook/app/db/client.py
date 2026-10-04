@@ -134,6 +134,73 @@ async def migrate() -> None:
         if not await _has_column(client, "publications", _col):
             statements_07.append(_ddl)
     await _apply_migration(client, applied, "20241003_07", statements_07)
+    statements_08: list[str] = [
+        """
+        CREATE TABLE IF NOT EXISTS facebook_publish_schedules (
+            id TEXT PRIMARY KEY,
+            pipeline_id TEXT NOT NULL UNIQUE,
+            timezone TEXT NOT NULL DEFAULT 'Asia/Ho_Chi_Minh',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            max_daily_publish INTEGER NOT NULL DEFAULT 5,
+            batch_time TEXT NOT NULL DEFAULT '06:00',
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS facebook_publish_schedule_slots (
+            id TEXT PRIMARY KEY,
+            schedule_id TEXT NOT NULL,
+            weekday INTEGER NOT NULL,
+            slot_time TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(schedule_id, weekday, slot_time)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS facebook_scheduler_runs (
+            id TEXT PRIMARY KEY,
+            pipeline_id TEXT NOT NULL,
+            destination_id TEXT NOT NULL,
+            scheduled_for TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            status TEXT NOT NULL DEFAULT 'queued',
+            publication_id TEXT,
+            reel_db_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(pipeline_id, destination_id, scheduled_for)
+        )
+        """,
+    ]
+    await _apply_migration(client, applied, "20241003_08", statements_08)
+    statements_09: list[str] = []
+    if not await _has_column(client, "publications", "scheduled_publish_at"):
+        statements_09.append("ALTER TABLE publications ADD COLUMN scheduled_publish_at TEXT")
+    statements_09.append(
+        """
+        CREATE TABLE IF NOT EXISTS facebook_scheduler_batches (
+            id TEXT PRIMARY KEY,
+            pipeline_id TEXT NOT NULL,
+            destination_id TEXT NOT NULL,
+            local_date TEXT NOT NULL,
+            scheduled_batch_time TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            status TEXT NOT NULL DEFAULT 'queued',
+            planned_count INTEGER NOT NULL DEFAULT 0,
+            uploaded_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(pipeline_id, destination_id, local_date)
+        )
+        """
+    )
+    await _apply_migration(client, applied, "20241003_09", statements_09)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:
