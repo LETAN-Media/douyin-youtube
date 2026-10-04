@@ -106,6 +106,37 @@ def extract_json_object(text: str) -> dict:
     raise MetadataError(INVALID_RESPONSE, "Model did not return a JSON object.")
 
 
+def parse_chat_body(raw_text: str) -> tuple[dict, str, dict]:
+    """Parse a chat-completions body; tolerates SSE trailers like `data: [DONE]`.
+
+    Returns (body, content, usage). Raises MetadataError(INVALID_RESPONSE).
+    """
+    text = (raw_text or "").strip()
+    try:
+        body = json.loads(text)
+    except Exception:
+        body = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("data:"):
+                continue
+            try:
+                candidate = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(candidate, dict):
+                body = candidate
+                break
+    if not isinstance(body, dict):
+        raise MetadataError(INVALID_RESPONSE, "ToolNet response has no usable content.")
+    try:
+        content = body["choices"][0]["message"]["content"]
+        usage = body.get("usage") or {}
+    except Exception:
+        raise MetadataError(INVALID_RESPONSE, "ToolNet response has no usable content.")
+    return body, content, usage
+
+
 def validate_metadata(data: dict, *, context_empty: bool = False) -> tuple[str, str, list[str]]:
     try:
         title = str(data.get("title") or "").strip()
@@ -217,9 +248,9 @@ class FacebookMetadataGenerator:
             if resp.status_code != 200:
                 raise MetadataError(UPSTREAM_ERROR, f"ToolNet failed ({resp.status_code}).")
             try:
-                body = resp.json()
-                content = body["choices"][0]["message"]["content"]
-                usage = body.get("usage") or {}
+                _, content, usage = parse_chat_body(resp.text)
+            except MetadataError:
+                raise
             except Exception:
                 raise MetadataError(INVALID_RESPONSE, "ToolNet response has no usable content.")
             data = extract_json_object(content if isinstance(content, str) else "")

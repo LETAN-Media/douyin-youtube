@@ -426,3 +426,24 @@ def test_legacy_column_renamed(db) -> None:
     names = asyncio.run(_go())
     assert "source_hash" in names
     assert "source_caption_hash" not in names
+
+
+def test_sse_trailer_body_parsed(db) -> None:
+    from app.services.facebook_ai_metadata import parse_chat_body
+
+    raw = json.dumps(make_completion(json.dumps(GOOD_JSON))) + "\ndata: [DONE]\n\n"
+    body, content, usage = parse_chat_body(raw)
+    assert body["choices"][0]["message"]["content"]
+    assert usage.get("total_tokens") == 30
+    with pytest.raises(MetadataError):
+        parse_chat_body("data: [DONE]\n\n")
+
+
+def test_generate_with_sse_trailer(db) -> None:
+    raw = json.dumps(make_completion(json.dumps(GOOD_JSON))) + "\ndata: [DONE]\n\n"
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=raw)
+
+    out = asyncio.run(gen_with(transport_for(handler)).generate("r1", "caption"))
+    assert out.title == GOOD_JSON["title"]
