@@ -82,13 +82,15 @@ async def migrate() -> None:
             {"version": "20241003_02"},
         )
     if "20241003_03" not in applied:
-        await client.execute("ALTER TABLE scan_runs ADD COLUMN stop_reason TEXT")
+        if not await _has_column(client, "scan_runs", "stop_reason"):
+            await client.execute("ALTER TABLE scan_runs ADD COLUMN stop_reason TEXT")
         await client.execute(
             "INSERT INTO schema_migrations (version) VALUES (:version)",
             {"version": "20241003_03"},
         )
     if "20241003_04" not in applied:
-        await client.execute("ALTER TABLE scan_runs ADD COLUMN scan_mode TEXT")
+        if not await _has_column(client, "scan_runs", "scan_mode"):
+            await client.execute("ALTER TABLE scan_runs ADD COLUMN scan_mode TEXT")
         await client.execute(
             "UPDATE scan_runs SET scan_mode = 'initial' WHERE scan_mode IS NULL"
         )
@@ -96,6 +98,14 @@ async def migrate() -> None:
             "INSERT INTO schema_migrations (version) VALUES (:version)",
             {"version": "20241003_04"},
         )
+
+
+async def _has_column(client: Any, table: str, column: str) -> bool:
+    try:
+        info = await client.execute(f"PRAGMA table_info({table})")
+    except Exception:
+        return False
+    return any(len(row) > 1 and row[1] == column for row in (info.rows or []))
 
 
 def _load_schema() -> list[str]:
