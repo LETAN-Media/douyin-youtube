@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     TOOLNET_MODEL: str | None = None
     TOOLNET_AI_ENABLED: bool = False
     TOOLNET_TIMEOUT: float = 60.0
+    TOOLNET_MAX_REQUESTS_PER_MINUTE: int = 30
+    TOOLNET_MAX_TOKENS_PER_MINUTE: int = 8000
 
     def require_toolnet(self) -> tuple[str, str, str]:
         """Return (base_url, api_key, model) or fail fast with a clear config error."""

@@ -1,3 +1,9 @@
+from .ai_rate_limit import (
+    AiRateLimiter,
+    RateLimitExceeded,
+    get_shared_limiter,
+    reset_shared_limiter,
+)
 from .facebook_ai_metadata import (
     FacebookMetadataGenerator,
     GeneratedMetadata,
@@ -61,6 +67,10 @@ from .facebook_url import (
 )
 
 __all__ = [
+    "AiRateLimiter",
+    "RateLimitExceeded",
+    "get_shared_limiter",
+    "reset_shared_limiter",
     "ALLOWED_HOSTS",
     "SOURCE_TYPE",
     "InvalidFacebookUrlError",

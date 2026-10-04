@@ -61,6 +61,15 @@ def fresh_db() -> None:
     asyncio.run(migrate())
 
 
+@pytest.fixture(autouse=True)
+def _reset_limiter():
+    from app.services import ai_rate_limit
+
+    ai_rate_limit.reset_shared_limiter()
+    yield
+    ai_rate_limit.reset_shared_limiter()
+
+
 @pytest.fixture()
 def db():
     prev = {
@@ -447,3 +456,74 @@ def test_generate_with_sse_trailer(db) -> None:
 
     out = asyncio.run(gen_with(transport_for(handler)).generate("r1", "caption"))
     assert out.title == GOOD_JSON["title"]
+
+
+# ---------- local rate limiter ----------
+
+
+def test_limiter_request_cap() -> None:
+    from app.services.ai_rate_limit import AiRateLimiter, RateLimitExceeded
+
+    now = [1000.0]
+    lim = AiRateLimiter(2, 100000, clock=lambda: now[0])
+    asyncio.run(lim.reserve(10))
+    asyncio.run(lim.reserve(10))
+    try:
+        asyncio.run(lim.reserve(10))
+        raise AssertionError("should raise")
+    except RateLimitExceeded as e:
+        assert e.retry_after_s > 0
+    now[0] += 61.0
+    asyncio.run(lim.reserve(10))  # window slid
+
+
+def test_limiter_token_cap_and_settle() -> None:
+    from app.services.ai_rate_limit import AiRateLimiter, RateLimitExceeded
+
+    now = [1000.0]
+    lim = AiRateLimiter(30, 100, clock=lambda: now[0])
+    asyncio.run(lim.reserve(90))
+    try:
+        asyncio.run(lim.reserve(20))
+        raise AssertionError("should raise")
+    except RateLimitExceeded:
+        pass
+    asyncio.run(lim.settle(90, 40))  # actual usage smaller
+    asyncio.run(lim.reserve(20))  # fits now
+    asyncio.run(lim.release(20))
+    snap = lim.snapshot()
+    assert snap["tokens_used"] == 40
+
+
+def test_generate_blocked_by_local_limit(db, monkeypatch) -> None:
+    from app.services import ai_rate_limit
+
+    monkeypatch.setattr(settings, "TOOLNET_MAX_REQUESTS_PER_MINUTE", 1)
+    monkeypatch.setattr(settings, "TOOLNET_MAX_TOKENS_PER_MINUTE", 8000)
+    ai_rate_limit.reset_shared_limiter()
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json=make_completion(json.dumps(GOOD_JSON)))
+
+    t = transport_for(handler)
+    asyncio.run(gen_with(t).generate("r1", "caption one"))
+    with pytest.raises(MetadataError) as exc:
+        asyncio.run(gen_with(t).generate("r2", "caption two"))
+    assert exc.value.code == "TOOLNET_RATE_LIMITED"
+    assert calls["n"] == 1  # second call never hit the provider
+    ai_rate_limit.reset_shared_limiter()
+
+
+def test_generate_records_actual_usage(db, monkeypatch) -> None:
+    from app.services import ai_rate_limit
+
+    monkeypatch.setattr(settings, "TOOLNET_MAX_REQUESTS_PER_MINUTE", 30)
+    monkeypatch.setattr(settings, "TOOLNET_MAX_TOKENS_PER_MINUTE", 100000)
+    ai_rate_limit.reset_shared_limiter()
+    t = transport_for(lambda req: httpx.Response(200, json=make_completion(json.dumps(GOOD_JSON))))
+    asyncio.run(gen_with(t).generate("r1", "caption"))
+    lim = ai_rate_limit.get_shared_limiter(30, 100000)
+    assert lim.snapshot()["tokens_used"] == 30  # actual usage, not estimate
+    ai_rate_limit.reset_shared_limiter()

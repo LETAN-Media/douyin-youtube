@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from .ai_rate_limit import RateLimitExceeded, get_shared_limiter
+
 logger = logging.getLogger("backend-facebook.ai-metadata")
 
 CONFIG_MISSING = "TOOLNET_CONFIG_MISSING"
@@ -219,49 +221,68 @@ class FacebookMetadataGenerator:
 
         last_error: MetadataError | None = None
         started = time.monotonic()
-        for attempt in range(MAX_RETRIES + 1):
-            try:
-                async with httpx.AsyncClient(
-                    transport=self._transport, timeout=self.config.timeout
-                ) as client:
-                    resp = await client.post(
-                        f"{self.config.base_url}/chat/completions",
-                        headers=self._headers(),
-                        json=payload,
-                    )
-            except (httpx.TimeoutException,) as exc:
-                last_error = MetadataError(TIMEOUT, f"ToolNet timeout: {type(exc).__name__}.")
-                continue
-            except (httpx.ConnectError, httpx.NetworkError) as exc:
-                last_error = MetadataError(UPSTREAM_ERROR, f"ToolNet unreachable: {type(exc).__name__}.")
-                break
-            if resp.status_code == 401:
-                raise MetadataError(AUTH_FAILED, "ToolNet credential invalid (401).")
-            if resp.status_code == 429:
-                last_error = MetadataError(RATE_LIMITED, "ToolNet rate limited (429).")
-                continue
-            if resp.status_code == 400:
-                raise MetadataError(INVALID_RESPONSE, "ToolNet rejected the request (400).")
-            if 500 <= resp.status_code <= 599:
-                last_error = MetadataError(UPSTREAM_ERROR, f"ToolNet error ({resp.status_code}).")
-                continue
-            if resp.status_code != 200:
-                raise MetadataError(UPSTREAM_ERROR, f"ToolNet failed ({resp.status_code}).")
-            try:
-                _, content, usage = parse_chat_body(resp.text)
-            except MetadataError:
-                raise
-            except Exception:
-                raise MetadataError(INVALID_RESPONSE, "ToolNet response has no usable content.")
-            data = extract_json_object(content if isinstance(content, str) else "")
-            title, description, hashtags = validate_metadata(data, context_empty=context_empty)
-            latency = round(time.monotonic() - started, 1)
-            logger.info(
-                "metadata generated reel=%s model=%s latency=%ss", reel_id, self.config.model, latency
-            )
-            return GeneratedMetadata(
-                title=title, description=description, hashtags=hashtags,
-                model=self.config.model, usage=usage if isinstance(usage, dict) else {},
-            )
+        estimate = len(json.dumps(payload)) // 4 + int(payload.get("max_tokens") or 0)
+        from ..config import settings as _settings
+
+        limiter = get_shared_limiter(
+            _settings.TOOLNET_MAX_REQUESTS_PER_MINUTE,
+            _settings.TOOLNET_MAX_TOKENS_PER_MINUTE,
+        )
+        try:
+            await limiter.reserve(estimate)
+        except RateLimitExceeded as exc:
+            raise MetadataError(RATE_LIMITED, str(exc))
+        settled = False
+        try:
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    async with httpx.AsyncClient(
+                        transport=self._transport, timeout=self.config.timeout
+                    ) as client:
+                        resp = await client.post(
+                            f"{self.config.base_url}/chat/completions",
+                            headers=self._headers(),
+                            json=payload,
+                        )
+                except (httpx.TimeoutException,) as exc:
+                    last_error = MetadataError(TIMEOUT, f"ToolNet timeout: {type(exc).__name__}.")
+                    continue
+                except (httpx.ConnectError, httpx.NetworkError) as exc:
+                    last_error = MetadataError(UPSTREAM_ERROR, f"ToolNet unreachable: {type(exc).__name__}.")
+                    break
+                if resp.status_code == 401:
+                    raise MetadataError(AUTH_FAILED, "ToolNet credential invalid (401).")
+                if resp.status_code == 429:
+                    last_error = MetadataError(RATE_LIMITED, "ToolNet rate limited (429).")
+                    continue
+                if resp.status_code == 400:
+                    raise MetadataError(INVALID_RESPONSE, "ToolNet rejected the request (400).")
+                if 500 <= resp.status_code <= 599:
+                    last_error = MetadataError(UPSTREAM_ERROR, f"ToolNet error ({resp.status_code}).")
+                    continue
+                if resp.status_code != 200:
+                    raise MetadataError(UPSTREAM_ERROR, f"ToolNet failed ({resp.status_code}).")
+                try:
+                    _, content, usage = parse_chat_body(resp.text)
+                except MetadataError:
+                    raise
+                except Exception:
+                    raise MetadataError(INVALID_RESPONSE, "ToolNet response has no usable content.")
+                data = extract_json_object(content if isinstance(content, str) else "")
+                title, description, hashtags = validate_metadata(data, context_empty=context_empty)
+                latency = round(time.monotonic() - started, 1)
+                logger.info(
+                    "metadata generated reel=%s model=%s latency=%ss", reel_id, self.config.model, latency
+                )
+                actual = usage.get("total_tokens") if isinstance(usage, dict) else None
+                await limiter.settle(estimate, int(actual) if isinstance(actual, (int, float)) else None)
+                settled = True
+                return GeneratedMetadata(
+                    title=title, description=description, hashtags=hashtags,
+                    model=self.config.model, usage=usage if isinstance(usage, dict) else {},
+                )
+        finally:
+            if not settled:
+                await limiter.release(estimate)
         assert last_error is not None
         raise last_error
