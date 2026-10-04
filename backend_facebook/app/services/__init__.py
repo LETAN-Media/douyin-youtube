@@ -1,3 +1,9 @@
+from .facebook_ai_metadata import (
+    FacebookMetadataGenerator,
+    GeneratedMetadata,
+    MetadataError,
+    ToolNetConfig,
+)
 from .facebook_download_worker import DownloadJobResult, run_download_next
 from .facebook_publish_worker import PublishJobResult, run_publish_next
 from .facebook_youtube_publisher import (
@@ -90,6 +96,10 @@ __all__ = [
     "cleanup_job_dir",
     "job_dir",
     "sanitize_job_id",
+    "FacebookMetadataGenerator",
+    "GeneratedMetadata",
+    "MetadataError",
+    "ToolNetConfig",
     "DownloadJobResult",
     "run_download_next",
     "PublishJobResult",

@@ -5,7 +5,9 @@ import { Badge } from "@/components/ui";
 import { IconBack } from "@/components/icons";
 import {
   FacebookApiError,
+  getFacebookAiStats,
   getFacebookPipelineDetail,
+  getFacebookReelAiMetadata,
   listFacebookDestinations,
   listFacebookInventory,
   listFacebookPublications,
@@ -109,6 +111,25 @@ export default async function FacebookPipelinePage({
   const initialFlow: FacebookFlowState | null = flowRes.ok ? flowRes.v : null;
   const flowError: string | null = flowRes.ok ? null : flowRes.e;
 
+  // AI metadata stats + one generated sample for the AI tab (server-side).
+  let aiStats: Awaited<ReturnType<typeof getFacebookAiStats>> | null = null;
+  let aiStatsError: string | null = null;
+  let aiSample: Awaited<ReturnType<typeof getFacebookReelAiMetadata>> = null;
+  try {
+    aiStats = await getFacebookAiStats(pipelineId);
+    if (inventoryRes.ok) {
+      for (const item of inventoryRes.v.items.slice(0, 8)) {
+        const meta = await getFacebookReelAiMetadata(item.id);
+        if (meta && meta.status === "generated") {
+          aiSample = meta;
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    aiStatsError = err instanceof Error ? err.message : "Không tải được AI metadata.";
+  }
+
   return (
     <Shell>
       <div className="w-full min-w-0">
@@ -184,7 +205,13 @@ export default async function FacebookPipelinePage({
               <TabError message={publicationsRes.e} />
             )
           ) : null}
-          {activeTab === "ai-processing" ? <FacebookAiProcessing /> : null}
+          {activeTab === "ai-processing" ? (
+            aiStats ? (
+              <FacebookAiProcessing stats={aiStats} sample={aiSample} />
+            ) : (
+              <TabError message={aiStatsError ?? "Không tải được AI metadata."} />
+            )
+          ) : null}
         </div>
       </div>
     </Shell>

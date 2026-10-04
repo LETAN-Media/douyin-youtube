@@ -33,6 +33,29 @@ class Settings(BaseSettings):
     FASTSAVER_TIMEOUT: float = 60.0
     FACEBOOK_MEDIA_MAX_BYTES: int = 1_000_000_000
 
+    # ToolNet AI (OpenAI-compatible). Never log the key, never commit it.
+    TOOLNET_BASE_URL: str | None = None
+    TOOLNET_API_KEY: str | None = None
+    TOOLNET_MODEL: str | None = None
+    TOOLNET_AI_ENABLED: bool = False
+    TOOLNET_TIMEOUT: float = 60.0
+
+    def require_toolnet(self) -> tuple[str, str, str]:
+        """Return (base_url, api_key, model) or fail fast with a clear config error."""
+        if not self.TOOLNET_AI_ENABLED:
+            raise RuntimeError("TOOLNET_AI_ENABLED is not true.")
+        missing = []
+        if not (self.TOOLNET_BASE_URL or "").strip():
+            missing.append("TOOLNET_BASE_URL")
+        if not (self.TOOLNET_API_KEY or "").strip():
+            missing.append("TOOLNET_API_KEY")
+        if not (self.TOOLNET_MODEL or "").strip():
+            missing.append("TOOLNET_MODEL")
+        if missing:
+            raise RuntimeError(f"Missing ToolNet AI config: {', '.join(missing)}")
+        base = (self.TOOLNET_BASE_URL or "").strip().rstrip("/")
+        return base, (self.TOOLNET_API_KEY or "").strip(), (self.TOOLNET_MODEL or "").strip()
+
     # Google OAuth (YouTube destinations). Read ONLY from existing env:
     # GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET. Never logged, never committed.
     GOOGLE_CLIENT_ID: str | None = None

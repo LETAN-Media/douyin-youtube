@@ -229,3 +229,36 @@ export async function triggerFacebookScan(sourceId: string): Promise<{ scan_run_
     { method: "POST" },
   );
 }
+
+export interface FacebookAiStatsDto {
+  generated: number;
+  failed: number;
+  pending: number;
+  total_reels: number;
+}
+
+export interface FacebookAiMetadataDto {
+  reel_db_id: string;
+  status: string;
+  metadata: { title: string | null; description: string | null; hashtags: string[] };
+  model: string | null;
+}
+
+export async function getFacebookAiStats(pipelineId: string): Promise<FacebookAiStatsDto> {
+  return fbFetch<FacebookAiStatsDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/ai-metadata/stats`,
+  );
+}
+
+export async function getFacebookReelAiMetadata(
+  reelDbId: string,
+): Promise<FacebookAiMetadataDto | null> {
+  try {
+    return await fbFetch<FacebookAiMetadataDto>(
+      `/api/facebook/reels/${encodeURIComponent(reelDbId)}/ai-metadata`,
+    );
+  } catch (err) {
+    if (err instanceof FacebookApiError && err.status === 404) return null;
+    throw err;
+  }
+}
