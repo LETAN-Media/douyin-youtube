@@ -312,10 +312,17 @@ export async function listFacebookPublications(
   );
 }
 
-export async function startFacebookOAuth(destinationId: string): Promise<{ authorization_url: string }> {
+export async function startFacebookOAuth(
+  destinationId: string,
+  returnTo?: string,
+): Promise<{ authorization_url: string }> {
   return fbFetch<{ authorization_url: string }>(
     `/api/facebook/youtube-destinations/${encodeURIComponent(destinationId)}/oauth/start`,
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(returnTo ? { return_to: returnTo } : {}),
+    },
   );
 }
 

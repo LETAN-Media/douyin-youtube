@@ -152,7 +152,27 @@ def _fetch_channel(flow: Any) -> tuple[str, str]:
     return channel["id"], channel["snippet"]["title"]
 
 
-async def create_authorization_url(destination_id: str, pipeline_id: str) -> str:
+def sanitize_return_to(value: str | None) -> str | None:
+    """Whitelist an OAuth return path. Only in-dashboard /facebook/* paths.
+
+    Anything else (absolute URLs, protocol-relative, backslashes, other
+    routes) is rejected to None — the callback then shows the default page.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    if not v.startswith("/facebook/"):
+        return None
+    if v.startswith("//") or "\\" in v or "://" in v:
+        return None
+    if len(v) > 200:
+        return None
+    return v
+
+
+async def create_authorization_url(
+    destination_id: str, pipeline_id: str, return_to: str | None = None
+) -> str:
     """Create one-time state and return the Google consent URL."""
     destination = await destinations_repo.get_destination(destination_id)
     if destination is None or destination.get("pipeline_id") != pipeline_id:
@@ -166,6 +186,7 @@ async def create_authorization_url(destination_id: str, pipeline_id: str) -> str
     await auth_repo.create_oauth_state(
         state=state, destination_id=destination_id,
         pipeline_id=pipeline_id, expires_at=expires_at,
+        return_to=sanitize_return_to(return_to),
     )
 
     from google_auth_oauthlib.flow import Flow
@@ -281,4 +302,5 @@ async def complete_oauth(
         "pipeline_id": destination["pipeline_id"],
         "channel_id": channel_id,
         "channel_name": channel_name,
+        "return_to": sanitize_return_to(stored.get("return_to")),
     }

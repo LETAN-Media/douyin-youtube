@@ -5,11 +5,14 @@ import { FacebookApiError, startFacebookOAuth } from "@/lib/facebook-api";
 // authorization URL. Token stays server-side; browser redirects to Google.
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as { destinationId?: string };
+    const body = (await request.json()) as { destinationId?: string; return_to?: string };
     if (!body.destinationId) {
       return NextResponse.json({ error: "Thiếu destinationId." }, { status: 400 });
     }
-    const data = await startFacebookOAuth(body.destinationId);
+    const data = await startFacebookOAuth(
+      body.destinationId,
+      typeof body.return_to === "string" ? body.return_to : undefined,
+    );
     return NextResponse.json(data);
   } catch (err: unknown) {
     const status = err instanceof FacebookApiError ? err.status : 500;

@@ -160,6 +160,7 @@ def test_callback_success_saves_channel(db) -> None:
         "pipeline_id": "pl_yt",
         "channel_id": "UC123",
         "channel_name": "My Channel",
+        "return_to": None,
     }
     dest = asyncio.run(destinations.get_destination("ytd_1"))
     assert dest["connected"] is True
@@ -506,3 +507,101 @@ def test_no_secret_code_token_in_error_paths(db, caplog) -> None:
     for secret in ("supersecretcode123", "test-google-client-secret", "ya29.new-access"):
         assert secret not in blob, secret
     assert "provider_error=invalid_grant" in str(exc.value)
+
+
+
+# ---------- return_to (manual publish connect flow) ----------
+
+
+def test_sanitize_return_to_whitelist() -> None:
+    from app.services.facebook_youtube_oauth import sanitize_return_to
+
+    assert sanitize_return_to("/facebook/manual") == "/facebook/manual"
+    assert sanitize_return_to("/facebook/pl_123") == "/facebook/pl_123"
+    assert sanitize_return_to("https://evil.example/x") is None
+    assert sanitize_return_to("//evil.example/x") is None
+    assert sanitize_return_to("/other/page") is None
+    assert sanitize_return_to("javascript:alert(1)") is None
+    assert sanitize_return_to(None) is None
+    assert sanitize_return_to("") is None
+
+
+def test_oauth_start_stores_return_to(db) -> None:
+    _setup_pipeline_with_destination()
+    asyncio.run(yt_oauth.create_authorization_url("ytd_1", "pl_yt", return_to="/facebook/manual"))
+
+    async def _check():
+        from app.db.client import get_client
+
+        rows = await get_client().execute(
+            "SELECT return_to FROM youtube_oauth_states WHERE destination_id = 'ytd_1' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        return rows.rows
+
+    rows = asyncio.run(_check())
+    assert rows and rows[0][0] == "/facebook/manual"
+
+
+def test_oauth_start_drops_evil_return_to(db) -> None:
+    _setup_pipeline_with_destination()
+    asyncio.run(
+        yt_oauth.create_authorization_url(
+            "ytd_1", "pl_yt", return_to="https://evil.example/steal"
+        )
+    )
+
+    async def _check():
+        from app.db.client import get_client
+
+        rows = await get_client().execute(
+            "SELECT return_to FROM youtube_oauth_states WHERE destination_id = 'ytd_1' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        return rows.rows
+
+    rows = asyncio.run(_check())
+    assert rows and rows[0][0] is None
+
+
+def test_callback_redirects_to_manual(db) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    _setup_pipeline_with_destination()
+    client = TestClient(create_app())
+    info = {
+        "destination_id": "ytd_1",
+        "pipeline_id": "pl_yt",
+        "channel_id": "UC_X",
+        "channel_name": "X",
+        "return_to": "/facebook/manual",
+    }
+    with patch.object(yt_oauth, "complete_oauth", new=AsyncMock(return_value=info)):
+        r = client.get(
+            "/api/facebook/youtube/oauth/callback",
+            params={"state": "st_x", "code": "code_x"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303, r.text
+    assert r.headers["location"].endswith("/facebook/manual?youtube_connected=1")
+
+
+def test_callback_without_return_to_renders_html(db) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    _setup_pipeline_with_destination()
+    client = TestClient(create_app())
+    info = {
+        "destination_id": "ytd_1",
+        "pipeline_id": "pl_yt",
+        "channel_id": "UC_X",
+        "channel_name": "X",
+        "return_to": None,
+    }
+    with patch.object(yt_oauth, "complete_oauth", new=AsyncMock(return_value=info)):
+        r = client.get(
+            "/api/facebook/youtube/oauth/callback",
+            params={"state": "st_x", "code": "code_x"},
+        )
+    assert r.status_code == 200, r.text
+    assert "YouTube connected" in r.text

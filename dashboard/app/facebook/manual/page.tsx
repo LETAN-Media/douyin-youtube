@@ -1,8 +1,23 @@
 import Link from "next/link";
 import { Shell } from "@/components/Shell";
 import { FacebookManualPublish } from "@/components/facebook/FacebookManualPublish";
+import { listFacebookPipelines } from "@/lib/facebook-api";
 
-export default function FacebookManualPage() {
+export default async function FacebookManualPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  let pipelines: { id: string; name: string }[] = [];
+  try {
+    const all = await listFacebookPipelines();
+    pipelines = all.map((p) => ({ id: p.id, name: p.name }));
+  } catch {
+    pipelines = [];
+  }
+  const params = (await searchParams) ?? {};
+  const justConnected = params.youtube_connected === "1";
+
   return (
     <Shell>
       <div className="w-full min-w-0">
@@ -34,7 +49,10 @@ export default function FacebookManualPage() {
           </span>
         </div>
         <div className="mt-4">
-          <FacebookManualPublish />
+          <FacebookManualPublish
+            initialPipelines={pipelines}
+            justConnected={justConnected}
+          />
         </div>
       </div>
     </Shell>

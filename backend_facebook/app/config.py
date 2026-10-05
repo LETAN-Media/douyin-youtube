@@ -105,6 +105,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
     FACEBOOK_YOUTUBE_CALLBACK_URL: str | None = None
+    # Dashboard origin used only to redirect back after YouTube OAuth when
+    # the flow was started with a whitelisted return_to path.
+    DASHBOARD_BASE_URL: str = "https://douyin.toolnet.tech"
 
     def require_fastsaver(self) -> tuple[str, str]:
         """Return (base_url, api_key) or fail fast with a clear config error."""

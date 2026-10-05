@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardHeader, Badge, btnSmall, inputCls, labelCls } from "@/components/ui";
 
 // Local shapes (same-origin fetch only — never import the server API client).
@@ -90,10 +91,34 @@ async function readError(res: Response): Promise<{ message: string; code: string
   };
 }
 
-export function FacebookManualPublish() {
+type PipelineOption = {
+  id: string;
+  name: string;
+};
+
+type Destination = {
+  id: string;
+  connected?: boolean;
+  channel_name?: string | null;
+};
+
+export function FacebookManualPublish({
+  initialPipelines = [],
+  justConnected = false,
+}: {
+  initialPipelines?: PipelineOption[];
+  justConnected?: boolean;
+}) {
+  const router = useRouter();
   const [channels, setChannels] = useState<Channel[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Channel | null>(null);
+  const [connectedToast, setConnectedToast] = useState(false);
+
+  // Connect-YouTube flow state.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   const [url, setUrl] = useState("");
   const [resolving, setResolving] = useState(false);
@@ -155,6 +180,73 @@ export function FacebookManualPublish() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [loadChannels, loadHistory]);
+
+  // Returning from Google OAuth: refresh the channel list, toast once,
+  // and clean the query param so a reload doesn't re-toast.
+  const justConnectedRef = useRef(justConnected);
+  useEffect(() => {
+    if (!justConnectedRef.current) return;
+    justConnectedRef.current = false;
+    setConnectedToast(true);
+    void (async () => {
+      await loadChannels();
+      router.replace("/facebook/manual");
+      window.setTimeout(() => setConnectedToast(false), 8000);
+    })();
+  }, [loadChannels, router]);
+
+  async function handleConnect(pipelineId: string) {
+    if (connecting) return;
+    setConnecting(pipelineId);
+    setConnectError(null);
+    try {
+      // Duplicate safety: reuse a pending (unconnected) destination of this
+      // pipeline instead of creating a new one on every retry.
+      const listRes = await fetch(
+        `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/youtube-destinations`,
+        { cache: "no-store" },
+      );
+      if (!listRes.ok) {
+        const e = await readError(listRes);
+        throw new Error(e.message || "Không tải được destinations.");
+      }
+      const list = (await listRes.json()) as Destination[];
+      const pending = Array.isArray(list) ? list.find((d) => !d.connected) : undefined;
+      let destinationId = pending?.id;
+      if (!destinationId) {
+        const createRes = await fetch(
+          `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/youtube-destinations`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ visibility: "public", enabled: true }),
+          },
+        );
+        if (!createRes.ok) {
+          const e = await readError(createRes);
+          throw new Error(e.message || "Không tạo được destination.");
+        }
+        const created = (await createRes.json()) as Destination;
+        destinationId = created.id;
+      }
+      if (!destinationId) throw new Error("Không tạo được destination.");
+      const oauthRes = await fetch("/api/facebook/oauth/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ destinationId, return_to: "/facebook/manual" }),
+      });
+      if (!oauthRes.ok) {
+        const e = await readError(oauthRes);
+        throw new Error(e.message || "Không bắt đầu được OAuth.");
+      }
+      const data = (await oauthRes.json()) as { authorization_url?: string };
+      if (!data.authorization_url) throw new Error("Không nhận được authorization_url.");
+      window.location.href = data.authorization_url;
+    } catch (err) {
+      setConnectError(err instanceof Error ? err.message : "Không kết nối được YouTube.");
+      setConnecting(null);
+    }
+  }
 
   function pickChannel(ch: Channel) {
     setSelected(ch);
@@ -347,6 +439,11 @@ export function FacebookManualPublish() {
           icon={<span aria-hidden>📤</span>}
         />
         <div className="space-y-3 p-4 sm:px-5">
+          {connectedToast ? (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-800">
+              Đã kết nối YouTube thành công.
+            </div>
+          ) : null}
           {loadError ? (
             <p className="text-xs text-rose-600">{loadError}</p>
           ) : null}
@@ -354,10 +451,20 @@ export function FacebookManualPublish() {
             <p className="text-sm text-slate-500">Đang tải danh sách kênh…</p>
           ) : channels.length === 0 ? (
             <div className="p-6 text-center">
-              <p className="text-sm font-semibold text-slate-900">Chưa có kênh YouTube nào được kết nối</p>
-              <p className="mt-1 text-xs text-slate-500">
-                Vào pipeline → Destinations → Kết nối YouTube trước.
-              </p>
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-xl font-extrabold text-slate-400">
+                ▶
+              </div>
+              <p className="mt-3 text-sm font-semibold text-slate-900">Chưa có kênh YouTube nào được kết nối</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setConnectError(null);
+                  setPickerOpen(true);
+                }}
+                className="mt-3 inline-flex min-h-[44px] items-center rounded-2xl bg-indigo-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-sm transition hover:bg-indigo-500"
+              >
+                + Kết nối YouTube
+              </button>
             </div>
           ) : (
             <>
@@ -414,11 +521,72 @@ export function FacebookManualPublish() {
                 >
                   ← Chọn kênh khác
                 </button>
-              ) : null}
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConnectError(null);
+                    setPickerOpen(true);
+                  }}
+                  className="inline-flex min-h-[44px] items-center rounded-2xl border border-dashed border-indigo-300 bg-indigo-50/50 px-4 py-2 text-xs font-extrabold text-indigo-700 transition hover:bg-indigo-50"
+                >
+                  + Kết nối thêm YouTube
+                </button>
+              )}
             </>
           )}
         </div>
       </Card>
+
+      {pickerOpen ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-4 backdrop-blur-[2px] sm:items-center">
+          <div className="fade-up w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-base font-extrabold tracking-tight text-slate-900">
+              Kênh YouTube này dùng cấu hình AI của pipeline nào?
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">
+              Destination thuộc về pipeline đã chọn. Metadata AI sẽ dùng đúng settings pipeline đó.
+            </p>
+            {connectError ? (
+              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-600">
+                {connectError}
+              </div>
+            ) : null}
+            <div className="mt-4 space-y-2">
+              {initialPipelines.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  Chưa có pipeline nào. Tạo pipeline trước rồi quay lại.
+                </p>
+              ) : (
+                initialPipelines.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => void handleConnect(p.id)}
+                    disabled={connecting !== null}
+                    className="flex min-h-[44px] w-full items-center justify-between gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-left text-sm font-bold text-slate-800 shadow-sm transition hover:border-indigo-300 hover:bg-indigo-50/40 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    <span className="truncate">{p.name}</span>
+                    <span className="shrink-0 text-xs text-slate-400">
+                      {connecting === p.id ? "Đang tạo link…" : "→"}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (connecting) return;
+                setPickerOpen(false);
+              }}
+              className="mt-4 w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600"
+            >
+              Đóng
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {selected ? (
         <Card>

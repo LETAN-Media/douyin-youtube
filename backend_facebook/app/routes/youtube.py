@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
@@ -55,21 +55,26 @@ async def list_youtube_destinations(pipeline_id: str) -> list[dict]:
 
 
 @router.post("/youtube-destinations/{destination_id}/oauth/start")
-async def oauth_start(destination_id: str, _: None = Depends(require_admin)) -> dict:
+async def oauth_start(
+    destination_id: str,
+    body: dict | None = None,
+    _: None = Depends(require_admin),
+) -> dict:
     destination = await destinations.get_destination(destination_id)
     if destination is None:
         raise _err(404, "DESTINATION_NOT_FOUND", "Destination not found")
+    return_to = (body or {}).get("return_to") if isinstance(body, dict) else None
     try:
         url = await yt_oauth.create_authorization_url(
-            destination_id, destination["pipeline_id"]
+            destination_id, destination["pipeline_id"], return_to=return_to
         )
     except RuntimeError as exc:
         raise _err(400, "OAUTH_START_FAILED", str(exc) or "OAuth start failed")
     return {"authorization_url": url}
 
 
-@router.get("/youtube/oauth/callback", response_class=HTMLResponse)
-async def oauth_callback(state: str = "", code: str = "") -> str:
+@router.get("/youtube/oauth/callback")
+async def oauth_callback(state: str = "", code: str = ""):
     if not state or not code:
         raise _err(400, "OAUTH_INVALID_STATE", "Missing state or code")
     try:
@@ -83,8 +88,17 @@ async def oauth_callback(state: str = "", code: str = "") -> str:
             else "OAUTH_FAILED"
         )
         raise _err(400, code_name, message)
+    return_to = yt_oauth.sanitize_return_to(info.get("return_to"))
+    if return_to:
+        from ..config import settings as app_settings
+
+        base = (app_settings.DASHBOARD_BASE_URL or "").rstrip("/")
+        sep = "&" if "?" in return_to else "?"
+        return RedirectResponse(
+            f"{base}{return_to}{sep}youtube_connected=1", status_code=303
+        )
     channel = (info["channel_name"] or "").replace("<", "&lt;").replace(">", "&gt;")
-    return (
+    return HTMLResponse(
         "<html><body style='font-family:sans-serif;text-align:center;padding:48px'>"
         "<h2>YouTube connected</h2>"
         f"<p>Channel <b>{channel}</b> linked successfully. You can close this tab.</p>"

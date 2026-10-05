@@ -300,6 +300,10 @@ async def migrate() -> None:
         "CREATE INDEX IF NOT EXISTS idx_manual_pub_status ON facebook_manual_publications(status, created_at)",
     ]
     await _apply_migration(client, applied, "20241005_15", statements_15)
+    statements_16: list[str] = []
+    if not await _has_column(client, "youtube_oauth_states", "return_to"):
+        statements_16.append("ALTER TABLE youtube_oauth_states ADD COLUMN return_to TEXT")
+    await _apply_migration(client, applied, "20241005_16", statements_16)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:
