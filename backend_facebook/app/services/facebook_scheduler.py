@@ -4,6 +4,11 @@ Tick: enabled schedules -> local batch_time -> exactly-once daily batch ->
 sequential enqueue up to max_daily_publish with YouTube publishAt slots.
 
 Global publisher worker handles the actual processing.
+
+Both the automatic tick and the manual "run batch now" button funnel through
+`execute_daily_batch`. Only the batch_time gate differs (`force_now`).
+Publish-slot selection, the daily limit, AI-ready selection and durable
+enqueue are shared, so the two paths cannot drift apart.
 """
 
 from __future__ import annotations
@@ -29,6 +34,47 @@ _SLOT_RE = schedules._SLOT_RE if hasattr(schedules, "_SLOT_RE") else None
 if _SLOT_RE is None:
     import re as _re
     _SLOT_RE = _re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+# Reasons returned when nothing (or nothing new) was enqueued. Surfaced to the UI.
+REASON_MESSAGES: dict[str, str] = {
+    "NO_DESTINATION": "Chưa có kênh YouTube đã kết nối cho pipeline này.",
+    "NO_FUTURE_SLOTS": "Hôm nay không còn khung giờ phát hành nào ở tương lai.",
+    "NO_AI_READY_INVENTORY": "Chưa có video nào sẵn sàng (cần AI metadata khớp cấu hình).",
+    "DAILY_LIMIT_REACHED": "Đã đạt giới hạn phát hành trong ngày.",
+    "BATCH_ALREADY_COMPLETED": "Batch hôm nay đã chạy xong.",
+    "BATCH_IN_PROGRESS": "Batch hôm nay đang chạy.",
+    "NOT_BEFORE_BATCH_TIME": "Chưa tới giờ chạy batch tự động.",
+    "SCHEDULE_NOT_FOUND": "Chưa cấu hình lịch cho pipeline này.",
+    "ENQUEUE_ERROR": "Lỗi khi đưa video vào hàng đợi.",
+}
+
+
+def reason_message(code: str | None) -> str | None:
+    if not code:
+        return None
+    return REASON_MESSAGES.get(code, code)
+
+
+def _batch_result(
+    *,
+    batch_id: str | None = None,
+    batch_status: str | None = None,
+    videos_enqueued: int = 0,
+    slots: list[dict[str, str]] | None = None,
+    reason: str | None = None,
+    date: str | None = None,
+) -> dict:
+    return {
+        "ok": videos_enqueued > 0,
+        "batch_id": batch_id,
+        "batch_status": batch_status,
+        "videos_enqueued": videos_enqueued,
+        "slots": slots or [],
+        "reason": reason,
+        "message": reason_message(reason) if videos_enqueued == 0 else None,
+        "date": date,
+    }
 
 
 def _now_utc(now=None) -> datetime:
@@ -88,6 +134,18 @@ async def _pick_destination(pipeline_id: str) -> tuple[dict | None, str | None]:
     return usable[0], None
 
 
+async def _resolve_destination(pipeline_id: str, destination_id: str) -> tuple[dict | None, str | None]:
+    """Validate the destination belongs to the pipeline and is usable."""
+    dest = await destinations.get_destination(destination_id)
+    if dest is None or dest.get("pipeline_id") != pipeline_id:
+        return None, "NO_DESTINATION"
+    if not dest.get("enabled", True):
+        return None, "NO_DESTINATION"
+    if not dest.get("connected") or not dest.get("channel_id"):
+        return None, "NO_DESTINATION"
+    return dest, None
+
+
 async def _ensure_batch(
     pipeline_id: str, destination_id: str, local_date: str, scheduled_batch_time: str
 ) -> tuple[str, bool]:
@@ -106,142 +164,195 @@ async def _ensure_batch(
         return batch_id, False
 
 
+async def execute_daily_batch(
+    pipeline_id: str,
+    destination_id: str,
+    *,
+    force_now: bool = False,
+    now=None,
+    transport: httpx.AsyncBaseTransport | None = None,
+    youtube_factory=None,
+) -> dict:
+    """Plan and durably enqueue today's daily batch. Does no heavy work.
+
+    `force_now=True` (manual "run batch now") bypasses ONLY the batch_time gate.
+    It never bypasses:
+      - publish slot selection (always future-only, never backfilled)
+      - max_daily_publish
+      - the AI-ready requirement
+      - destination readiness
+      - publish queue concurrency (enforced by the global publisher worker)
+
+    `force_now=False` (automatic tick) additionally waits for batch_time.
+    """
+    utc_now = _now_utc(now)
+    schedule = await schedules.get_schedule(pipeline_id)
+    if schedule is None:
+        return _batch_result(reason="SCHEDULE_NOT_FOUND")
+
+    try:
+        tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
+    except Exception:
+        logger.warning("invalid scheduler timezone for %s", pipeline_id)
+        return _batch_result(reason="SCHEDULE_NOT_FOUND")
+
+    now_local = utc_now.astimezone(tz)
+    date_iso = now_local.date().isoformat()
+    batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
+
+    destination, dest_error = await _resolve_destination(pipeline_id, destination_id)
+    if destination is None:
+        return _batch_result(reason=dest_error or "NO_DESTINATION", date=date_iso)
+
+    # Automatic gate, evaluated BEFORE any batch row is inserted so the daily
+    # UNIQUE(pipeline_id, destination_id, local_date) row is not burned early.
+    if not force_now:
+        batch_hour, batch_minute = _parse_time(batch_time)
+        batch_dt = now_local.replace(hour=batch_hour, minute=batch_minute, second=0, microsecond=0)
+        if now_local < batch_dt:
+            return _batch_result(reason="NOT_BEFORE_BATCH_TIME", date=date_iso)
+
+    # Slots are future-only for BOTH paths: force_now must not backfill.
+    slots = _future_slots_for_today(schedule, now_local)
+    if not slots:
+        return _batch_result(reason="NO_FUTURE_SLOTS", date=date_iso)
+
+    max_daily = schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY
+    quota = min(max_daily, len(slots))
+
+    existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
+    if existing is not None:
+        batch_status = existing["status"]
+        # Terminal-for-today states: never run the same day's batch twice.
+        if batch_status in ("completed", "running"):
+            return _batch_result(
+                batch_id=existing["id"],
+                batch_status=batch_status,
+                videos_enqueued=(existing["uploaded_count"] or 0) if batch_status == "completed" else 0,
+                reason="BATCH_ALREADY_COMPLETED" if batch_status == "completed" else "BATCH_IN_PROGRESS",
+                date=date_iso,
+            )
+        # 'no_work' / 'failed' stay re-runnable: inventory or AI metadata may have
+        # changed since. Already-enqueued reels left status 'new' -> 'queued' and
+        # publications.get_or_create dedups on (reel, destination), so a re-run
+        # cannot create a duplicate.
+        batch_id = existing["id"]
+        already_enqueued = existing["uploaded_count"] or 0
+        planned_before = existing["planned_count"] or 0
+    else:
+        batch_id, claimed = await _ensure_batch(pipeline_id, destination_id, date_iso, batch_time)
+        if not claimed:
+            return _batch_result(reason="BATCH_ALREADY_COMPLETED", date=date_iso)
+        already_enqueued = 0
+        planned_before = 0
+
+    remaining = quota - already_enqueued
+    if remaining <= 0:
+        return _batch_result(
+            batch_id=batch_id,
+            batch_status=(existing or {}).get("status", "planned"),
+            reason="DAILY_LIMIT_REACHED",
+            date=date_iso,
+        )
+
+    await schedules.mark_batch_started(batch_id)
+    await schedules.update_batch_planned(batch_id, max(planned_before, already_enqueued + remaining))
+
+    enqueued = 0
+    failed = 0
+    used_slots: list[dict[str, str]] = []
+    failure_reasons: list[str] = []
+
+    for offset in range(remaining):
+        slot_index = already_enqueued + offset
+        slot_time, utc_publish_at = slots[slot_index]
+        try:
+            ok, failure = await _enqueue_one_video(
+                pipeline_id, destination_id, date_iso, batch_time,
+                slot_time, utc_publish_at, schedule,
+                batch_id=batch_id, transport=transport, youtube_factory=youtube_factory,
+                slot_index=slot_index,
+            )
+        except Exception:
+            logger.exception("slot %s failed in batch %s", slot_time, batch_id)
+            ok, failure = False, "ENQUEUE_ERROR"
+        if ok:
+            enqueued += 1
+            used_slots.append({"slot": slot_time, "publish_at": utc_publish_at})
+        else:
+            failed += 1
+            if failure:
+                failure_reasons.append(failure)
+
+    final_status = "completed" if enqueued > 0 else "no_work"
+    await schedules.mark_batch_finished(
+        batch_id, final_status,
+        uploaded_count=already_enqueued + enqueued,
+        failed_count=failed,
+    )
+
+    if enqueued == 0:
+        reason = failure_reasons[0] if failure_reasons else "NO_AI_READY_INVENTORY"
+        logger.info("batch %s enqueued nothing (reason=%s)", batch_id, reason)
+        return _batch_result(
+            batch_id=batch_id,
+            batch_status=final_status,
+            reason=reason,
+            date=date_iso,
+        )
+
+    logger.info(
+        "batch %s enqueued %d video(s) into publish queue: %s",
+        batch_id, enqueued, [s["slot"] for s in used_slots],
+    )
+    return _batch_result(
+        batch_id=batch_id,
+        batch_status=final_status,
+        videos_enqueued=enqueued,
+        slots=used_slots,
+        date=date_iso,
+    )
+
+
 async def run_scheduler_tick(
     now=None,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     youtube_factory=None,
 ) -> dict[str, int]:
-    """One lightweight tick. Only triggers daily batches whose time has passed.
-    
-    Also processes manually created batches with status='queued'.
-    """
+    """One lightweight automatic tick. Still respects batch_time."""
     utc_now = _now_utc(now)
     result = {"checked": 0, "batches_started": 0, "videos_enqueued": 0, "failed": 0}
 
-    # First, process any manually created batches that are queued
     for schedule in await schedules.list_enabled_schedules():
         result["checked"] += 1
         pipeline_id = schedule["pipeline_id"]
         try:
-            tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
+            ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
         except Exception:
             logger.warning("invalid scheduler timezone for %s", pipeline_id)
             continue
 
-        now_local = utc_now.astimezone(tz)
-        date_iso = now_local.date().isoformat()
-        batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
-        
         destination, dest_error = await _pick_destination(pipeline_id)
         if destination is None:
             continue
-        destination_id = destination["id"]
 
-        # Check for existing batch (including manually created ones)
-        existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
-        if existing is not None:
-            # If batch is queued but not started, and batch_time has passed, run it
-            if existing["status"] == "queued":
-                batch_dt = now_local.replace(
-                    hour=int(batch_time.split(":")[0]),
-                    minute=int(batch_time.split(":")[1]),
-                    second=0, microsecond=0
-                )
-                if now_local >= batch_dt:
-                    result["batches_started"] += 1
-                    try:
-                        enqueued = await _run_daily_batch(
-                            pipeline_id, destination_id, date_iso, batch_time, schedule,
-                            batch_id=existing["id"], transport=transport, youtube_factory=youtube_factory,
-                        )
-                        result["videos_enqueued"] += enqueued
-                    except Exception as exc:
-                        logger.exception("daily batch failed for %s", pipeline_id)
-                        result["failed"] += 1
-                        try:
-                            await schedules.mark_batch_finished(existing["id"], "failed", error=str(exc))
-                        except Exception:
-                            pass
-            continue
-
-        # Normal automatic batch creation (batch_time has passed)
-        if not isinstance(batch_time, str) or ":" not in batch_time:
-            continue
-        batch_hour, batch_minute = _parse_time(batch_time)
-        batch_dt = now_local.replace(hour=batch_hour, minute=batch_minute, second=0, microsecond=0)
-
-        if now_local < batch_dt:
-            continue
-
-        batch_id, claimed = await _ensure_batch(pipeline_id, destination_id, date_iso, batch_time)
-        if not claimed:
-            continue
-
-        result["batches_started"] += 1
         try:
-            enqueued = await _run_daily_batch(
-                pipeline_id, destination_id, date_iso, batch_time, schedule,
-                batch_id=batch_id, transport=transport, youtube_factory=youtube_factory,
+            outcome = await execute_daily_batch(
+                pipeline_id, destination["id"],
+                force_now=False, now=utc_now,
+                transport=transport, youtube_factory=youtube_factory,
             )
-            result["videos_enqueued"] += enqueued
-        except Exception as exc:
+        except Exception:
             logger.exception("daily batch failed for %s", pipeline_id)
             result["failed"] += 1
-            try:
-                await schedules.mark_batch_finished(batch_id, "failed", error=str(exc))
-            except Exception:
-                pass
+            continue
+
+        if outcome["videos_enqueued"]:
+            result["batches_started"] += 1
+            result["videos_enqueued"] += outcome["videos_enqueued"]
 
     return result
-
-
-async def _run_daily_batch(
-    pipeline_id: str,
-    destination_id: str,
-    local_date: str,
-    batch_time: str,
-    schedule: dict,
-    *,
-    batch_id: str,
-    transport: httpx.AsyncBaseTransport | None = None,
-    youtube_factory=None,
-) -> int:
-    """Run one daily batch. Returns number of videos successfully enqueued."""
-    await schedules.mark_batch_started(batch_id)
-    max_daily = schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY
-    slots = _future_slots_for_today(schedule, _now_utc().astimezone(ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)))
-    if not slots:
-        await schedules.mark_batch_finished(batch_id, "completed", planned_count=0, uploaded_count=0, failed_count=0)
-        return 0
-
-    quota = min(max_daily, len(slots))
-    await schedules.update_batch_planned(batch_id, quota)
-
-    enqueued_count = 0
-    failed_count = 0
-    for idx in range(quota):
-        slot_time, utc_publish_at = slots[idx]
-        try:
-            ok = await _enqueue_one_video(
-                pipeline_id, destination_id, local_date, batch_time,
-                slot_time, utc_publish_at, schedule,
-                batch_id=batch_id, transport=transport, youtube_factory=youtube_factory,
-                slot_index=idx,
-            )
-            if ok:
-                enqueued_count += 1
-            else:
-                failed_count += 1
-        except Exception as exc:
-            logger.exception("video %d failed in batch %s", idx + 1, batch_id)
-            failed_count += 1
-
-    status = "completed" if enqueued_count > 0 else "no_work"
-    await schedules.mark_batch_finished(
-        batch_id, status, uploaded_count=enqueued_count, failed_count=failed_count,
-    )
-    return enqueued_count
 
 
 async def _enqueue_one_video(
@@ -257,19 +368,18 @@ async def _enqueue_one_video(
     transport: httpx.AsyncBaseTransport | None = None,
     youtube_factory=None,
     slot_index: int = 0,
-) -> bool:
-    """Enqueue exactly one video for one slot. Returns True on success."""
+) -> tuple[bool, str | None]:
+    """Enqueue exactly one video for one slot. Returns (ok, failure_reason)."""
+    from ..db.repositories import reels as reels_repo
+
     destination = await destinations.get_destination(destination_id)
     if destination is None:
         logger.error("destination missing for pipeline %s", pipeline_id)
-        return False
+        return False, "NO_DESTINATION"
 
-    # Check if AI is enabled for this pipeline
-    from ..db.repositories import ai_settings as ai_settings_repo
     pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
     ai_enabled = pipe_ai_settings.get("enabled", True)
-    
-    # Get config_hash for AI metadata matching
+
     model = settings.TOOLNET_MODEL or ""
     config_hash = ai_settings_repo.compute_config_hash(
         enabled=pipe_ai_settings.get("enabled", True),
@@ -281,31 +391,26 @@ async def _enqueue_one_video(
         model=model,
     ) if ai_enabled else None
 
-    # Find a reel with AI metadata ready
-    from ..db.repositories import reels as reels_repo
-    if ai_enabled:
-        # AI-first: only pick reels with generated AI metadata matching current config
-        reels_with_ai = await reels_repo.list_ai_ready_reels(pipeline_id, config_hash)
-        if not reels_with_ai:
-            logger.info("no AI-ready reels for pipeline %s (AI enabled)", pipeline_id)
-            return False
-        
-        # Try to claim one of the AI-ready reels
-        reel = None
-        claimed = False
-        for candidate in reels_with_ai:
-            claimed = await reels_repo.advance_status(candidate["id"], "new", "queued")
-            if claimed:
-                reel = candidate
-                break
-        
-        if not claimed or reel is None:
-            logger.info("no claimable AI-ready reel for pipeline %s", pipeline_id)
-            return False
-    else:
-        # AI disabled: do NOT pick any reel. Require AI for scheduling.
+    if not ai_enabled:
+        # AI disabled: scheduling requires AI, so nothing is picked.
         logger.info("AI disabled for pipeline %s, skipping scheduling", pipeline_id)
-        return False
+        return False, "NO_AI_READY_INVENTORY"
+
+    # AI-first: only pick reels with generated AI metadata matching current config.
+    reels_with_ai = await reels_repo.list_ai_ready_reels(pipeline_id, config_hash)
+    if not reels_with_ai:
+        logger.info("no AI-ready reels for pipeline %s", pipeline_id)
+        return False, "NO_AI_READY_INVENTORY"
+
+    reel = None
+    for candidate in reels_with_ai:
+        if await reels_repo.advance_status(candidate["id"], "new", "queued"):
+            reel = candidate
+            break
+
+    if reel is None:
+        logger.info("no claimable AI-ready reel for pipeline %s", pipeline_id)
+        return False, "NO_AI_READY_INVENTORY"
 
     reel_db_id = reel["id"]
     reel_id = reel["reel_id"]
@@ -316,18 +421,15 @@ async def _enqueue_one_video(
             publication_id=publication_id, reel_db_id=reel_db_id, destination_id=destination_id
         )
         if publication["status"] == "published":
-            await reels.release_claim(reel_db_id)
-            return True
+            await reels_repo.release_claim(reel_db_id)
+            return True, None
 
-        # Persist scheduled_publish_at (utc_publish_at) on the publication
+        # Persist scheduled_publish_at (utc_publish_at) on the publication.
         await publications.set_scheduled_publish_at(publication["id"], utc_publish_at)
 
-        # Publication stays 'queued' - global publisher will mark 'processing' when it claims the job
-        # Reel is already 'queued' after advance_status. Global publisher will advance to 'processing'.
-
-        # Enqueue to global publish queue
-        # Priority: higher = more urgent. Use negative index so earlier slots have higher priority.
-        priority = 1000 - slot_index  # First slot gets highest priority
+        # Publication stays 'queued'; the global publisher marks it 'processing'.
+        # Earlier slots get higher queue priority.
+        priority = 1000 - slot_index
         await publish_queue.enqueue_publish_job(
             pipeline_id=pipeline_id,
             destination_id=destination_id,
@@ -337,10 +439,10 @@ async def _enqueue_one_video(
         )
 
         logger.info(
-            "enqueued reel %s for slot %s publishAt %s queue_priority=%d ai_enabled=%s",
-            reel_id, slot_time, utc_publish_at, priority, ai_enabled,
+            "enqueued reel %s for slot %s publishAt %s queue_priority=%d",
+            reel_id, slot_time, utc_publish_at, priority,
         )
-        return True
+        return True, None
 
     except Exception as exc:
         logger.exception("unexpected error enqueueing video in batch %s", batch_id)
@@ -349,10 +451,10 @@ async def _enqueue_one_video(
         except Exception:
             pass
         try:
-            await reels.release_claim(reel_db_id)
+            await reels_repo.release_claim(reel_db_id)
         except Exception:
             pass
-        return False
+        return False, "ENQUEUE_ERROR"
 
 
 async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
@@ -399,7 +501,6 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
                 "enabled": True,
             })
 
-    utc_today = utc_now.date().isoformat()
     next_batch_dt = None
     if schedule.get("enabled"):
         batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME

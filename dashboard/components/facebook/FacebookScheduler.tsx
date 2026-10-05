@@ -56,7 +56,14 @@ async function saveSchedule(pipelineId: string, payload: UpdateFacebookScheduleD
   return res.json();
 }
 
-async function runBatch(pipelineId: string, destinationId: string): Promise<{ batch_id: string; status: string }> {
+async function runBatch(pipelineId: string, destinationId: string): Promise<{
+  ok: boolean;
+  batch_id: string | null;
+  status: string;
+  videos_enqueued: number;
+  reason: string | null;
+  message: string;
+}> {
   const res = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -130,9 +137,24 @@ export function FacebookScheduler({
     setRunningBatch(true);
     try {
       const result = await runBatch(pipelineId, destinationId);
-      setRunResult(`Batch đã tạo: ${result.batch_id} (${result.status})`);
-      setTimeout(() => setRunResult(null), 5000);
+      if (result.videos_enqueued > 0 && !result.reason) {
+        setRunResult(`Đã xếp ${result.videos_enqueued} video vào hàng đợi`);
+        setTimeout(() => setRunResult(null), 5000);
+      } else {
+        setRunResult(result.message || "Không có video nào được xếp vào hàng đợi");
+        setTimeout(() => setRunResult(null), 8000);
+      }
       setShowRunConfirm(false);
+      // Refresh counters so the UI reflects any newly queued work.
+      try {
+        const fresh = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}`);
+        if (fresh.ok) {
+          const data = await fresh.json().catch(() => null);
+          if (data?.status) setStatus(data.status);
+        }
+      } catch {
+        // Non-fatal: the batch result above is the source of truth.
+      }
     } catch (err: any) {
       setRunResult(`Lỗi: ${err.message || "Không thể chạy batch"}`);
       setTimeout(() => setRunResult(null), 5000);

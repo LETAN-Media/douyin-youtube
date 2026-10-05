@@ -442,7 +442,15 @@ export async function runSchedulerReconcile(): Promise<{ checked: number; publis
   );
 }
 
-export async function scheduleToday(pipelineId: string, destinationId: string): Promise<{ ok: boolean; batch_id: string; status: string; message: string }> {
+export async function scheduleToday(pipelineId: string, destinationId: string): Promise<{
+  ok: boolean;
+  batch_id: string | null;
+  status: string;
+  videos_enqueued: number;
+  slots: { slot: string; publish_at: string }[];
+  reason: string | null;
+  message: string;
+}> {
   return fbFetch(
     `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/youtube-destinations/${encodeURIComponent(destinationId)}/schedule-today`,
     { method: "POST" },

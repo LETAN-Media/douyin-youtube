@@ -146,7 +146,7 @@ COMMENT REPLY   new comment → comment_reply_system_prompt → AI reply → com
 
 ## Deployment
 
-- **Render** (`render.yaml`): `douyin-youtube-api` (Docker, `backend/Dockerfile` + `prompts/`), `douyin-dashboard` (Node). Env `RCUTS_*`, `DATABASE_URL`, `ADMIN_TOKEN`, `GOOGLE_*` set trong Render Dashboard.
+- **Northflank**: `backend/` (douyin) và `backend_facebook/` (Facebook pipeline) chạy dưới domain `*.toolnet.tech`. Env `RCUTS_*`, `DATABASE_URL`, `ADMIN_TOKEN`, `GOOGLE_*` set trong Northflank Dashboard. Facebook backend dùng `ADMIN_TOKEN` (không dùng `FACEBOOK_ADMIN_TOKEN`).
 - **Vercel**: Dashboard build `npm run build`, env `DOUYIN_API_URL`, `DOUYIN_ADMIN_TOKEN`, `DASHBOARD_SECRET`.
 
 ## Status Flow

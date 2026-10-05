@@ -285,8 +285,16 @@ def test_schedule_today_endpoint(db) -> None:
     )
     assert r2.status_code == 200, r2.text
     body = r2.json()
-    assert body["ok"] is True
     assert "batch_id" in body
+    # A manual run must always state its outcome: either work was queued, or a
+    # specific reason explains why not. This pipeline has no inventory seeded,
+    # so the honest answer is a reason, never a bare "executed".
+    if body["videos_enqueued"] > 0:
+        assert body["status"] == "executed", body
+        assert body["reason"] is None, body
+    else:
+        assert body["status"] != "executed", body
+        assert body["reason"], body
 # ---------- 11. status finds real batch by destination ----------
 def test_status_finds_batch_by_destination(db) -> None:
     pipe = make_pipeline("s11")

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -100,8 +98,13 @@ async def schedule_today(
     destination_id: str,
     _: None = Depends(require_admin),
 ) -> dict:
-    from ..db.repositories import pipelines
-    from ..services.facebook_scheduler import run_scheduler_tick
+    """Manual "run batch now".
+
+    Bypasses the batch_time gate (force_now=True) but keeps future-slot-only
+    selection, the daily limit, the AI-ready requirement and durable enqueue.
+    Does no download/upload; the global publisher worker handles those.
+    """
+    from ..services.facebook_scheduler import execute_daily_batch
 
     pipeline = await pipelines.get_pipeline(pipeline_id)
     if pipeline is None:
@@ -109,47 +112,36 @@ async def schedule_today(
     schedule = await schedules.get_schedule(pipeline_id)
     if schedule is None or not schedule.get("enabled"):
         raise _err(400, "SCHEDULER_NOT_ENABLED", "Scheduler is not enabled for this pipeline.")
-    utc_now = datetime.now(timezone.utc)
-    tz = ZoneInfo(schedule.get("timezone") or "Asia/Ho_Chi_Minh")
-    now_local = utc_now.astimezone(tz)
-    date_iso = now_local.date().isoformat()
-    batch_time = schedule.get("batch_time") or "06:00"
-    existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
-    if existing is not None:
-        # If batch exists but not started, run it now
-        if existing["status"] == "queued":
-            # Execute the batch immediately
-            result = await run_scheduler_tick(now=utc_now)
-            return {
-                "ok": True,
-                "batch_id": existing["id"],
-                "status": "executed",
-                "videos_enqueued": result["videos_enqueued"],
-                "message": "Batch executed immediately.",
-            }
-        return {
-            "ok": True,
-            "batch_id": existing["id"],
-            "status": existing["status"],
-            "scheduled_today": existing["uploaded_count"],
-            "message": "Batch already exists for today.",
-        }
-    batch_id = f"batch_{uuid.uuid4().hex[:12]}"
-    await schedules.create_batch(
-        batch_id=batch_id,
-        pipeline_id=pipeline_id,
-        destination_id=destination_id,
-        local_date=date_iso,
-        scheduled_batch_time=batch_time,
+
+    outcome = await execute_daily_batch(
+        pipeline_id,
+        destination_id,
+        force_now=True,
+        now=datetime.now(timezone.utc),
     )
-    # Execute immediately
-    result = await run_scheduler_tick(now=utc_now)
+    enqueued = outcome["videos_enqueued"]
+    reason = outcome["reason"]
+
+    # A reason means nothing new was queued. Never report "executed" in that case.
+    if reason:
+        return {
+            "ok": False,
+            "batch_id": outcome["batch_id"],
+            "status": outcome["batch_status"] or "no_work",
+            "videos_enqueued": enqueued,
+            "slots": [],
+            "reason": reason,
+            "message": outcome["message"] or "Không có video nào được xếp vào hàng đợi.",
+        }
+
     return {
         "ok": True,
-        "batch_id": batch_id,
+        "batch_id": outcome["batch_id"],
         "status": "executed",
-        "videos_enqueued": result["videos_enqueued"],
-        "message": "Batch created and executed immediately.",
+        "videos_enqueued": enqueued,
+        "slots": outcome["slots"],
+        "reason": None,
+        "message": f"Đã xếp {enqueued} video vào hàng đợi.",
     }
 
 
