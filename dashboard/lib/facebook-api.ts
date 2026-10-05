@@ -370,6 +370,9 @@ export interface FacebookScheduleStatus {
   ai_ready?: number;
   queue_queued?: number;
   queue_processing?: number;
+  queue_scheduled?: number;
+  queue_failed?: number;
+  queue_total?: number;
   batch_planned?: number;
   batch_uploaded?: number;
   batch_failed?: number;

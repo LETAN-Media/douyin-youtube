@@ -231,3 +231,13 @@ def test_patch_route_400_for_blank_name(db) -> None:
         json={"name": "   "},
     )
     assert r.status_code == 400, r.text
+
+
+def test_schedule_status_exposes_full_queue_counts(db) -> None:
+    status = asyncio.run(describe_schedule_status("pl_does_not_exist", now=_at(12, 0)))
+    assert status is None
+    pipe, src, dest = _enable("st2")
+    status = asyncio.run(describe_schedule_status(pipe["id"], now=_at(12, 0)))
+    for key in ("queue_queued", "queue_processing", "queue_scheduled", "queue_failed", "queue_total"):
+        assert key in status, key
+        assert status[key] == 0
