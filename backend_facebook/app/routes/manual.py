@@ -118,6 +118,8 @@ async def resolve_manual_video(body: ManualResolveBody, _: None = Depends(requir
         media = await resolver.resolve(url)
     except FacebookMediaError as exc:
         raise _err(400, "MANUAL_RESOLVE_FAILED", str(exc) or "Không nhận diện được video.")
+    except RuntimeError as exc:
+        raise _err(503, "MANUAL_RESOLVE_FAILED", str(exc) or "Dịch vụ nhận diện video chưa cấu hình.")
     return {
         "source_url": url,
         "caption": media.caption,
