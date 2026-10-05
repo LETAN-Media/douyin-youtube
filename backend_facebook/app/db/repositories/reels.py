@@ -437,6 +437,57 @@ async def recover_stale_queued(max_age_minutes: int = 120) -> int:
     return res.rows_affected or 0
 
 
+async def recover_orphaned_reel_claims() -> int:
+    """Release reels stuck in queued/processing with no live publish-queue job.
+
+    Crash-safe healing, independent of age: a reel claimed by the scheduler
+    or publisher whose queue job is gone (terminal, or the worker died
+    mid-flight before persisting) would otherwise brick forever — the
+    scheduler only picks 'new', the publisher only picks queue rows.
+    Reels with a live queued/processing queue job are never touched.
+
+    Orphaned non-terminal publications are failed with a clear code so the
+    history is truthful (they read as phantom 'queued' otherwise); the
+    scheduler reuses the same row on the next pick via get_or_create dedup
+    and overwrites it on success. Returns the number of reels released.
+    """
+    client = get_client()
+    rows = await client.execute(
+        """
+        SELECT r.id FROM facebook_reels r
+        WHERE r.status IN ('queued', 'processing')
+        AND NOT EXISTS (
+            SELECT 1 FROM facebook_publish_queue q
+            WHERE q.reel_db_id = r.id AND q.status IN ('queued', 'processing')
+        )
+        """
+    )
+    healed = 0
+    for row in rows.rows or []:
+        reel_db_id = row[0]
+        try:
+            await client.execute(
+                "UPDATE publications SET status = 'failed', "
+                "last_error = 'ORPHANED_JOB_FAILED: queue job gone, reel claim released', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                "WHERE reel_db_id = :id AND status NOT IN ('scheduled', 'published', 'failed')",
+                {"id": reel_db_id},
+            )
+        except Exception:
+            pass
+        released = False
+        try:
+            if await release_claim(reel_db_id):
+                released = True
+            if await release_processing(reel_db_id):
+                released = True
+        except Exception:
+            pass
+        if released:
+            healed += 1
+    return healed
+
+
 async def claim_ai_processing(reel_db_id: str) -> bool:
     """Atomically claim a reel for AI processing: new -> ai_processing.
     

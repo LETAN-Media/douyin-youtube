@@ -15,7 +15,6 @@ import asyncio
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -137,7 +136,9 @@ async def _process_one_job(
     reel_id = reel["reel_id"]
     job_id = f"pub_{uuid.uuid4().hex[:12]}"
     target_dir = job_dir(job_id, TMP_ROOT)
-    base = {"reel_id": reel_id, "reel_db_id": reel_db_id, "queue_id": queue_id}
+    # NOTE: queue_id rides positionally into _fail_job — never put it in
+    # base, or every failure path explodes with TypeError (duplicate kwarg).
+    base = {"reel_id": reel_id, "reel_db_id": reel_db_id}
 
     await publish_queue.update_job_status(queue_id, "processing", stage="claiming")
 
@@ -192,19 +193,19 @@ async def _process_one_job(
     pub = await publications.get_publication(publication_id)
     scheduled_publish_at = pub.get("scheduled_publish_at") if pub else None
     visibility = destination.get("visibility") or "private"
-    validated_publish_at = None
-    if scheduled_publish_at:
-        validated_publish_at = validate_publish_at(scheduled_publish_at)
-
-    # SLOT_MISSED check: if scheduled_publish_at is in the past, don't download/upload
-    if validated_publish_at:
-        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if validated_publish_at <= now_utc:
-            return await _fail_job(
-                queue_id, publication_id, target_dir, started,
-                "SLOT_MISSED", f"Scheduled publishAt {validated_publish_at} has passed. Slot missed.",
-                **base,
-            )
+    # Past/invalid publishAt must fail loudly with a typed code (publication
+    # marked, reel released) — never escape as an uncaught error that orphans
+    # the publication at 'queued' and bricks the reel at 'processing'.
+    try:
+        validated_publish_at = (
+            validate_publish_at(scheduled_publish_at) if scheduled_publish_at else None
+        )
+    except YouTubePublisherError as exc:
+        return await _fail_job(
+            queue_id, publication_id, target_dir, started,
+            "SLOT_MISSED", f"Scheduled publishAt missed or invalid: {exc}",
+            **base,
+        )
 
     try:
         await publish_queue.update_job_status(queue_id, "processing", stage="media_resolve")
@@ -367,16 +368,21 @@ async def _publisher_loop(
                 if job is None:
                     break  # No queued jobs, exit inner loop to sleep
 
+                # Heal reels/publications orphaned by earlier crashes before
+                # taking new work, so stuck 'processing' reels flow again.
+                try:
+                    healed = await reels.recover_orphaned_reel_claims()
+                    if healed:
+                        logger.info("publisher healed %d orphaned reel claims", healed)
+                except Exception:
+                    logger.exception("orphan reel recovery failed")
+
                 try:
                     await _process_one_job(job, transport=transport, youtube_factory=youtube_factory)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    logger.exception("unexpected error processing queue job %s: %s", job["id"], exc)
-                    await publish_queue.update_job_status(
-                        job["id"], "failed", stage="error",
-                        error_code="UNEXPECTED", error=str(exc)
-                    )
+                    await _handle_unexpected_job_error(job, exc)
 
             # Small delay between jobs to avoid tight loop
             await asyncio.sleep(0.1)
@@ -391,6 +397,38 @@ async def _publisher_loop(
             logger.exception("publisher loop error: %s", exc)
 
         await asyncio.sleep(max(1, poll_seconds))
+
+
+async def _handle_unexpected_job_error(job: dict, exc: BaseException) -> None:
+    """Last-resort handler for errors escaping _process_one_job.
+
+    The queue row alone is not enough: also fail the publication with a
+    clear code and release the reel claims, otherwise the publication sits
+    at 'queued' and the reel bricks at 'processing' — invisible to both
+    scheduler (wants 'new') and publisher (wants queue rows).
+    """
+    logger.exception("unexpected error processing queue job %s: %s", job.get("id"), exc)
+    try:
+        await publish_queue.update_job_status(
+            job["id"], "failed", stage="error",
+            error_code="UNEXPECTED", error=f"{type(exc).__name__}: {exc}",
+        )
+    except Exception:
+        logger.exception("failed to mark queue job %s failed", job.get("id"))
+    try:
+        if job.get("publication_id"):
+            await publications.mark_failed(
+                job["publication_id"], f"UNEXPECTED: {type(exc).__name__}: {exc}"
+            )
+    except Exception:
+        logger.exception("failed to mark publication %s failed", job.get("publication_id"))
+    try:
+        if job.get("reel_db_id"):
+            await reels.record_reel_error(job["reel_db_id"], f"UNEXPECTED: {type(exc).__name__}")
+            await reels.release_claim(job["reel_db_id"])
+            await reels.release_processing(job["reel_db_id"])
+    except Exception:
+        logger.exception("failed to release reel %s", job.get("reel_db_id"))
 
 
 async def run_publisher_once(
