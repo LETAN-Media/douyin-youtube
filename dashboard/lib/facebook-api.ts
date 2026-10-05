@@ -579,7 +579,9 @@ export interface ManualDestinationDto {
 }
 
 export async function listManualDestinations(): Promise<ManualDestinationDto[]> {
-  return fbFetch<ManualDestinationDto[]>(`/api/facebook/manual/destinations`);
+  // Browser calls same-origin /api/facebook/manual/destinations (Next proxy).
+  // The proxy lands on the backend canonical route below.
+  return fbFetch<ManualDestinationDto[]>(`/api/facebook/youtube-destinations`);
 }
 
 export interface ManualResolveDto {
