@@ -144,13 +144,16 @@ function edgeLook(
   gradientId: string,
   isActive: boolean
 ): FlowEdgeLook {
-  // Only animate when edge is marked active by backend
-  const isError = (s: FacebookFlowVisualStatus) => s === "error";
-
-  if (isError(a) || isError(b)) return { kind: "failed" };
+  // Backend active_edges remain the source of truth for real runtime work.
+  // Everything else is connected-state (ambient) or dead (idle) — visual only.
+  if (a === "error" || b === "error") return { kind: "failed" };
   if (isActive) return { kind: "active", gradientId };
-  if (a === "done" && b === "done") return { kind: "faded" };
-  return { kind: "idle" };
+  // not_configured or idle with no healthy upstream: static, faded out.
+  if (a === "not_configured" || b === "not_configured") return { kind: "idle" };
+  if (a === "idle" || b === "idle") return { kind: "idle" };
+  // Healthy path (ready / partial / waiting / done, or a running node whose
+  // own edge is carried by active_edges): light ambient shimmer, no pulse.
+  return { kind: "ambient" };
 }
 
 function StepBox({ step }: { step: FacebookFlowStep }) {

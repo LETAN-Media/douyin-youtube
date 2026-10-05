@@ -1,13 +1,17 @@
 "use client";
 
-// SVG edge between two nodes. Idle = gray. Active = animated gradient +
-// glow + moving pulse dot. Failed = red. Completed-fade = emerald, no pulse.
+// SVG edge between two nodes.
+// idle = gray static. ambient = gray base + slow faint indigo dash drift
+// (connected-state shimmer, no glow, no pulse). active = animated gradient +
+// glow + moving pulse dot (real runtime work). failed = red.
+// completed-fade = emerald, no pulse.
 
 export { hPath, vPath } from "@/lib/flowLayout";
 
 export type FlowEdgeLook =
   | { kind: "idle" }
   | { kind: "active"; gradientId: string }
+  | { kind: "ambient" }
   | { kind: "failed" }
   | { kind: "faded" };
 
@@ -34,7 +38,8 @@ export function FlowEdge({
         : look.kind === "faded"
           ? "#34d399"
           : "#cbd5e1";
-  const width = look.kind === "idle" ? 2 : 3.5;
+  const width =
+    look.kind === "active" ? 3.5 : look.kind === "ambient" ? 2.5 : look.kind === "idle" ? 2 : 3.5;
   const glow =
     look.kind === "active"
       ? { filter: "drop-shadow(0 0 5px rgba(139,92,246,0.65))" }
@@ -69,8 +74,21 @@ export function FlowEdge({
         style={glow}
         className={look.kind === "active" ? "flow-dash" : undefined}
       />
+      {/* Ambient: faint slow indigo drift over the gray base. Pure CSS,
+          no glow, no pulse dot — visually weaker than active by design. */}
+      {look.kind === "ambient" ? (
+        <path
+          d={d}
+          fill="none"
+          stroke="#818cf8"
+          strokeWidth={width}
+          strokeLinecap="round"
+          opacity={0.3}
+          className="flow-dash-ambient"
+        />
+      ) : null}
       {look.kind === "active" || look.kind === "failed" ? (
-        <circle r={4.5} fill="#ffffff" stroke={stroke} strokeWidth={2.5} style={glow}>
+        <circle r={4.5} fill="#ffffff" stroke={stroke} strokeWidth={2.5} style={glow} className="flow-pulse-dot">
           <animateMotion dur={pulseDur} repeatCount="indefinite" path={d} />
         </circle>
       ) : null}

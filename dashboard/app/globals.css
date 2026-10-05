@@ -124,6 +124,18 @@ textarea:focus-visible {
   }
 }
 
+/* Ambient connected-state shimmer: slow faint drift, no glow.
+   Dash period is 3 + 14 = 17, offset loops seamlessly. */
+.flow-dash-ambient {
+  stroke-dasharray: 3 14;
+  animation: flow-dash-ambient-move 3.4s linear infinite;
+}
+@keyframes flow-dash-ambient-move {
+  to {
+    stroke-dashoffset: -17;
+  }
+}
+
 @keyframes fade-up {
   from {
     opacity: 0;
@@ -143,6 +155,13 @@ textarea:focus-visible {
   .toast-enter,
   .flow-dash {
     animation: none;
+  }
+  .flow-dash-ambient {
+    animation: none;
+    opacity: 0;
+  }
+  .flow-pulse-dot {
+    display: none;
   }
   .skeleton-bar {
     animation-duration: 3s;
