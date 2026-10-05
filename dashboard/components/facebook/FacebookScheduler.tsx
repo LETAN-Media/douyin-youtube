@@ -56,7 +56,7 @@ export function FacebookScheduler({
     id: "",
     pipeline_id: pipelineId,
     timezone: "Asia/Ho_Chi_Minh",
-    enabled: false,
+    enabled: false, // Default false, will be overridden by user when creating
     max_daily_publish: 5,
     batch_time: "06:00",
     slots: DEFAULT_SLOTS,
@@ -65,15 +65,16 @@ export function FacebookScheduler({
   };
 
   const handleSave = useCallback(async () => {
-    if (!schedule) return;
+    // Allow saving even when schedule is null (creating new)
+    const toSave = schedule || scheduleRef;
     setSaving(true);
     try {
       const payload: UpdateFacebookScheduleDto = {
-        enabled: schedule.enabled,
-        timezone: schedule.timezone,
-        max_daily_publish: schedule.max_daily_publish,
-        batch_time: schedule.batch_time,
-        slots: schedule.slots,
+        enabled: toSave.enabled,
+        timezone: toSave.timezone,
+        max_daily_publish: toSave.max_daily_publish,
+        batch_time: toSave.batch_time,
+        slots: toSave.slots,
       };
       const updated = await updateFacebookSchedule(pipelineId, payload);
       setSchedule(updated);
@@ -260,7 +261,7 @@ export function FacebookScheduler({
                   <input
                     type="checkbox"
                     checked={scheduleRef.enabled}
-                    onChange={(e) => setSchedule(prev => prev ? { ...prev, enabled: e.target.checked } : null)}
+                    onChange={(e) => setSchedule(prev => prev ? { ...prev, enabled: e.target.checked } : { ...scheduleRef, enabled: e.target.checked })}
                     className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                   />
                   <span className="text-sm font-medium text-slate-700">Auto Scheduler</span>
