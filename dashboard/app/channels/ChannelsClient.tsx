@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import Link from "next/link";
+import { ChannelWorkspaceLink } from "@/components/ChannelWorkspaceLink";
 import { useRouter } from "next/navigation";
 import { Badge, Card, EmptyState, PageHeader } from "@/components/ui";
 import { IconAlert, IconChannels, IconPlus, IconRefresh, IconX } from "@/components/icons";
@@ -184,12 +185,12 @@ export function ChannelsClient({ initialChannels, pipelines }: ChannelsClientPro
                       </div>
 
                       <div className="min-w-0 flex-1">
-                        <Link
+                        <ChannelWorkspaceLink
                           href={`/channels/${ch.destination_id}`}
                           className="block truncate text-base font-extrabold text-slate-900 group-hover:text-indigo-600 transition"
                         >
                           {ch.channel_title}
-                        </Link>
+                        </ChannelWorkspaceLink>
                         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
                           <span className="inline-flex items-center rounded-md bg-red-50 px-1.5 py-0.5 font-bold text-red-700 text-[10px]">
                             YouTube
@@ -236,12 +237,13 @@ export function ChannelsClient({ initialChannels, pipelines }: ChannelsClientPro
                   {/* Actions footer */}
                   <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3.5">
                     {isConnected ? (
-                      <Link
+                      <ChannelWorkspaceLink
+                        isButton={true}
                         href={`/channels/${ch.destination_id}`}
                         className="inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-xl bg-indigo-50 px-4 py-2 text-xs font-bold text-indigo-700 transition hover:bg-indigo-100"
                       >
                         Open Workspace →
-                      </Link>
+                      </ChannelWorkspaceLink>
                     ) : (
                       <div className="flex w-full items-center gap-2">
                         <button
@@ -252,12 +254,12 @@ export function ChannelsClient({ initialChannels, pipelines }: ChannelsClientPro
                         >
                           {pending ? "Đang mở OAuth…" : "Connect OAuth"}
                         </button>
-                        <Link
+                        <ChannelWorkspaceLink
                           href={`/channels/${ch.destination_id}`}
                           className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50"
                         >
                           Chi tiết
-                        </Link>
+                        </ChannelWorkspaceLink>
                       </div>
                     )}
                   </div>
