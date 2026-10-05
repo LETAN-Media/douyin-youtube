@@ -1,10 +1,149 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import { PageHeader } from "@/components/ui";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import { PageHeader, btnPrimary, btnSecondary, inputCls, labelCls } from "@/components/ui";
 import { IconChevronRight, IconPlay } from "@/components/icons";
 import type { FacebookPipelineDto, FacebookSummaryDto } from "@/lib/facebook-api";
+
+function CreatePipelineModal({ onClose }: { onClose: () => void }) {
+  const router = useRouter();
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [autoPublish, setAutoPublish] = useState(true);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [isPending, startTransition] = useTransition();
+  const [isCreating, setIsCreating] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isCreating || isPending) return;
+
+    const trimmedName = name.trim();
+    const trimmedSlug = slug.replace(/-/g, " ").trim().replace(/\s+/g, "-").toLowerCase();
+
+    if (!trimmedName || trimmedName.length > 200) {
+      setErrorMsg("Tên không hợp lệ (max 200 ký tự).");
+      return;
+    }
+
+    setErrorMsg("");
+    setIsCreating(true);
+
+    try {
+      const res = await fetch("/api/facebook/pipelines", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: trimmedName,
+          slug: trimmedSlug || null,
+          enabled,
+          auto_publish: autoPublish,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        if (errData.error === "PIPELINE_ALREADY_EXISTS" || (errData.error || "").includes("UNIQUE constraint failed")) {
+          setErrorMsg("Slug pipeline đã tồn tại.");
+        } else {
+          setErrorMsg(errData.error || "Không thể tạo pipeline.");
+        }
+        setIsCreating(false);
+        return;
+      }
+
+      const created = await res.json();
+      startTransition(() => {
+        router.refresh();
+        router.push(`/facebook/${created.id}`);
+      });
+    } catch (err: any) {
+      setErrorMsg("Không thể kết nối.");
+      setIsCreating(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-4 backdrop-blur-[2px] sm:items-center">
+      <div className="fade-up w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+        <h3 className="text-lg font-extrabold tracking-tight text-slate-900">
+          Thêm pipeline mới
+        </h3>
+        {errorMsg && (
+          <div className="mt-3 rounded-lg bg-rose-50 p-3 text-sm text-rose-600 border border-rose-200">
+            {errorMsg}
+          </div>
+        )}
+        <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          <div>
+            <label className={labelCls}>Tên pipeline *</label>
+            <input
+              required
+              maxLength={200}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="VD: Hội Những Người Yêu Chó"
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Slug (optional)</label>
+            <input
+              value={slug}
+              onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+              placeholder="VD: yeu-cho"
+              className={inputCls}
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Nếu để trống, hệ thống sẽ tự tạo slug từ tên.
+            </p>
+          </div>
+          <div className="flex items-center gap-6">
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoPublish}
+                onChange={(e) => setAutoPublish(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600"
+              />
+              AUTO Publish
+            </label>
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setEnabled(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600"
+              />
+              Enabled
+            </label>
+          </div>
+          
+          <div className="mt-6 flex gap-2">
+            <button
+              type="button"
+              className={`${btnSecondary} flex-1`}
+              onClick={onClose}
+              disabled={isCreating || isPending}
+            >
+              Hủy
+            </button>
+            <button
+              type="submit"
+              className={`${btnPrimary} flex-1`}
+              disabled={isCreating || isPending}
+            >
+              {isCreating || isPending ? "Đang tạo..." : "Tạo pipeline"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 export function FacebookPipelineCard({
   pipeline,
@@ -102,6 +241,7 @@ export function FacebookPipelineList({
   error: string | null;
 }) {
   const [query, setQuery] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
   const filtered = pipelines.filter((p) =>
     p.name.toLowerCase().includes(query.toLowerCase()),
   );
@@ -111,6 +251,11 @@ export function FacebookPipelineList({
       <PageHeader
         title="Facebook"
         description="Quản lý và đăng nội dung Facebook"
+        actions={
+          <button onClick={() => setCreateOpen(true)} className={btnPrimary}>
+            + Thêm pipeline
+          </button>
+        }
       />
       <div className="mt-4">
         <input
@@ -129,7 +274,7 @@ export function FacebookPipelineList({
             </h3>
             <p className="mx-auto mt-1.5 max-w-sm text-xs text-rose-700">{error}</p>
           </div>
-        ) : filtered.length === 0 ? (
+        ) : filtered.length === 0 && pipelines.length === 0 ? (
           <div className="rounded-2xl border border-slate-200/90 bg-white p-8 text-center shadow-sm sm:p-12">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-400">
               <IconPlay size={28} />
@@ -140,6 +285,15 @@ export function FacebookPipelineList({
             <p className="mx-auto mt-1.5 max-w-sm text-xs text-slate-500">
               Tạo pipeline Facebook để bắt đầu quản lý và đăng nội dung lên Facebook.
             </p>
+            <div className="mt-5">
+              <button onClick={() => setCreateOpen(true)} className={btnPrimary}>
+                + Tạo pipeline đầu tiên
+              </button>
+            </div>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-slate-500">
+            Không tìm thấy pipeline nào.
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -149,6 +303,9 @@ export function FacebookPipelineList({
           </div>
         )}
       </div>
+      
+      {createOpen && <CreatePipelineModal onClose={() => setCreateOpen(false)} />}
     </>
   );
 }
+

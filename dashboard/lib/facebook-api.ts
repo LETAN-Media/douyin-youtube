@@ -181,6 +181,24 @@ export async function listFacebookPipelines(): Promise<FacebookPipelineDto[]> {
   return fbFetch<FacebookPipelineDto[]>(`/api/facebook/pipelines`);
 }
 
+export interface CreateFacebookPipelineDto {
+  name: string;
+  slug: string | null;
+  enabled: boolean;
+  auto_publish: boolean;
+}
+
+export async function createFacebookPipeline(payload: CreateFacebookPipelineDto): Promise<FacebookPipelineDto> {
+  return fbFetch<FacebookPipelineDto>(
+    `/api/facebook/pipelines`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
 export async function getFacebookPipelineDetail(pipelineId: string): Promise<FacebookPipelineDto> {
   return fbFetch<FacebookPipelineDto>(
     `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}`,
