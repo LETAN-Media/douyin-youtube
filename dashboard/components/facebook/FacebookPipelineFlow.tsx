@@ -142,7 +142,9 @@ function edgeLook(
   a: FacebookFlowVisualStatus,
   b: FacebookFlowVisualStatus,
   gradientId: string,
-  isActive: boolean
+  ambientGradientId: string,
+  isActive: boolean,
+  phase: string
 ): FlowEdgeLook {
   // Backend active_edges remain the source of truth for real runtime work.
   // Everything else is connected-state (ambient) or dead (idle) — visual only.
@@ -152,8 +154,9 @@ function edgeLook(
   if (a === "not_configured" || b === "not_configured") return { kind: "idle" };
   if (a === "idle" || b === "idle") return { kind: "idle" };
   // Healthy path (ready / partial / waiting / done, or a running node whose
-  // own edge is carried by active_edges): light ambient shimmer, no pulse.
-  return { kind: "ambient" };
+  // own edge is carried by active_edges): bright ambient shimmer, no pulse.
+  // Phase staggers the travelling dots so flow cascades top to bottom.
+  return { kind: "ambient", gradientId: ambientGradientId, phase };
 }
 
 function StepBox({ step }: { step: FacebookFlowStep }) {
@@ -246,6 +249,7 @@ export function FacebookPipelineFlow({
 }) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const gradientId = `fb-flow-grad-${uid}`;
+  const ambientGradientId = `fb-flow-ambient-${uid}`;
   const d = vPath(12, 0, 12, 26);
   return (
     <div className="w-full min-w-0">
@@ -254,6 +258,11 @@ export function FacebookPipelineFlow({
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#8b5cf6" />
             <stop offset="100%" stopColor="#3b82f6" />
+          </linearGradient>
+          <linearGradient id={ambientGradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#a5b4fc" />
+            <stop offset="55%" stopColor="#818cf8" />
+            <stop offset="100%" stopColor="#c084fc" />
           </linearGradient>
         </defs>
       </svg>
@@ -268,7 +277,9 @@ export function FacebookPipelineFlow({
                   normalizeFlowStatus(step.status),
                   normalizeFlowStatus(steps[idx + 1].status),
                   gradientId,
+                  ambientGradientId,
                   activeEdges.includes(EDGE_KEYS[idx]),
+                  `${-idx * 0.6}s`,
                 )}
               />
             ) : null}

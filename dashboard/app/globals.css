@@ -124,15 +124,15 @@ textarea:focus-visible {
   }
 }
 
-/* Ambient connected-state shimmer: slow faint drift, no glow.
-   Dash period is 3 + 14 = 17, offset loops seamlessly. */
+/* Ambient connected-state shimmer: visible drifting highlight, slower and
+   softer than active. Dash period is 10 + 14 = 24, offset loops seamlessly. */
 .flow-dash-ambient {
-  stroke-dasharray: 3 14;
-  animation: flow-dash-ambient-move 3.4s linear infinite;
+  stroke-dasharray: 10 14;
+  animation: flow-dash-ambient-move 2.8s linear infinite;
 }
 @keyframes flow-dash-ambient-move {
   to {
-    stroke-dashoffset: -17;
+    stroke-dashoffset: -24;
   }
 }
 
