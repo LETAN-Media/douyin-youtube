@@ -346,7 +346,7 @@ def test_inventory_stats(db) -> None:
     seed_reel(src["id"], "f1", status="failed")
     stats = asyncio.run(reels.inventory_stats(pipe["id"]))
     assert stats == {
-        "total": 5, "new": 2, "queued": 1, "processing": 0,
+        "total": 5, "new": 2, "ai_processing": 0, "queued": 1, "processing": 0,
         "published": 1, "failed": 1, "skipped": 0, "unpublished": 4,
     }
     client = TestClient(create_app())

@@ -205,6 +205,11 @@ async def update_ai_settings(
     if pipeline is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
     validate_ai_settings_input(body)
+    from ..config import settings as app_settings
+
+    # Store config_hash with the real ToolNet model so it matches the
+    # hash the scheduler/publisher/worker recompute. A model-less hash
+    # would never match and silently stall scheduling.
     return await ai_settings_repo.upsert_settings(
         pipeline_id=pipeline_id,
         enabled=body.enabled,
@@ -213,6 +218,7 @@ async def update_ai_settings(
         description_template=body.description_template.strip(),
         locked_hashtags=body.locked_hashtags,
         language=body.language.strip(),
+        model=(app_settings.TOOLNET_MODEL or "").strip() or None,
     )
 
 

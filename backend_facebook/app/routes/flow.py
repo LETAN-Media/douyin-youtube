@@ -116,10 +116,14 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
     generated = ai_stats.get("generated", 0)
     failed = ai_stats.get("failed", 0)
     total = ai_stats.get("total_reels", 0)
+    ai_processing = stats.get("ai_processing", 0)
 
     if not ai_configured:
         ai_metadata_status = "not_configured"
         ai_metadata_detail = "AI not configured"
+    elif ai_processing > 0:
+        ai_metadata_status = "running"
+        ai_metadata_detail = f"Đang xử lý · {generated} generated / {pending} pending"
     elif pending > 0 and generated == 0:
         ai_metadata_status = "ready"
         ai_metadata_detail = f"{pending} pending"

@@ -523,4 +523,47 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
         "next_batch_at": next_batch_dt,
         "slots": slots,
         "scheduler_enabled": bool(schedule.get("enabled")),
+        **await _ai_readiness_counts(pipeline_id),
     }
+
+
+async def _ai_readiness_counts(pipeline_id: str) -> dict:
+    """Additive counters so the UI can tell Inventory apart from AI-ready.
+
+    Never raises: on any error returns zeros rather than breaking status.
+    """
+    try:
+        from ..db.repositories import ai_metadata as ai_metadata_repo
+
+        inv = await reels.inventory_stats(pipeline_id)
+        ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
+        pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
+        ai_enabled = pipe_ai_settings.get("enabled", True)
+        ai_ready = 0
+        if ai_enabled:
+            model = settings.TOOLNET_MODEL or ""
+            config_hash = ai_settings_repo.compute_config_hash(
+                enabled=pipe_ai_settings.get("enabled", True),
+                system_prompt=pipe_ai_settings.get("system_prompt"),
+                title_template=pipe_ai_settings.get("title_template"),
+                description_template=pipe_ai_settings.get("description_template"),
+                locked_hashtags=pipe_ai_settings.get("locked_hashtags"),
+                language=pipe_ai_settings.get("language"),
+                model=model,
+            )
+            ai_ready = len(await reels.list_ai_ready_reels(pipeline_id, config_hash))
+        return {
+            "inventory_total": inv.get("total", 0),
+            "ai_generated": ai_stats.get("generated", 0),
+            "ai_pending": ai_stats.get("pending", 0),
+            "ai_failed": ai_stats.get("failed", 0),
+            "ai_ready": ai_ready,
+        }
+    except Exception:
+        return {
+            "inventory_total": 0,
+            "ai_generated": 0,
+            "ai_pending": 0,
+            "ai_failed": 0,
+            "ai_ready": 0,
+        }

@@ -251,3 +251,19 @@ async def pipeline_stats(pipeline_id: str) -> dict[str, int]:
         "pending": max(0, total - generated - failed),
         "total_reels": total,
     }
+
+
+async def get_global_stats() -> dict[str, int]:
+    """Global counts over all metadata rows. Single GROUP BY, no N+1."""
+    client = get_client()
+    rows = await client.execute(
+        "SELECT m.status, COUNT(*) FROM facebook_ai_metadata m GROUP BY m.status",
+    )
+    by_status = {r[0]: r[1] for r in (rows.rows or [])}
+    generated = by_status.get("generated", 0)
+    failed = by_status.get("failed", 0)
+    return {
+        "generated": generated,
+        "failed": failed,
+        "total_rows": sum(by_status.values()),
+    }

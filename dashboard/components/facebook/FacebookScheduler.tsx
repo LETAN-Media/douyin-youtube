@@ -190,6 +190,10 @@ export function FacebookScheduler({
   const scheduledToday = status?.scheduled_today ?? 0;
   const dailyLimit = status?.daily_limit ?? 5;
   const slots = status?.slots || [];
+  const invTotal = status?.inventory_total ?? null;
+  const aiReady = status?.ai_ready ?? null;
+  const aiGenerated = status?.ai_generated ?? 0;
+  const aiPending = status?.ai_pending ?? 0;
 
   const slotsByDay = slots.reduce<Record<number, any[]>>((acc, slot: any) => {
     const day = slot.weekday ?? 0;
@@ -258,6 +262,28 @@ export function FacebookScheduler({
                 </p>
               </div>
             </div>
+
+            {invTotal !== null && aiReady !== null ? (
+              <div
+                className={`rounded-xl border p-3 text-xs leading-relaxed ${
+                  aiReady > 0
+                    ? "border-indigo-200 bg-indigo-50 text-indigo-800"
+                    : aiGenerated > 0
+                      ? "border-amber-200 bg-amber-50 text-amber-800"
+                      : "border-slate-200 bg-slate-50 text-slate-600"
+                }`}
+              >
+                {aiReady > 0 ? (
+                  <>Scheduler: {aiReady}/{dailyLimit} video AI-ready{invTotal > 0 ? ` · ${invTotal} video trong Inventory` : ""}</>
+                ) : aiGenerated > 0 ? (
+                  <>{invTotal} video trong Inventory · 0 video đã có AI metadata sẵn sàng (khớp cấu hình hiện tại) — AI cần xử lý lại.</>
+                ) : invTotal > 0 ? (
+                  <>Đang chờ AI xử lý {invTotal} video{aiPending > 0 || aiGenerated > 0 ? ` · ${aiGenerated}/${aiGenerated + aiPending} hoàn tất` : ""}</>
+                ) : (
+                  <>Chưa có video nào trong Inventory.</>
+                )}
+              </div>
+            ) : null}
 
             <div>
               <p className="mb-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">Lịch tuần</p>

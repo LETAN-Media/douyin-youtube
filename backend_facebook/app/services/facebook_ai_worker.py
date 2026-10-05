@@ -168,9 +168,12 @@ async def _find_reel_needing_ai(pipeline_id: str) -> dict | None:
     from ..db.repositories import ai_metadata as ai_metadata_repo
     from ..db.repositories import ai_settings as ai_settings_repo
 
-    # Get pipeline AI settings for config_hash
-    pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
+    # Get pipeline AI settings for config_hash.
+    # Must use the real ToolNet model, exactly like the scheduler,
+    # publisher, and ensure_ai_metadata do — otherwise claimed rows
+    # never match the scheduler's AI-ready hash and stall forever.
     model = settings.TOOLNET_MODEL or ""
+    pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id, model=model)
 
     config_hash = pipe_ai_settings.get("config_hash") or ai_settings_repo.compute_config_hash(
         enabled=pipe_ai_settings.get("enabled", True),
@@ -190,7 +193,7 @@ async def _find_reel_needing_ai(pipeline_id: str) -> dict | None:
     # Filter out reels that are in backoff (failed but not ready for retry)
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for reel in reels_needing_ai:
-        meta = await ai_metadata_repo.get_metadata(reel["id"])
+        meta = await ai_metadata_repo.get_for_reel(reel["id"])
         if meta and meta.get("status") == "failed":
             next_retry = meta.get("next_retry_at")
             if next_retry and next_retry > now_iso:
@@ -245,7 +248,7 @@ async def _mark_ai_job_failed(reel_db_id: str, error_code: str, error: str) -> N
     await reels_repo.release_ai_claim(reel_db_id)
 
     # Get current retry count
-    meta = await ai_metadata_repo.get_metadata(reel_db_id)
+    meta = await ai_metadata_repo.get_for_reel(reel_db_id)
     retry_count = (meta.get("retry_count") if meta else 0) + 1
     
     # Calculate next retry time

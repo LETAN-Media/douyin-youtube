@@ -343,6 +343,11 @@ export interface FacebookScheduleStatus {
   scheduled_today: number;
   daily_limit: number;
   next_batch_at: string | null;
+  inventory_total?: number;
+  ai_generated?: number;
+  ai_pending?: number;
+  ai_failed?: number;
+  ai_ready?: number;
   slots: Array<{
     weekday: number;
     time: string;

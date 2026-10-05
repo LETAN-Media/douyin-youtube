@@ -345,6 +345,7 @@ async def inventory_stats(pipeline_id: str) -> dict[str, int]:
     return {
         "total": total,
         "new": by_status.get("new", 0),
+        "ai_processing": by_status.get("ai_processing", 0),
         "queued": by_status.get("queued", 0),
         "processing": by_status.get("processing", 0),
         "published": published,
