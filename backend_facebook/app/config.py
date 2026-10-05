@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     FACEBOOK_AI_WORKER_CONCURRENCY: int = 1
     FACEBOOK_AI_WORKER_POLL_SECONDS: int = 10
     FACEBOOK_AI_WORKER_STALE_TTL_SECONDS: int = 300
+    FACEBOOK_AI_MAX_RETRIES: int = 3
+    FACEBOOK_AI_RETRY_BACKOFF_SECONDS: int = 300
 
     def require_toolnet(self) -> tuple[str, str, str]:
         """Return (base_url, api_key, model) or fail fast with a clear config error."""

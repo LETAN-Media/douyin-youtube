@@ -90,18 +90,37 @@ async def _claim_next_ai_job(
     """
     Atomically claim the next reel needing AI metadata.
 
-    Fair scheduling: round-robin across pipelines.
+    Fair scheduling: round-robin across pipelines with persistent cursor.
     Returns job dict or None if no work.
     """
     from ..db.repositories import reels as reels_repo
     from ..db.repositories import ai_metadata as ai_metadata_repo
     from ..db.repositories import ai_settings as ai_settings_repo
+    from ..db.client import get_client
 
     # Get all enabled pipelines with AI configured
     all_pipes = await pipelines.list_pipelines()
     enabled_pipes = [p for p in all_pipes if p.get("enabled", True)]
+    
+    if not enabled_pipes:
+        return None
 
-    for pipe in enabled_pipes:
+    # Get persistent cursor for round-robin
+    client = get_client()
+    cursor_row = await client.execute(
+        "SELECT value FROM system_state WHERE key = 'ai_worker_cursor'",
+    )
+    cursor = 0
+    if cursor_row.rows:
+        try:
+            cursor = int(cursor_row.rows[0][0])
+        except Exception:
+            cursor = 0
+
+    # Rotate the enabled_pipes list based on cursor to achieve round-robin
+    rotated_pipes = enabled_pipes[cursor:] + enabled_pipes[:cursor]
+
+    for pipe in rotated_pipes:
         pipe_id = pipe["id"]
 
         # Check if AI is enabled for this pipeline
@@ -124,6 +143,13 @@ async def _claim_next_ai_job(
         claimed = await reels_repo.claim_ai_processing(reel_db_id)
         if not claimed:
             continue  # Another worker got it, try next pipeline
+
+        # Update cursor for next round-robin iteration
+        new_cursor = (cursor + 1) % len(enabled_pipes)
+        await client.execute(
+            "INSERT OR REPLACE INTO system_state (key, value) VALUES ('ai_worker_cursor', :val)",
+            {"val": str(new_cursor)},
+        )
 
         logger.info("AI worker claimed reel %s for pipeline %s", reel["reel_id"], pipe_id)
         return {
@@ -156,12 +182,25 @@ async def _find_reel_needing_ai(pipeline_id: str) -> dict | None:
         model=model,
     )
 
-    # Find reels needing AI
+    # Find reels needing AI, excluding those in backoff
     reels_needing_ai = await reels_repo.list_reels_needing_ai(pipeline_id, config_hash)
     if not reels_needing_ai:
         return None
 
-    return reels_needing_ai[0]  # Return first one
+    # Filter out reels that are in backoff (failed but not ready for retry)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for reel in reels_needing_ai:
+        meta = await ai_metadata_repo.get_metadata(reel["id"])
+        if meta and meta.get("status") == "failed":
+            next_retry = meta.get("next_retry_at")
+            if next_retry and next_retry > now_iso:
+                continue  # Still in backoff, skip
+            retry_count = meta.get("retry_count", 0)
+            if retry_count >= settings.FACEBOOK_AI_MAX_RETRIES:
+                continue  # Max retries exceeded, skip permanently
+        return reel  # This reel is ready for AI processing
+
+    return None
 
 
 async def _process_ai_job(job: dict, transport: httpx.AsyncBaseTransport | None = None) -> dict:
@@ -199,12 +238,27 @@ async def _process_ai_job(job: dict, transport: httpx.AsyncBaseTransport | None 
 
 
 async def _mark_ai_job_failed(reel_db_id: str, error_code: str, error: str) -> None:
-    """Mark AI job as failed and release claim."""
+    """Mark AI job as failed with retry tracking and backoff."""
     from ..db.repositories import reels as reels_repo
     from ..db.repositories import ai_metadata as ai_metadata_repo
 
     await reels_repo.release_ai_claim(reel_db_id)
-    await ai_metadata_repo.mark_failed(reel_db_id, f"{error_code}: {error}")
+
+    # Get current retry count
+    meta = await ai_metadata_repo.get_metadata(reel_db_id)
+    retry_count = (meta.get("retry_count") if meta else 0) + 1
+    
+    # Calculate next retry time
+    next_retry = None
+    if retry_count <= settings.FACEBOOK_AI_MAX_RETRIES:
+        next_retry = (datetime.now(timezone.utc) + timedelta(seconds=settings.FACEBOOK_AI_RETRY_BACKOFF_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    await ai_metadata_repo.mark_failed(
+        reel_db_id, 
+        f"{error_code}: {error}",
+        retry_count=retry_count,
+        next_retry_at=next_retry
+    )
 
 
 async def _recover_stale_ai_jobs(ttl_seconds: int = 300) -> int:

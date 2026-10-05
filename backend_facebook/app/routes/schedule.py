@@ -101,6 +101,7 @@ async def schedule_today(
     _: None = Depends(require_admin),
 ) -> dict:
     from ..db.repositories import pipelines
+    from ..services.facebook_scheduler import run_scheduler_tick
 
     pipeline = await pipelines.get_pipeline(pipeline_id)
     if pipeline is None:
@@ -115,6 +116,17 @@ async def schedule_today(
     batch_time = schedule.get("batch_time") or "06:00"
     existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
     if existing is not None:
+        # If batch exists but not started, run it now
+        if existing["status"] == "queued":
+            # Execute the batch immediately
+            result = await run_scheduler_tick(now=utc_now)
+            return {
+                "ok": True,
+                "batch_id": existing["id"],
+                "status": "executed",
+                "videos_enqueued": result["videos_enqueued"],
+                "message": "Batch executed immediately.",
+            }
         return {
             "ok": True,
             "batch_id": existing["id"],
@@ -130,11 +142,14 @@ async def schedule_today(
         local_date=date_iso,
         scheduled_batch_time=batch_time,
     )
+    # Execute immediately
+    result = await run_scheduler_tick(now=utc_now)
     return {
         "ok": True,
         "batch_id": batch_id,
-        "status": "queued",
-        "message": "Batch claimed. Run scheduler tick to execute.",
+        "status": "executed",
+        "videos_enqueued": result["videos_enqueued"],
+        "message": "Batch created and executed immediately.",
     }
 
 

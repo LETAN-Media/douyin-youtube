@@ -39,6 +39,7 @@ def _row_to_dict(r: Any) -> dict[str, Any]:
         "created_at": r[10],
         "updated_at": r[11],
         "config_hash": r[12] if len(r) > 12 else None,
+        "next_retry_at": r[13] if len(r) > 13 else None,
     }
 
 
@@ -46,7 +47,7 @@ async def get_for_reel(reel_db_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
         "SELECT reel_db_id, title, description, hashtags_json, model, status, "
-        "source_hash, generated_at, last_error, retry_count, created_at, updated_at, config_hash "
+        "source_hash, generated_at, last_error, retry_count, created_at, updated_at, config_hash, next_retry_at "
         "FROM facebook_ai_metadata WHERE reel_db_id = :id",
         {"id": reel_db_id},
     )
@@ -121,20 +122,41 @@ async def upsert_generated(
     return row
 
 
-async def mark_failed(reel_db_id: str, error: str) -> None:
+async def mark_failed(
+    reel_db_id: str,
+    error: str,
+    retry_count: int | None = None,
+    next_retry_at: str | None = None,
+) -> None:
     client = get_client()
-    await client.execute(
-        """
-        INSERT INTO facebook_ai_metadata (reel_db_id, status, last_error, retry_count)
-        VALUES (:id, 'failed', :error, 1)
-        ON CONFLICT(reel_db_id) DO UPDATE SET
-            status = 'failed',
-            last_error = excluded.last_error,
-            retry_count = retry_count + 1,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-        """,
-        {"id": reel_db_id, "error": (error or "")[:500]},
-    )
+    if retry_count is None:
+        # Increment existing retry count
+        await client.execute(
+            """
+            INSERT INTO facebook_ai_metadata (reel_db_id, status, last_error, retry_count)
+            VALUES (:id, 'failed', :error, 1)
+            ON CONFLICT(reel_db_id) DO UPDATE SET
+                status = 'failed',
+                last_error = excluded.last_error,
+                retry_count = retry_count + 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            """,
+            {"id": reel_db_id, "error": (error or "")[:500]},
+        )
+    else:
+        await client.execute(
+            """
+            INSERT INTO facebook_ai_metadata (reel_db_id, status, last_error, retry_count, next_retry_at)
+            VALUES (:id, 'failed', :error, :retry_count, :next_retry_at)
+            ON CONFLICT(reel_db_id) DO UPDATE SET
+                status = 'failed',
+                last_error = excluded.last_error,
+                retry_count = excluded.retry_count,
+                next_retry_at = excluded.next_retry_at,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            """,
+            {"id": reel_db_id, "error": (error or "")[:500], "retry_count": retry_count, "next_retry_at": next_retry_at},
+        )
 
 
 async def needs_generation(

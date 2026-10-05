@@ -248,6 +248,24 @@ async def migrate() -> None:
     if not await _has_column(client, "facebook_reels", "ai_claimed_at"):
         statements_12.append("ALTER TABLE facebook_reels ADD COLUMN ai_claimed_at TEXT")
     await _apply_migration(client, applied, "20241005_12", statements_12)
+    statements_13: list[str] = [
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_metadata_next_retry ON facebook_ai_metadata(next_retry_at)
+        """,
+    ]
+    if not await _has_column(client, "facebook_ai_metadata", "next_retry_at"):
+        statements_13.append("ALTER TABLE facebook_ai_metadata ADD COLUMN next_retry_at TEXT")
+    await _apply_migration(client, applied, "20241005_13", statements_13)
+    statements_14: list[str] = [
+        """
+        CREATE TABLE IF NOT EXISTS system_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+    ]
+    await _apply_migration(client, applied, "20241005_14", statements_14)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

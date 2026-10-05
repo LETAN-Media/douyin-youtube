@@ -8,34 +8,16 @@ Global publisher worker handles the actual processing.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from ..config import settings
 from ..db.repositories import destinations, publications, reels, schedules, publish_queue
-from .facebook_ai_metadata import MetadataError, ensure_ai_metadata
-from .facebook_media import (
-    TMP_ROOT,
-    FacebookMediaError,
-    FacebookMediaResolver,
-    cleanup_job_dir,
-    job_dir,
-)
-from .facebook_youtube_publisher import (
-    YouTubePublisherError,
-    finalize_description,
-    load_destination_credentials_async,
-    refresh_if_needed,
-    upload_video,
-    validate_publish_at,
-    validate_visibility,
-)
+from ..db.repositories import ai_settings as ai_settings_repo
 
 logger = logging.getLogger("backend-facebook.scheduler")
 
@@ -130,10 +112,14 @@ async def run_scheduler_tick(
     transport: httpx.AsyncBaseTransport | None = None,
     youtube_factory=None,
 ) -> dict[str, int]:
-    """One lightweight tick. Only triggers daily batches whose time has passed."""
+    """One lightweight tick. Only triggers daily batches whose time has passed.
+    
+    Also processes manually created batches with status='queued'.
+    """
     utc_now = _now_utc(now)
     result = {"checked": 0, "batches_started": 0, "videos_enqueued": 0, "failed": 0}
 
+    # First, process any manually created batches that are queued
     for schedule in await schedules.list_enabled_schedules():
         result["checked"] += 1
         pipeline_id = schedule["pipeline_id"]
@@ -146,23 +132,46 @@ async def run_scheduler_tick(
         now_local = utc_now.astimezone(tz)
         date_iso = now_local.date().isoformat()
         batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
+        
+        destination, dest_error = await _pick_destination(pipeline_id)
+        if destination is None:
+            continue
+        destination_id = destination["id"]
+
+        # Check for existing batch (including manually created ones)
+        existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
+        if existing is not None:
+            # If batch is queued but not started, and batch_time has passed, run it
+            if existing["status"] == "queued":
+                batch_dt = now_local.replace(
+                    hour=int(batch_time.split(":")[0]),
+                    minute=int(batch_time.split(":")[1]),
+                    second=0, microsecond=0
+                )
+                if now_local >= batch_dt:
+                    result["batches_started"] += 1
+                    try:
+                        enqueued = await _run_daily_batch(
+                            pipeline_id, destination_id, date_iso, batch_time, schedule,
+                            batch_id=existing["id"], transport=transport, youtube_factory=youtube_factory,
+                        )
+                        result["videos_enqueued"] += enqueued
+                    except Exception as exc:
+                        logger.exception("daily batch failed for %s", pipeline_id)
+                        result["failed"] += 1
+                        try:
+                            await schedules.mark_batch_finished(existing["id"], "failed", error=str(exc))
+                        except Exception:
+                            pass
+            continue
+
+        # Normal automatic batch creation (batch_time has passed)
         if not isinstance(batch_time, str) or ":" not in batch_time:
-            logger.warning("unexpected batch_time for %s: %r", pipeline_id, batch_time)
             continue
         batch_hour, batch_minute = _parse_time(batch_time)
         batch_dt = now_local.replace(hour=batch_hour, minute=batch_minute, second=0, microsecond=0)
 
         if now_local < batch_dt:
-            continue
-
-        destination, dest_error = await _pick_destination(pipeline_id)
-        if destination is None:
-            logger.info("no destination for pipeline %s: %s", pipeline_id, dest_error)
-            continue
-        destination_id = destination["id"]
-
-        existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
-        if existing is not None:
             continue
 
         batch_id, claimed = await _ensure_batch(pipeline_id, destination_id, date_iso, batch_time)

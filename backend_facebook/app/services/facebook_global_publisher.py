@@ -21,7 +21,6 @@ import httpx
 
 from ..config import settings
 from ..db.repositories import ai_metadata as ai_metadata_repo, destinations, pipelines, publications, publish_queue, reels, youtube_auth
-from .facebook_ai_metadata import MetadataError, ensure_ai_metadata
 from .facebook_media import (
     TMP_ROOT,
     FacebookMediaError,
@@ -205,6 +204,16 @@ async def _process_one_job(
     if scheduled_publish_at:
         validated_publish_at = validate_publish_at(scheduled_publish_at)
 
+    # SLOT_MISSED check: if scheduled_publish_at is in the past, don't download/upload
+    if validated_publish_at:
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if validated_publish_at <= now_utc:
+            return await _fail_job(
+                queue_id, publication_id, target_dir, started,
+                "SLOT_MISSED", f"Scheduled publishAt {validated_publish_at} has passed. Slot missed.",
+                **base,
+            )
+
     try:
         await publish_queue.update_job_status(queue_id, "processing", stage="media_resolve")
         resolver = FacebookMediaResolver.from_settings(transport=transport)
@@ -307,20 +316,38 @@ async def _process_one_job(
         }
 
     cleanup_job_dir(target_dir)
-    logger.info(
-        "published reel %s video %s via queue %s",
-        reel_id, youtube_video_id, queue_id,
-    )
-    return {
-        "queue_id": queue_id,
-        "result": "published",
-        "publication_id": publication_id,
-        "youtube_video_id": youtube_video_id,
-        "channel_id": destination.get("channel_id"),
-        "file_bytes": file_bytes,
-        "elapsed_s": time.monotonic() - started,
-        **{**base, **ai_info},
-    }
+    is_scheduled = validated_publish_at is not None
+    if is_scheduled:
+        logger.info(
+            "scheduled reel %s video %s via queue %s for publishAt %s",
+            reel_id, youtube_video_id, queue_id, validated_publish_at,
+        )
+        return {
+            "queue_id": queue_id,
+            "result": "scheduled",
+            "publication_id": publication_id,
+            "youtube_video_id": youtube_video_id,
+            "channel_id": destination.get("channel_id"),
+            "scheduled_publish_at": validated_publish_at,
+            "file_bytes": file_bytes,
+            "elapsed_s": time.monotonic() - started,
+            **{**base, **ai_info},
+        }
+    else:
+        logger.info(
+            "published reel %s video %s via queue %s immediately",
+            reel_id, youtube_video_id, queue_id,
+        )
+        return {
+            "queue_id": queue_id,
+            "result": "published",
+            "publication_id": publication_id,
+            "youtube_video_id": youtube_video_id,
+            "channel_id": destination.get("channel_id"),
+            "file_bytes": file_bytes,
+            "elapsed_s": time.monotonic() - started,
+            **{**base, **ai_info},
+        }
 
 
 async def _publisher_loop(
