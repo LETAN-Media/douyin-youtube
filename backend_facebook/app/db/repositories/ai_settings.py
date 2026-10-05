@@ -136,6 +136,34 @@ async def get_settings(pipeline_id: str, model: str | None = None) -> dict[str, 
     return data
 
 
+async def current_config_hash(
+    pipeline_id: str, *, model: str | None = None
+) -> tuple[dict[str, Any], str]:
+    """Load settings plus the canonical config hash for scheduling decisions.
+
+    The hash is ALWAYS recomputed from live fields + the live ToolNet model.
+    The stored ``config_hash`` is never trusted here: legacy rows may carry
+    a model-less hash (written before the model was included), and trusting
+    it makes the worker see a false cache-hit while the scheduler — which
+    recomputes — sees zero AI-ready reels. That combination stalls the
+    pipeline silently with no errors.
+    """
+    from ...config import settings as app_settings
+
+    live_model = (model if model is not None else (app_settings.TOOLNET_MODEL or "")).strip()
+    data = await get_settings(pipeline_id, model=live_model or None)
+    canonical = compute_config_hash(
+        enabled=data.get("enabled", True),
+        system_prompt=data.get("system_prompt"),
+        title_template=data.get("title_template"),
+        description_template=data.get("description_template"),
+        locked_hashtags=data.get("locked_hashtags"),
+        language=data.get("language"),
+        model=live_model,
+    )
+    return data, canonical
+
+
 async def upsert_settings(
     *,
     pipeline_id: str,

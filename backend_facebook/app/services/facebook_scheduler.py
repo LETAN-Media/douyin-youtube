@@ -377,19 +377,8 @@ async def _enqueue_one_video(
         logger.error("destination missing for pipeline %s", pipeline_id)
         return False, "NO_DESTINATION"
 
-    pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
+    pipe_ai_settings, config_hash = await ai_settings_repo.current_config_hash(pipeline_id)
     ai_enabled = pipe_ai_settings.get("enabled", True)
-
-    model = settings.TOOLNET_MODEL or ""
-    config_hash = ai_settings_repo.compute_config_hash(
-        enabled=pipe_ai_settings.get("enabled", True),
-        system_prompt=pipe_ai_settings.get("system_prompt"),
-        title_template=pipe_ai_settings.get("title_template"),
-        description_template=pipe_ai_settings.get("description_template"),
-        locked_hashtags=pipe_ai_settings.get("locked_hashtags"),
-        language=pipe_ai_settings.get("language"),
-        model=model,
-    ) if ai_enabled else None
 
     if not ai_enabled:
         # AI disabled: scheduling requires AI, so nothing is picked.
@@ -537,20 +526,10 @@ async def _ai_readiness_counts(pipeline_id: str) -> dict:
 
         inv = await reels.inventory_stats(pipeline_id)
         ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
-        pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
+        pipe_ai_settings, config_hash = await ai_settings_repo.current_config_hash(pipeline_id)
         ai_enabled = pipe_ai_settings.get("enabled", True)
         ai_ready = 0
         if ai_enabled:
-            model = settings.TOOLNET_MODEL or ""
-            config_hash = ai_settings_repo.compute_config_hash(
-                enabled=pipe_ai_settings.get("enabled", True),
-                system_prompt=pipe_ai_settings.get("system_prompt"),
-                title_template=pipe_ai_settings.get("title_template"),
-                description_template=pipe_ai_settings.get("description_template"),
-                locked_hashtags=pipe_ai_settings.get("locked_hashtags"),
-                language=pipe_ai_settings.get("language"),
-                model=model,
-            )
             ai_ready = len(await reels.list_ai_ready_reels(pipeline_id, config_hash))
         return {
             "inventory_total": inv.get("total", 0),

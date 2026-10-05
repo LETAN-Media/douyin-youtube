@@ -160,19 +160,10 @@ async def _process_one_job(
             **base,
         )
 
-    # Verify config_hash matches current pipeline AI settings
+    # Verify config_hash matches current pipeline AI settings (canonical,
+    # recomputed — never the stored legacy hash).
     from ..db.repositories import ai_settings as ai_settings_repo
-    pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
-    model = settings.TOOLNET_MODEL or ""
-    current_config_hash = ai_settings_repo.compute_config_hash(
-        enabled=pipe_ai_settings.get("enabled", True),
-        system_prompt=pipe_ai_settings.get("system_prompt"),
-        title_template=pipe_ai_settings.get("title_template"),
-        description_template=pipe_ai_settings.get("description_template"),
-        locked_hashtags=pipe_ai_settings.get("locked_hashtags"),
-        language=pipe_ai_settings.get("language"),
-        model=model,
-    )
+    pipe_ai_settings, current_config_hash = await ai_settings_repo.current_config_hash(pipeline_id)
     if cached_meta.get("config_hash") != current_config_hash:
         return await _fail_job(
             queue_id, publication_id, target_dir, started,

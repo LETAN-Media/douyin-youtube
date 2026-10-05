@@ -238,3 +238,70 @@ def test_settings_saved_with_model_match_scheduler() -> None:
 
     saved = asyncio.run(_save())
     assert saved.get("config_hash") == scheduler_hash()
+
+
+def test_legacy_stored_hash_does_not_stall_worker() -> None:
+    """Production scenario: a settings row saved by the old write path
+    carries a model-less config_hash, and metadata rows were generated
+    under it. The worker must ignore the stored hash, recompute the
+    canonical one, regenerate, and make the reel AI-ready — otherwise
+    the pipeline stalls silently with zero errors."""
+    seed_pipeline()
+    caption = "Caption gốc cho video kiểm thử hàm băm cũ"
+    reel_db_id = seed_reel(caption=caption)
+
+    stale_hash = ai_settings.compute_config_hash(
+        enabled=True,
+        system_prompt="",
+        title_template="{title}",
+        description_template="{description}\n\n{hashtags}",
+        locked_hashtags=[],
+        language="vi",
+        model="",
+    )
+    assert stale_hash != scheduler_hash()
+
+    async def _seed_legacy():
+        # Old write path: settings saved without the model.
+        await ai_settings.upsert_settings(
+            pipeline_id="pl_w1",
+            enabled=True,
+            system_prompt="",
+            title_template="{title}",
+            description_template="{description}\n\n{hashtags}",
+            locked_hashtags=[],
+            language="vi",
+            model=None,
+        )
+        stored, _canonical = await ai_settings.get_settings("pl_w1"), None
+        assert stored.get("config_hash") == stale_hash
+        # Old manual endpoint: row generated under the stored (stale) hash.
+        await ai_metadata.upsert_generated(
+            reel_db_id=reel_db_id,
+            title="Tiêu đề cũ",
+            description="Mô tả cũ",
+            hashtags=["#cu", "#xua", "#reels"],
+            model=settings.TOOLNET_MODEL,
+            source_hash=ai_metadata.source_hash(caption, "r1"),
+            config_hash=stale_hash,
+        )
+
+    asyncio.run(_seed_legacy())
+
+    async def _not_ready_before():
+        ready = await reels.list_ai_ready_reels("pl_w1", scheduler_hash())
+        assert ready == []
+
+    asyncio.run(_not_ready_before())
+
+    result = asyncio.run(run_ai_worker_once(transport=mock_transport()))
+    assert result is not None and result.get("status") == "generated", result
+
+    async def _ready_after():
+        row = await ai_metadata.get_for_reel(reel_db_id)
+        assert row is not None and row["status"] == "generated"
+        assert row.get("config_hash") == scheduler_hash()
+        ready = await reels.list_ai_ready_reels("pl_w1", scheduler_hash())
+        assert [r["id"] for r in ready] == [reel_db_id]
+
+    asyncio.run(_ready_after())

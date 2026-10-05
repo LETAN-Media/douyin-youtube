@@ -168,22 +168,10 @@ async def _find_reel_needing_ai(pipeline_id: str) -> dict | None:
     from ..db.repositories import ai_metadata as ai_metadata_repo
     from ..db.repositories import ai_settings as ai_settings_repo
 
-    # Get pipeline AI settings for config_hash.
-    # Must use the real ToolNet model, exactly like the scheduler,
-    # publisher, and ensure_ai_metadata do — otherwise claimed rows
-    # never match the scheduler's AI-ready hash and stall forever.
+    # Canonical hash shared with scheduler/publisher/ensure: always
+    # recomputed from live fields + live model, never the stored hash.
     model = settings.TOOLNET_MODEL or ""
-    pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id, model=model)
-
-    config_hash = pipe_ai_settings.get("config_hash") or ai_settings_repo.compute_config_hash(
-        enabled=pipe_ai_settings.get("enabled", True),
-        system_prompt=pipe_ai_settings.get("system_prompt"),
-        title_template=pipe_ai_settings.get("title_template"),
-        description_template=pipe_ai_settings.get("description_template"),
-        locked_hashtags=pipe_ai_settings.get("locked_hashtags"),
-        language=pipe_ai_settings.get("language"),
-        model=model,
-    )
+    pipe_ai_settings, config_hash = await ai_settings_repo.current_config_hash(pipeline_id)
 
     # Find reels needing AI, excluding those in backoff
     reels_needing_ai = await reels_repo.list_reels_needing_ai(pipeline_id, config_hash)

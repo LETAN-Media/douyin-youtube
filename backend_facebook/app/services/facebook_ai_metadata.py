@@ -392,9 +392,20 @@ async def ensure_ai_metadata(
     model = generator.config.model
 
     if target_pipeline_id:
-        pipeline_settings = await ai_settings.get_settings(target_pipeline_id, model=model)
+        pipeline_settings, config_hash = await ai_settings.current_config_hash(
+            target_pipeline_id, model=model
+        )
     else:
         pipeline_settings = ai_settings.default_settings("default", model=model)
+        config_hash = ai_settings.compute_config_hash(
+            enabled=pipeline_settings["enabled"],
+            system_prompt=pipeline_settings.get("system_prompt"),
+            title_template=pipeline_settings.get("title_template"),
+            description_template=pipeline_settings.get("description_template"),
+            locked_hashtags=pipeline_settings.get("locked_hashtags"),
+            language=pipeline_settings.get("language"),
+            model=model,
+        )
 
     if not pipeline_settings.get("enabled", True):
         raise MetadataError(
@@ -402,16 +413,8 @@ async def ensure_ai_metadata(
             f"AI processing is disabled for pipeline {target_pipeline_id or 'default'}.",
         )
 
-    config_hash = pipeline_settings.get("config_hash") or ai_settings.compute_config_hash(
-        enabled=pipeline_settings["enabled"],
-        system_prompt=pipeline_settings.get("system_prompt"),
-        title_template=pipeline_settings.get("title_template"),
-        description_template=pipeline_settings.get("description_template"),
-        locked_hashtags=pipeline_settings.get("locked_hashtags"),
-        language=pipeline_settings.get("language"),
-        model=model,
-    )
-
+    # config_hash is already canonical (recomputed, never the stored
+    # legacy hash) from the branch above.
     if not await ai_metadata.needs_generation(
         reel_db_id, reel.get("caption"), model, reel.get("reel_id"), config_hash=config_hash
     ):
