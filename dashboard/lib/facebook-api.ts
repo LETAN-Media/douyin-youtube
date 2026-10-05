@@ -694,3 +694,18 @@ export async function retryManualPublication(id: string): Promise<ManualPublicat
     { method: "POST" },
   );
 }
+
+export interface DeleteDestinationResult {
+  ok: boolean;
+  destination_id: string;
+  connected: boolean;
+}
+
+export async function deleteManualDestination(
+  destinationId: string,
+): Promise<DeleteDestinationResult> {
+  return fbFetch<DeleteDestinationResult>(
+    `/api/facebook/youtube-destinations/${encodeURIComponent(destinationId)}`,
+    { method: "DELETE" },
+  );
+}

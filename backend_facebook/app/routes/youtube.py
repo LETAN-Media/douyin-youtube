@@ -54,6 +54,40 @@ async def list_youtube_destinations(pipeline_id: str) -> list[dict]:
     return [destinations.to_safe_dict(r) for r in rows]
 
 
+@router.delete("/youtube-destinations/{destination_id}")
+async def disconnect_youtube_destination(
+    destination_id: str, _: None = Depends(require_admin)
+) -> dict:
+    """Safe disconnect: keep the row (history still resolves channel
+    names), clear the connection, delete credentials + pending OAuth
+    states. Refuses with 409 while live jobs exist. Never hard-deletes
+    publications or history."""
+    from ..db.repositories import manual_publications as manual_repo
+    from ..db.repositories import publish_queue as publish_queue_repo
+    from ..db.repositories import youtube_auth as auth_repo
+
+    destination = await destinations.get_destination(destination_id)
+    if destination is None:
+        raise _err(404, "DESTINATION_NOT_FOUND", "Destination not found")
+    busy_auto = await publish_queue_repo.count_active_for_destination(destination_id)
+    busy_manual = await manual_repo.count_active_for_destination(destination_id)
+    if busy_auto + busy_manual > 0:
+        raise _err(
+            409, "DESTINATION_BUSY",
+            "Kênh đang có video chờ/đang upload. Hãy đợi hoàn tất rồi ngắt kết nối.",
+        )
+    await auth_repo.delete_credentials(destination_id)
+    await auth_repo.delete_oauth_states_for_destination(destination_id)
+    updated = await destinations.disconnect_destination(destination_id)
+    if updated is None:
+        raise _err(404, "DESTINATION_NOT_FOUND", "Destination not found")
+    return {
+        "ok": True,
+        "destination_id": updated["id"],
+        "connected": False,
+    }
+
+
 @router.post("/youtube-destinations/{destination_id}/oauth/start")
 async def oauth_start(
     destination_id: str,

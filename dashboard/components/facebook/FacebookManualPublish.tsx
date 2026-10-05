@@ -120,6 +120,55 @@ export function FacebookManualPublish({
   const [connecting, setConnecting] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
 
+  // Disconnect flow state.
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
+
+  const duplicateCounts = useCallback(() => {
+    const counts = new Map<string, number>();
+    for (const ch of channels ?? []) {
+      if (!ch.channel_id) continue;
+      counts.set(ch.channel_id, (counts.get(ch.channel_id) ?? 0) + 1);
+    }
+    return counts;
+  }, [channels]);
+
+  async function handleDisconnect(destinationId: string) {
+    if (disconnecting) return;
+    setDisconnecting(true);
+    setDisconnectError(null);
+    try {
+      const res = await fetch(
+        `/api/facebook/manual/destinations/${encodeURIComponent(destinationId)}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const e = await readError(res);
+        if (res.status === 409) {
+          throw new Error("Kênh đang có video chờ/đang upload. Hãy đợi hoàn tất rồi ngắt kết nối.");
+        }
+        throw new Error(e.message || "Không ngắt kết nối được.");
+      }
+      setChannels((prev) => (prev ?? []).filter((ch) => ch.id !== destinationId));
+      if (selected?.id === destinationId) {
+        setSelected(null);
+        setPreview(null);
+        setActive(null);
+        setDuplicate(null);
+        if (pollRef.current) clearInterval(pollRef.current);
+      }
+      setConfirmId(null);
+      setMenuOpenId(null);
+      void loadHistory(selected?.id === destinationId ? undefined : selected?.id);
+    } catch (err) {
+      setDisconnectError(err instanceof Error ? err.message : "Không ngắt kết nối được.");
+    } finally {
+      setDisconnecting(false);
+    }
+  }
+
   const [url, setUrl] = useState("");
   const [resolving, setResolving] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -472,39 +521,80 @@ export function FacebookManualPublish({
                 {selected ? "Kênh đã chọn" : "Chọn kênh YouTube"}
               </p>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {(selected ? [selected] : channels).map((ch) => (
-                  <button
+                {(selected ? [selected] : channels).map((ch) => {
+                  const dupCount = ch.channel_id
+                    ? (duplicateCounts().get(ch.channel_id) ?? 0)
+                    : 0;
+                  return (
+                  <div
                     key={ch.id}
-                    type="button"
-                    onClick={() => !selected && pickChannel(ch)}
-                    disabled={!!selected}
-                    className={`flex min-h-[44px] items-center gap-3 rounded-2xl border bg-white p-4 text-left shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition ${
+                    className={`relative flex min-h-[44px] items-center gap-3 rounded-2xl border bg-white p-4 text-left shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition ${
                       selected
                         ? "border-indigo-300 ring-2 ring-indigo-100"
                         : "border-slate-200/90 hover:border-indigo-300 hover:bg-indigo-50/40"
                     }`}
                   >
-                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-lg font-extrabold text-white">
-                      {initial(ch.channel_name)}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-extrabold text-slate-900">
-                        {ch.channel_name ?? "Unnamed channel"}
+                    <button
+                      type="button"
+                      onClick={() => !selected && pickChannel(ch)}
+                      disabled={!!selected}
+                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                    >
+                      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-lg font-extrabold text-white">
+                        {initial(ch.channel_name)}
                       </span>
-                      <span className="block truncate font-mono text-[11px] text-slate-500">
-                        {ch.channel_id ?? "—"}
-                      </span>
-                      {ch.pipeline_name ? (
-                        <span className="block truncate text-[11px] text-slate-400">
-                          via {ch.pipeline_name}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-extrabold text-slate-900">
+                          {ch.channel_name ?? "Unnamed channel"}
                         </span>
-                      ) : null}
-                    </span>
-                    <Badge tone={ch.connected ? "green" : "slate"} dot>
-                      {ch.connected ? "Connected" : "Chưa kết nối"}
-                    </Badge>
-                  </button>
-                ))}
+                        <span className="block truncate font-mono text-[11px] text-slate-500">
+                          {ch.channel_id ?? "—"}
+                        </span>
+                        {ch.pipeline_name ? (
+                          <span className="block truncate text-[11px] text-slate-400">
+                            via {ch.pipeline_name}
+                          </span>
+                        ) : null}
+                      </span>
+                      <Badge tone={ch.connected ? "green" : "slate"} dot>
+                        {ch.connected ? "Connected" : "Chưa kết nối"}
+                      </Badge>
+                    </button>
+                    {dupCount > 1 && !selected ? (
+                      <span className="absolute -top-2 left-3 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-extrabold text-amber-800 ring-1 ring-inset ring-amber-200">
+                        Duplicate ×{dupCount}
+                      </span>
+                    ) : null}
+                    {!selected ? (
+                      <div className="relative shrink-0">
+                        <button
+                          type="button"
+                          title="Tùy chọn kênh"
+                          onClick={() => setMenuOpenId(menuOpenId === ch.id ? null : ch.id)}
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+                        >
+                          ⋯
+                        </button>
+                        {menuOpenId === ch.id ? (
+                          <div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMenuOpenId(null);
+                                setDisconnectError(null);
+                                setConfirmId(ch.id);
+                              }}
+                              className="flex min-h-[44px] w-full items-center gap-2 px-4 py-2.5 text-left text-xs font-bold text-rose-600 transition hover:bg-rose-50"
+                            >
+                              🗑 Ngắt kết nối
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  );
+                })}
               </div>
               {selected ? (
                 <button
@@ -586,6 +676,52 @@ export function FacebookManualPublish({
             </button>
           </div>
         </div>
+      ) : null}
+
+      {confirmId ? (
+        (() => {
+          const target = (channels ?? []).find((ch) => ch.id === confirmId);
+          return (
+            <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-4 backdrop-blur-[2px] sm:items-center">
+              <div className="fade-up w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+                <h3 className="text-base font-extrabold tracking-tight text-slate-900">
+                  Ngắt kết nối {target?.channel_name ?? "kênh này"}?
+                </h3>
+                <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+                  Kênh sẽ biến mất khỏi Manual Publish. Lịch sử đăng cũ vẫn được giữ.
+                  {target?.pipeline_name ? (
+                    <> Connection này thuộc pipeline <b>{target.pipeline_name}</b>.</>
+                  ) : null}
+                </p>
+                {disconnectError ? (
+                  <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-600">
+                    {disconnectError}
+                  </div>
+                ) : null}
+                <div className="mt-4 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (disconnecting) return;
+                      setConfirmId(null);
+                    }}
+                    className="min-h-[44px] flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600"
+                  >
+                    Huỷ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDisconnect(confirmId)}
+                    disabled={disconnecting}
+                    className="min-h-[44px] flex-1 rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-sm transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-70"
+                  >
+                    {disconnecting ? "Đang ngắt…" : "Ngắt kết nối"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()
       ) : null}
 
       {selected ? (

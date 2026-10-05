@@ -309,3 +309,14 @@ async def retry_manual(manual_id: str) -> dict[str, Any] | None:
     if (res.rows_affected or 0) == 0:
         return None
     return await get_manual_publication(manual_id)
+
+
+async def count_active_for_destination(destination_id: str) -> int:
+    """Live (queued/processing) manual publications for one destination."""
+    client = get_client()
+    rows = await client.execute(
+        "SELECT COUNT(*) FROM facebook_manual_publications "
+        "WHERE destination_id = :id AND status IN ('queued', 'processing')",
+        {"id": destination_id},
+    )
+    return rows.rows[0][0] if rows.rows else 0

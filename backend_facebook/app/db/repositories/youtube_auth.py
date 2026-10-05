@@ -116,3 +116,22 @@ async def save_credentials(destination_id: str, credentials_json: str) -> None:
         """,
         {"id": destination_id, "credentials_json": credentials_json},
     )
+
+
+async def delete_credentials(destination_id: str) -> None:
+    """Delete stored OAuth credentials. Never logs the values."""
+    client = get_client()
+    await client.execute(
+        "DELETE FROM youtube_credentials WHERE destination_id = :id",
+        {"id": destination_id},
+    )
+
+
+async def delete_oauth_states_for_destination(destination_id: str) -> int:
+    """Delete pending OAuth states. Returns rows removed."""
+    client = get_client()
+    res = await client.execute(
+        "DELETE FROM youtube_oauth_states WHERE destination_id = :id",
+        {"id": destination_id},
+    )
+    return res.rows_affected or 0

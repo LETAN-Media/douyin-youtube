@@ -154,3 +154,24 @@ async def list_connected_with_pipelines() -> list[dict[str, Any]]:
             "connected": True,
         })
     return out
+
+
+async def disconnect_destination(destination_id: str) -> dict[str, Any] | None:
+    """Safe disconnect: keep the row (history still resolves channel names),
+    clear the connection. Credentials and OAuth states are deleted by the
+    caller (youtube_auth helpers). Returns the updated row or None."""
+    client = get_client()
+    res = await client.execute(
+        "UPDATE youtube_destinations SET connected = 0, enabled = 0, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {"id": destination_id},
+    )
+    if (res.rows_affected or 0) == 0:
+        # Row may already be disconnected; still return it if it exists.
+        existing = await get_destination(destination_id)
+        if existing is None:
+            return None
+        return existing
+    updated = await get_destination(destination_id)
+    assert updated is not None
+    return updated
