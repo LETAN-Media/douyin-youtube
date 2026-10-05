@@ -274,3 +274,30 @@ def test_unexpected_handler_fails_publication_and_releases_reel() -> None:
         assert reel is not None and reel["status"] == "new"
 
     asyncio.run(_check())
+
+
+def test_run_once_heals_orphans_even_with_no_queued_jobs() -> None:
+    """The heal step must run before the no-work exit: with an empty queue
+    the loop would otherwise sleep forever and never heal the orphans."""
+    pipe_id, did = seed_connected("pl_rec5", "ytd_rec5")
+    reel_db_id = seed_ready_reel("pl_rec5", "r1")
+
+    async def _stage():
+        assert await reels.advance_status(reel_db_id, "new", "queued")
+        await publications.get_or_create(
+            publication_id="pub_orphan5", reel_db_id=reel_db_id, destination_id=did
+        )
+        assert await reels.advance_status(reel_db_id, "queued", "processing")
+
+    asyncio.run(_stage())
+
+    result = asyncio.run(run_publisher_once())
+    assert result is not None and result.get("status") == "no_work", result
+
+    async def _check():
+        reel = await reels.get_reel(reel_db_id)
+        assert reel is not None and reel["status"] == "new"
+        pub = await publications.get_publication("pub_orphan5")
+        assert pub is not None and pub["status"] == "failed"
+
+    asyncio.run(_check())

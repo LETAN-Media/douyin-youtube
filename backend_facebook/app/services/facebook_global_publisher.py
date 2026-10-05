@@ -363,19 +363,20 @@ async def _publisher_loop(
                 if recovered:
                     logger.info("recovered %d stale processing jobs", recovered)
 
-                # Claim next job (fair scheduling)
-                job = await publish_queue.claim_next_job(worker_id=WORKER_ID, max_ttl_seconds=stale_ttl_seconds)
-                if job is None:
-                    break  # No queued jobs, exit inner loop to sleep
-
-                # Heal reels/publications orphaned by earlier crashes before
-                # taking new work, so stuck 'processing' reels flow again.
+                # Heal reels/publications orphaned by earlier crashes. Must run
+                # BEFORE claiming: orphans have no queued rows, so a sweep
+                # placed after the no-work break below would never execute.
                 try:
                     healed = await reels.recover_orphaned_reel_claims()
                     if healed:
                         logger.info("publisher healed %d orphaned reel claims", healed)
                 except Exception:
                     logger.exception("orphan reel recovery failed")
+
+                # Claim next job (fair scheduling)
+                job = await publish_queue.claim_next_job(worker_id=WORKER_ID, max_ttl_seconds=stale_ttl_seconds)
+                if job is None:
+                    break  # No queued jobs, exit inner loop to sleep
 
                 try:
                     await _process_one_job(job, transport=transport, youtube_factory=youtube_factory)
@@ -439,6 +440,12 @@ async def run_publisher_once(
     recovered = await publish_queue.recover_stale_jobs(settings.FACEBOOK_PUBLISH_STALE_TTL_SECONDS)
     if recovered:
         logger.info("recovered %d stale jobs", recovered)
+    try:
+        healed = await reels.recover_orphaned_reel_claims()
+        if healed:
+            logger.info("healed %d orphaned reel claims", healed)
+    except Exception:
+        logger.exception("orphan reel recovery failed")
 
     job = await publish_queue.claim_next_job(worker_id=WORKER_ID, max_ttl_seconds=settings.FACEBOOK_PUBLISH_STALE_TTL_SECONDS)
     if job is None:
