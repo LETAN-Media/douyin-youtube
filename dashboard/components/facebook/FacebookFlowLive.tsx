@@ -18,12 +18,22 @@ const STEP_DEFS: Array<{ key: keyof FacebookFlowState["steps"]; title: string; s
   { key: "youtube_destination", title: "YouTube Destination", subtitle: "Channel" },
 ];
 
+const DETAIL_KEYS: Record<keyof FacebookFlowState["steps"], keyof NonNullable<FacebookFlowState["details"]>> = {
+  source: "source",
+  inventory: "inventory",
+  ai_metadata: "ai_metadata",
+  scheduler: "scheduler",
+  publisher: "publisher",
+  youtube_destination: "youtube_destination",
+};
+
 function toSteps(state: FacebookFlowState): FacebookFlowStep[] {
   return STEP_DEFS.map((d) => ({
     key: d.key,
     title: d.title,
     subtitle: d.subtitle,
     status: state.steps[d.key],
+    detail: state.details?.[DETAIL_KEYS[d.key]],
   }));
 }
 

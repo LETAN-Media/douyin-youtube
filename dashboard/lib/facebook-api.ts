@@ -1,9 +1,12 @@
 // Server-side Facebook backend client. Never import from client components.
 // Token stays on the server: browser polls the Next.js proxy route instead.
 
-export type FacebookFlowStepState =
+export type FacebookFlowBackendStatus =
   | "idle"
+  | "ready"
+  | "waiting"
   | "running"
+  | "partial"
   | "done"
   | "error"
   | "not_configured";
@@ -17,12 +20,20 @@ export interface FacebookFlowState {
   processing: number;
   failed: number;
   steps: {
-    source: FacebookFlowStepState;
-    inventory: FacebookFlowStepState;
-    ai_metadata: FacebookFlowStepState;
-    scheduler: FacebookFlowStepState;
-    publisher: FacebookFlowStepState;
-    youtube_destination: FacebookFlowStepState;
+    source: FacebookFlowBackendStatus;
+    inventory: FacebookFlowBackendStatus;
+    ai_metadata: FacebookFlowBackendStatus;
+    scheduler: FacebookFlowBackendStatus;
+    publisher: FacebookFlowBackendStatus;
+    youtube_destination: FacebookFlowBackendStatus;
+  };
+  details?: {
+    source: string;
+    inventory: string;
+    ai_metadata: string;
+    scheduler: string;
+    publisher: string;
+    youtube_destination: string;
   };
 }
 

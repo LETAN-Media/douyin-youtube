@@ -15,29 +15,34 @@ import {
 import { FlowEdge, type FlowEdgeLook } from "@/components/pipeline/FlowConnector";
 import { vPath } from "@/lib/flowLayout";
 
-// Visual pipeline flow for a Facebook pipeline.
-// Data-driven: pass `steps` mapped 1:1 from GET flow-state.
-// Backend statuses "running"/"not_configured" normalize to the existing
-// visual states (active/idle) so the UI system stays unchanged.
-export type FacebookFlowStatus = "idle" | "active" | "done" | "error";
+// Backend statuses from GET /api/facebook/pipelines/{pipeline_id}/flow-state
+// We keep them 1:1 with backend semantics - no forced mapping.
 export type FacebookFlowBackendStatus =
-  | FacebookFlowStatus
+  | "idle"
+  | "ready"
+  | "waiting"
   | "running"
+  | "partial"
+  | "done"
+  | "error"
   | "not_configured";
+
+// Visual states for UI (subset of backend statuses + internal)
+// These map 1:1 with backend statuses where possible
+export type FacebookFlowVisualStatus = FacebookFlowBackendStatus;
 
 export type FacebookFlowStep = {
   key: string;
   title: string;
   subtitle: string;
-  status: FacebookFlowStatus | FacebookFlowBackendStatus;
+  status: FacebookFlowBackendStatus;
+  detail?: string;
 };
 
-/** Backend -> visual mapping (single place, unit-testable via build). */
-export function normalizeFlowStatus(s: string): FacebookFlowStatus {
-  if (s === "running" || s === "active") return "active";
-  if (s === "done") return "done";
-  if (s === "error") return "error";
-  return "idle"; // idle + not_configured + unknown -> gray
+/** Backend -> visual mapping (single place). Keeps backend semantics. */
+export function normalizeFlowStatus(s: FacebookFlowBackendStatus): FacebookFlowVisualStatus {
+  // Direct 1:1 mapping - all backend statuses are valid visual states
+  return s;
 }
 
 const STEP_ICONS: Record<string, (size: number) => React.ReactNode> = {
@@ -73,18 +78,9 @@ const STEP_ICONS: Record<string, (size: number) => React.ReactNode> = {
   ),
 };
 
-export const DEFAULT_FACEBOOK_FLOW_STEPS: FacebookFlowStep[] = [
-  { key: "source", title: "Source", subtitle: "Facebook Fanpage", status: "done" },
-  { key: "inventory", title: "Inventory", subtitle: "Videos", status: "active" },
-  { key: "ai", title: "AI Metadata", subtitle: "Title / Desc / Tags", status: "idle" },
-  { key: "scheduler", title: "Scheduler", subtitle: "Slots", status: "idle" },
-  { key: "publisher", title: "Publisher", subtitle: "Upload", status: "idle" },
-  { key: "destination", title: "YouTube Destination", subtitle: "Channel", status: "idle" },
-];
-
 const STATUS_META: Record<
-  FacebookFlowStatus,
-  { label: string; chip: string; dot: string; pulse: boolean; icon: React.ReactNode }
+  FacebookFlowVisualStatus,
+  { label: string; chip: string; dot: string; pulse: boolean; icon: React.ReactNode | null }
 > = {
   idle: {
     label: "Idle",
@@ -93,12 +89,33 @@ const STATUS_META: Record<
     pulse: false,
     icon: null,
   },
-  active: {
+  ready: {
+    label: "Ready",
+    chip: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    dot: "bg-emerald-500",
+    pulse: false,
+    icon: <IconCheck size={11} />,
+  },
+  waiting: {
+    label: "Waiting",
+    chip: "bg-amber-50 text-amber-700 ring-amber-200",
+    dot: "bg-amber-500",
+    pulse: true,
+    icon: <IconClock size={11} />,
+  },
+  running: {
     label: "Running",
     chip: "bg-indigo-50 text-indigo-700 ring-indigo-200",
     dot: "bg-indigo-500",
     pulse: true,
     icon: null,
+  },
+  partial: {
+    label: "Partial",
+    chip: "bg-violet-50 text-violet-700 ring-violet-200",
+    dot: "bg-violet-500",
+    pulse: false,
+    icon: <IconSparkles size={11} />,
   },
   done: {
     label: "Done",
@@ -114,33 +131,68 @@ const STATUS_META: Record<
     pulse: true,
     icon: <IconAlert size={11} />,
   },
+  not_configured: {
+    label: "Not configured",
+    chip: "bg-slate-100 text-slate-500 ring-slate-200",
+    dot: "bg-slate-300",
+    pulse: false,
+    icon: null,
+  },
 };
 
-function edgeLook(a: FacebookFlowStatus, b: FacebookFlowStatus, gradientId: string): FlowEdgeLook {
-  if (a === "error" || b === "error") return { kind: "failed" };
-  if (a === "active" || b === "active") return { kind: "active", gradientId };
-  if (a === "done" && b === "done") return { kind: "faded" };
-  if (a === "done") return { kind: "active", gradientId };
+export const DEFAULT_FACEBOOK_FLOW_STEPS: FacebookFlowStep[] = [
+  { key: "source", title: "Source", subtitle: "Facebook Fanpage", status: "idle" },
+  { key: "inventory", title: "Inventory", subtitle: "Videos", status: "idle" },
+  { key: "ai", title: "AI Metadata", subtitle: "Title / Desc / Tags", status: "idle" },
+  { key: "scheduler", title: "Scheduler", subtitle: "Slots", status: "idle" },
+  { key: "publisher", title: "Publisher", subtitle: "Upload", status: "idle" },
+  { key: "destination", title: "YouTube Destination", subtitle: "Channel", status: "idle" },
+];
+
+function edgeLook(a: FacebookFlowVisualStatus, b: FacebookFlowVisualStatus, gradientId: string): FlowEdgeLook {
+  // Use helper functions to avoid TypeScript narrowing issues
+  const isError = (s: FacebookFlowVisualStatus) => s === "error";
+  const isRunning = (s: FacebookFlowVisualStatus) => s === "running";
+  const isReady = (s: FacebookFlowVisualStatus) => s === "ready";
+  const isWaiting = (s: FacebookFlowVisualStatus) => s === "waiting";
+  const isPartial = (s: FacebookFlowVisualStatus) => s === "partial";
+  const isDone = (s: FacebookFlowVisualStatus) => s === "done";
+  const isIdle = (s: FacebookFlowVisualStatus) => s === "idle";
+  const isNotConfigured = (s: FacebookFlowVisualStatus) => s === "not_configured";
+
+  if (isError(a) || isError(b)) return { kind: "failed" };
+  if (isRunning(a) || isRunning(b)) return { kind: "active", gradientId };
+  if (isReady(a) && !isIdle(b) && !isNotConfigured(b)) return { kind: "active", gradientId };
+  if (isWaiting(a)) return { kind: "active", gradientId };
+  if (isPartial(a) && !isIdle(b) && !isNotConfigured(b) && !isError(b)) return { kind: "active", gradientId };
+  if (isDone(a) && isDone(b)) return { kind: "faded" };
+  if (isDone(a)) return { kind: "active", gradientId };
   return { kind: "idle" };
 }
 
 function StepBox({ step }: { step: FacebookFlowStep }) {
   const status = normalizeFlowStatus(step.status);
-  const meta = STATUS_META[status];
+  const meta = STATUS_META[status] ?? STATUS_META.idle;
   const icon = (STEP_ICONS[step.key] ?? STEP_ICONS.inventory)(17);
+
+  // Use detail from step if provided, otherwise fallback to subtitle
+  const displayDetail = step.detail ?? step.subtitle;
+
   return (
     <div
       className={`flex w-full min-w-0 items-center gap-3 rounded-2xl border bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all duration-200 sm:p-3.5 ${
-        status === "active"
+        status === "running" || status === "waiting"
           ? "border-indigo-400 ring-2 ring-indigo-200"
           : status === "error"
             ? "border-rose-400 ring-2 ring-rose-200"
-            : status === "done"
+            : status === "ready" || status === "partial"
               ? "border-emerald-200"
-              : "border-slate-200/90"
+              : status === "done"
+                ? "border-emerald-200"
+                : "border-slate-200/90"
       }`}
       style={
-        status === "active"
+        status === "running" || status === "waiting"
           ? { filter: "drop-shadow(0 0 8px rgba(99,102,241,0.30))" }
           : status === "error"
             ? { filter: "drop-shadow(0 0 8px rgba(244,63,94,0.30))" }
@@ -152,7 +204,7 @@ function StepBox({ step }: { step: FacebookFlowStep }) {
         <span className="block truncate text-sm font-extrabold tracking-tight text-slate-900">
           {step.title}
         </span>
-        <span className="block truncate text-[11px] font-medium text-slate-500">{step.subtitle}</span>
+        <span className="block truncate text-[11px] font-medium text-slate-500">{displayDetail}</span>
       </span>
       <span
         className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${meta.chip}`}
