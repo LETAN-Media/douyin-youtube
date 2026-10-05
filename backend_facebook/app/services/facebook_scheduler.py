@@ -309,7 +309,7 @@ async def _schedule_one_guarded(
             return False
 
         try:
-            ensured = await ensure_ai_metadata(reel, transport=transport)
+            ensured = await ensure_ai_metadata(reel, pipeline_id=pipeline_id, transport=transport)
         except MetadataError as exc:
             await publications.mark_failed(publication["id"], f"AI_FAILED: {exc.code}")
             await reels.record_reel_error(reel_db_id, f"AI_FAILED: {exc.code}")

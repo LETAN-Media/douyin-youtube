@@ -79,7 +79,13 @@ async def insert_reel_if_new(
 async def get_reel(reel_db_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, source_id, reel_id, reel_url, caption, thumbnail_url, source_published_at, discovered_at, status, retry_count, last_error, youtube_video_id, youtube_published_at, created_at, updated_at FROM facebook_reels WHERE id = :id",
+        "SELECT r.id, r.source_id, r.reel_id, r.reel_url, r.caption, r.thumbnail_url, "
+        "r.source_published_at, r.discovered_at, r.status, r.retry_count, r.last_error, "
+        "r.youtube_video_id, r.youtube_published_at, r.created_at, r.updated_at, "
+        "s.pipeline_id "
+        "FROM facebook_reels r "
+        "LEFT JOIN facebook_sources s ON s.id = r.source_id "
+        "WHERE r.id = :id",
         {"id": reel_db_id},
     )
     if not rows.rows:
@@ -101,7 +107,21 @@ async def get_reel(reel_db_id: str) -> dict[str, Any] | None:
         "youtube_published_at": r[12],
         "created_at": r[13],
         "updated_at": r[14],
+        "pipeline_id": r[15] if len(r) > 15 else None,
     }
+
+
+async def get_reel_pipeline_id(reel_db_id: str) -> str | None:
+    client = get_client()
+    rows = await client.execute(
+        "SELECT s.pipeline_id FROM facebook_reels r "
+        "JOIN facebook_sources s ON s.id = r.source_id "
+        "WHERE r.id = :id",
+        {"id": reel_db_id},
+    )
+    if rows.rows and rows.rows[0][0]:
+        return str(rows.rows[0][0])
+    return None
 
 
 async def list_reels(source_id: str) -> list[dict[str, Any]]:

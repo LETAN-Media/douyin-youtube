@@ -188,7 +188,7 @@ async def _run_guarded(
     # AI metadata FIRST: cache hit or exactly one ToolNet call. Any failure
     # releases the reel before a single byte is downloaded. No raw fallback.
     try:
-        ensured = await ensure_ai_metadata(reel, transport=transport)
+        ensured = await ensure_ai_metadata(reel, pipeline_id=pipeline_id, transport=transport)
     except MetadataError as exc:
         return await _fail(
             publication["id"], target_dir, started,

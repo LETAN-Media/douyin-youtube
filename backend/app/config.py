@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     database_url: str
     admin_token: str
 
+    turso_url: str = ""
+    turso_token: str = ""
+    database_provider: str = "postgresql"
+
     public_base_url: str = "http://localhost:8000"
 
     frontend_url: str = ""
@@ -231,6 +235,9 @@ class Settings(BaseSettings):
 
     @property
     def sqlalchemy_url(self) -> str:
+        if self.database_provider == "turso" and self.turso_url and self.turso_url.strip():
+            return f"sqlite+libsql://{self.turso_url.strip().replace('https://', '').replace('http://', '')}?secure=1"
+
         url = self.database_url.strip()
 
         if url.startswith("postgresql+psycopg://"):
@@ -251,6 +258,23 @@ class Settings(BaseSettings):
             )
 
         return url
+
+    @property
+    def sqlalchemy_dialect(self) -> str:
+        if self.database_provider == "turso" and self.turso_url and self.turso_url.strip():
+            return "sqlite.libsql"
+        url = self.database_url.strip()
+        if url.startswith("postgresql+psycopg://"):
+            return "postgresql.psycopg"
+        if url.startswith("postgresql://") or url.startswith("postgres://"):
+            return "postgresql.psycopg"
+        return ""
+
+    @property
+    def sqlalchemy_connect_args(self) -> dict:
+        if self.database_provider == "turso" and self.turso_url and self.turso_url.strip() and self.turso_token:
+            return {"auth_token": self.turso_token}
+        return {}
 
     @property
     def comment_scan_minutes(self) -> int:

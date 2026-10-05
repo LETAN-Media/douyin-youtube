@@ -201,6 +201,25 @@ async def migrate() -> None:
         """
     )
     await _apply_migration(client, applied, "20241003_09", statements_09)
+    statements_10: list[str] = [
+        """
+        CREATE TABLE IF NOT EXISTS facebook_ai_settings (
+            pipeline_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            system_prompt TEXT,
+            title_template TEXT,
+            description_template TEXT,
+            locked_hashtags_json TEXT NOT NULL DEFAULT '[]',
+            language TEXT NOT NULL DEFAULT 'vi',
+            config_hash TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+    ]
+    if not await _has_column(client, "facebook_ai_metadata", "config_hash"):
+        statements_10.append("ALTER TABLE facebook_ai_metadata ADD COLUMN config_hash TEXT")
+    await _apply_migration(client, applied, "20241005_10", statements_10)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

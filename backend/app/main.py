@@ -23,7 +23,7 @@ from fastapi.middleware.cors import (
 from fastapi.responses import (
     HTMLResponse,
 )
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -159,9 +159,10 @@ async def lifespan(
 ):
     global worker_task, monitor_task
 
-    Base.metadata.create_all(
-        bind=engine
-    )
+    if engine.dialect.name not in ("sqlite", "libsql"):
+        Base.metadata.create_all(
+            bind=engine
+        )
 
     run_migrations()
 
@@ -276,6 +277,16 @@ def health() -> dict:
             and monitor_task is not None
         ),
     }
+
+
+@app.get("/ready")
+def ready() -> dict:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1")).fetchone()
+        return {"ready": True, "database": "connected"}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
 
 
 # =====================================================================

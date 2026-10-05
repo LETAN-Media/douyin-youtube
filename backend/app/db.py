@@ -12,9 +12,11 @@ class Base(DeclarativeBase):
 
 engine = create_engine(
     settings.sqlalchemy_url,
+    connect_args=settings.sqlalchemy_connect_args,
     pool_pre_ping=True,
     pool_recycle=300,
 )
+
 
 SessionLocal = sessionmaker(
     bind=engine,

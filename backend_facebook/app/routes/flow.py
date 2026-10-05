@@ -78,11 +78,15 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
     from ..db.repositories import ai_metadata as ai_metadata_repo
     from ..config import settings as app_settings
 
+    from ..db.repositories import ai_settings as ai_settings_repo
+
+    pipeline_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
     ai_configured = bool(
         app_settings.TOOLNET_AI_ENABLED
         and app_settings.TOOLNET_BASE_URL
         and app_settings.TOOLNET_API_KEY
         and app_settings.TOOLNET_MODEL
+        and pipeline_ai_settings.get("enabled", True)
     )
     ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
     if not ai_configured:
