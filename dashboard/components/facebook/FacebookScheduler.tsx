@@ -4,7 +4,6 @@ import { useState, useCallback } from "react";
 import { Card, CardHeader, Badge, btnSmall, inputCls, labelCls } from "@/components/ui";
 import { IconCalendar, IconCheck, IconPlay, IconClock } from "@/components/icons";
 import type { FacebookScheduleStatus, FacebookScheduleDto, UpdateFacebookScheduleDto } from "@/lib/facebook-api";
-import { getFacebookSchedule, updateFacebookSchedule, scheduleToday } from "@/lib/facebook-api";
 
 const WEEKDAY_NAMES = ["Chủ nhật", "Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7"];
 const WEEKDAY_KEYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
@@ -32,6 +31,43 @@ const MAX_DAILY_OPTIONS = [
   { value: "4", label: "4" },
   { value: "5", label: "5" },
 ];
+
+async function fetchSchedule(pipelineId: string): Promise<FacebookScheduleDto> {
+  const res = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function saveSchedule(pipelineId: string, payload: UpdateFacebookScheduleDto): Promise<FacebookScheduleDto> {
+  const res = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function runBatch(pipelineId: string, destinationId: string): Promise<{ batch_id: string; status: string }> {
+  const res = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ destinationId }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
 
 export function FacebookScheduler({
   pipelineId,
@@ -76,7 +112,7 @@ export function FacebookScheduler({
         batch_time: toSave.batch_time,
         slots: toSave.slots,
       };
-      const updated = await updateFacebookSchedule(pipelineId, payload);
+      const updated = await saveSchedule(pipelineId, payload);
       setSchedule(updated);
       setEditing(false);
       setRunResult("Đã lưu lịch thành công");
@@ -93,7 +129,7 @@ export function FacebookScheduler({
     if (!destinationId) return;
     setRunningBatch(true);
     try {
-      const result = await scheduleToday(pipelineId, destinationId);
+      const result = await runBatch(pipelineId, destinationId);
       setRunResult(`Batch đã tạo: ${result.batch_id} (${result.status})`);
       setTimeout(() => setRunResult(null), 5000);
       setShowRunConfirm(false);
