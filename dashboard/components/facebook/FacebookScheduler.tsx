@@ -6,6 +6,18 @@ import { IconCalendar, IconCheck, IconPlay, IconClock } from "@/components/icons
 import type { FacebookScheduleStatus, FacebookScheduleDto, UpdateFacebookScheduleDto } from "@/lib/facebook-api";
 
 const WEEKDAY_NAMES = ["Chủ nhật", "Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7"];
+// Backend (Python) weekday: Monday = 0 … Sunday = 6. WEEKDAY_NAMES above is
+// Sunday-first and only matches WEEKDAY_KEYS for the name-keyed edit form.
+// Status-driven displays (numeric weekday from the backend) must use this.
+const WEEKDAY_NAMES_MONDAY_FIRST = [
+  "Thứ 2",
+  "Thứ 3",
+  "Thứ 4",
+  "Thứ 5",
+  "Thứ 6",
+  "Thứ 7",
+  "Chủ nhật",
+];
 const WEEKDAY_KEYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
 const DEFAULT_SLOTS: Record<string, string[]> = {
@@ -56,14 +68,60 @@ async function saveSchedule(pipelineId: string, payload: UpdateFacebookScheduleD
   return res.json();
 }
 
-async function runBatch(pipelineId: string, destinationId: string): Promise<{
+type BatchRunResult = {
   ok: boolean;
   batch_id: string | null;
   status: string;
   videos_enqueued: number;
   reason: string | null;
   message: string;
-}> {
+};
+
+function describeBatchResult(
+  result: BatchRunResult,
+  ctx: { inventoryTotal: number | null; aiReady: number | null; dailyLimit: number },
+): string {
+  const n = result.videos_enqueued ?? 0;
+  const reason = result.reason;
+  const invSuffix =
+    ctx.inventoryTotal !== null && ctx.aiReady !== null
+      ? ` · Inventory ${ctx.inventoryTotal} video · ${ctx.aiReady} video AI-ready.`
+      : "";
+  // A positive enqueue count is always reported as such — never fall back
+  // to "no video" wording when videos were actually scheduled.
+  if (n > 0 && !reason) return `Đã xếp ${n} video vào hàng đợi`;
+  switch (reason) {
+    case "BATCH_ALREADY_COMPLETED":
+      return (
+        `Batch hôm nay đã chạy xong · ${n} video đã được xếp lịch.` + invSuffix
+      );
+    case "BATCH_IN_PROGRESS":
+      return "Batch hôm nay đang chạy.";
+    case "DAILY_LIMIT_REACHED":
+      return `Đã đạt giới hạn phát hành hôm nay (${ctx.dailyLimit} video).`;
+    case "NO_FUTURE_SLOTS":
+      return "Hôm nay không còn khung giờ đăng nào ở tương lai.";
+    case "AUTO_PUBLISH_DISABLED":
+      return "Auto Publish đang tắt — scheduler tự động không chạy (vẫn có thể chạy batch thủ công).";
+    case "NO_AI_READY_INVENTORY":
+      if (ctx.inventoryTotal !== null && ctx.inventoryTotal > 0) {
+        return `Inventory có ${ctx.inventoryTotal} video nhưng hiện có 0 video AI-ready.`;
+      }
+      return "Chưa có video nào trong Inventory.";
+    case "SCHEDULE_NOT_FOUND":
+      return "Pipeline chưa cấu hình lịch đăng.";
+    case "NOT_BEFORE_BATCH_TIME":
+      return "Chưa tới giờ batch hôm nay.";
+    case "NO_DESTINATION":
+      return "Chưa kết nối kênh YouTube.";
+    default:
+      if (n > 0) return `Đã xếp ${n} video vào hàng đợi`;
+      if (result.message) return result.message;
+      return "Không xếp thêm video trong lần bấm này.";
+  }
+}
+
+async function runBatch(pipelineId: string, destinationId: string): Promise<BatchRunResult> {
   const res = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -137,13 +195,14 @@ export function FacebookScheduler({
     setRunningBatch(true);
     try {
       const result = await runBatch(pipelineId, destinationId);
-      if (result.videos_enqueued > 0 && !result.reason) {
-        setRunResult(`Đã xếp ${result.videos_enqueued} video vào hàng đợi`);
-        setTimeout(() => setRunResult(null), 5000);
-      } else {
-        setRunResult(result.message || "Không có video nào được xếp vào hàng đợi");
-        setTimeout(() => setRunResult(null), 8000);
-      }
+      setRunResult(
+        describeBatchResult(result, {
+          inventoryTotal: status?.inventory_total ?? null,
+          aiReady: status?.ai_ready ?? null,
+          dailyLimit: status?.daily_limit ?? 5,
+        }),
+      );
+      setTimeout(() => setRunResult(null), result.videos_enqueued > 0 && !result.reason ? 5000 : 8000);
       setShowRunConfirm(false);
       // Refresh counters so the UI reflects any newly queued work.
       try {
@@ -161,7 +220,7 @@ export function FacebookScheduler({
     } finally {
       setRunningBatch(false);
     }
-  }, [pipelineId, destinationId]);
+  }, [pipelineId, destinationId, status]);
 
   const handleSlotChange = (dayKey: string, times: string[]) => {
     setSchedule(prev => prev ? { ...prev, slots: { ...prev.slots, [dayKey]: times } } : null);
@@ -194,6 +253,12 @@ export function FacebookScheduler({
   const aiReady = status?.ai_ready ?? null;
   const aiGenerated = status?.ai_generated ?? 0;
   const aiPending = status?.ai_pending ?? 0;
+  const queueQueued = status?.queue_queued ?? null;
+  const queueProcessing = status?.queue_processing ?? null;
+  const batchPlanned = status?.batch_planned ?? null;
+  const batchUploaded = status?.batch_uploaded ?? null;
+  const batchFailed = status?.batch_failed ?? null;
+  const batchLastError = status?.batch_last_error ?? null;
 
   const slotsByDay = slots.reduce<Record<number, any[]>>((acc, slot: any) => {
     const day = slot.weekday ?? 0;
@@ -231,7 +296,9 @@ export function FacebookScheduler({
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
                 <p className="text-xs text-slate-500">Hôm nay</p>
                 <p className="text-sm font-bold text-slate-900">
-                  {WEEKDAY_NAMES[status?.weekday ?? 0]}
+                  {WEEKDAY_NAMES_MONDAY_FIRST[
+                    Math.min(Math.max(status?.weekday ?? 0, 0), 6)
+                  ]}
                 </p>
               </div>
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
@@ -263,6 +330,38 @@ export function FacebookScheduler({
               </div>
             </div>
 
+            {invTotal !== null || queueQueued !== null || batchPlanned !== null ? (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                  <p className="text-xs text-slate-500">Inventory</p>
+                  <p className="text-sm font-bold text-slate-900">
+                    {invTotal ?? "—"}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                  <p className="text-xs text-slate-500">AI-ready</p>
+                  <p className="text-sm font-bold text-slate-900">
+                    {aiReady ?? "—"}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                  <p className="text-xs text-slate-500">Hàng đợi</p>
+                  <p className="text-sm font-bold text-slate-900">
+                    {queueQueued !== null ? `${queueQueued}${queueProcessing ? ` · ${queueProcessing} đang xử lý` : ""}` : "—"}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                  <p className="text-xs text-slate-500">Batch (KH/Lên/Xếp lỗi)</p>
+                  <p className="text-sm font-bold text-slate-900">
+                    {batchPlanned !== null ? `${batchPlanned}/${batchUploaded ?? 0}/${batchFailed ?? 0}` : "—"}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+            {batchLastError ? (
+              <p className="text-xs text-rose-600">Batch lỗi: {batchLastError}</p>
+            ) : null}
+
             {invTotal !== null && aiReady !== null ? (
               <div
                 className={`rounded-xl border p-3 text-xs leading-relaxed ${
@@ -293,7 +392,9 @@ export function FacebookScheduler({
                   .map(([day, daySlots]) => (
                     <div key={day} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white p-2">
                       <span className="w-20 shrink-0 text-xs font-bold text-slate-600">
-                        {WEEKDAY_NAMES[Number(day)]}
+                        {WEEKDAY_NAMES_MONDAY_FIRST[
+                          Math.min(Math.max(Number(day), 0), 6)
+                        ]}
                       </span>
                       <div className="flex flex-wrap gap-1.5">
                         {(daySlots as any[]).map((slot: any) => {

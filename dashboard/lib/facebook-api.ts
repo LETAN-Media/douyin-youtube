@@ -367,6 +367,12 @@ export interface FacebookScheduleStatus {
   ai_pending?: number;
   ai_failed?: number;
   ai_ready?: number;
+  queue_queued?: number;
+  queue_processing?: number;
+  batch_planned?: number;
+  batch_uploaded?: number;
+  batch_failed?: number;
+  batch_last_error?: string | null;
   slots: Array<{
     weekday: number;
     time: string;

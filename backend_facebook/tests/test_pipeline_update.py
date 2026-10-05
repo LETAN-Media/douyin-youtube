@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.db.repositories import pipelines, schedules
 from app.main import create_app
-from app.services.facebook_scheduler import execute_daily_batch
+from app.services.facebook_scheduler import describe_schedule_status, execute_daily_batch
 from tests.test_manual_batch import _at, _enable, _mark_ai_ready  # noqa: F401
 from tests.test_scheduler import (  # noqa: F401  (module-local db fixture)
     AUTH_HEADERS,
@@ -153,3 +153,31 @@ def test_auto_tick_runs_when_auto_publish_on(db) -> None:
 
     assert result["reason"] != "AUTO_PUBLISH_DISABLED", result
     assert result["videos_enqueued"] == 1, result
+
+
+# ---------- schedule/status: additive batch + queue detail ----------
+
+
+def test_schedule_status_exposes_batch_and_queue_counts(db) -> None:
+    pipe, src, dest = _enable("st")
+    seed_reel(src["id"], "r1")
+    _mark_ai_ready(pipe["id"], f"{src['id']}_r1")
+    result = asyncio.run(
+        execute_daily_batch(pipe["id"], dest["id"], force_now=True, now=_at(12, 0))
+    )
+    assert result["videos_enqueued"] == 1, result
+
+    status = asyncio.run(describe_schedule_status(pipe["id"], now=_at(12, 0)))
+
+    for key in (
+        "inventory_total", "ai_generated", "ai_pending", "ai_failed", "ai_ready",
+        "queue_queued", "queue_processing",
+        "batch_planned", "batch_uploaded", "batch_failed",
+    ):
+        assert key in status, key
+    assert status["inventory_total"] == 1
+    assert status["ai_ready"] == 0  # the ready reel was claimed into queued
+    assert status["batch_planned"] == 4  # planned counts slots, not videos
+    assert status["batch_uploaded"] == 1
+    assert status["batch_failed"] == 3  # 3 slots left with no reel to claim
+    assert status["queue_queued"] == 1

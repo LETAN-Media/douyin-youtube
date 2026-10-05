@@ -524,17 +524,34 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
         "next_batch_at": next_batch_dt,
         "slots": slots,
         "scheduler_enabled": bool(schedule.get("enabled")),
-        **await _ai_readiness_counts(pipeline_id),
+        **await _ai_readiness_counts(pipeline_id, batch),
     }
 
 
-async def _ai_readiness_counts(pipeline_id: str) -> dict:
-    """Additive counters so the UI can tell Inventory apart from AI-ready.
+async def _ai_readiness_counts(
+    pipeline_id: str, batch: dict | None = None
+) -> dict:
+    """Additive counters so the UI can tell Inventory apart from AI-ready,
+    plus today's batch detail and per-pipeline queue depth.
 
     Never raises: on any error returns zeros rather than breaking status.
     """
+    fallback = {
+        "inventory_total": 0,
+        "ai_generated": 0,
+        "ai_pending": 0,
+        "ai_failed": 0,
+        "ai_ready": 0,
+        "queue_queued": 0,
+        "queue_processing": 0,
+        "batch_planned": 0,
+        "batch_uploaded": 0,
+        "batch_failed": 0,
+        "batch_last_error": None,
+    }
     try:
         from ..db.repositories import ai_metadata as ai_metadata_repo
+        from ..db.repositories import publish_queue as publish_queue_repo
 
         inv = await reels.inventory_stats(pipeline_id)
         ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
@@ -543,18 +560,20 @@ async def _ai_readiness_counts(pipeline_id: str) -> dict:
         ai_ready = 0
         if ai_enabled:
             ai_ready = len(await reels.list_ai_ready_reels(pipeline_id, config_hash))
+        queue_stats = await publish_queue_repo.get_pipeline_queue_stats(pipeline_id)
         return {
+            **fallback,
             "inventory_total": inv.get("total", 0),
             "ai_generated": ai_stats.get("generated", 0),
             "ai_pending": ai_stats.get("pending", 0),
             "ai_failed": ai_stats.get("failed", 0),
             "ai_ready": ai_ready,
+            "queue_queued": queue_stats.get("queued", 0),
+            "queue_processing": queue_stats.get("processing", 0),
+            "batch_planned": (batch or {}).get("planned_count", 0) or 0,
+            "batch_uploaded": (batch or {}).get("uploaded_count", 0) or 0,
+            "batch_failed": (batch or {}).get("failed_count", 0) or 0,
+            "batch_last_error": (batch or {}).get("last_error"),
         }
     except Exception:
-        return {
-            "inventory_total": 0,
-            "ai_generated": 0,
-            "ai_pending": 0,
-            "ai_failed": 0,
-            "ai_ready": 0,
-        }
+        return fallback
