@@ -225,6 +225,25 @@ export async function getFacebookPipelineDetail(pipelineId: string): Promise<Fac
   );
 }
 
+export interface UpdateFacebookPipelineDto {
+  enabled?: boolean;
+  auto_publish?: boolean;
+}
+
+export async function updateFacebookPipeline(
+  pipelineId: string,
+  payload: UpdateFacebookPipelineDto,
+): Promise<FacebookPipelineDto> {
+  return fbFetch<FacebookPipelineDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 export async function getFacebookSummary(pipelineId: string): Promise<FacebookSummaryDto> {
   return fbFetch<FacebookSummaryDto>(
     `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/summary`,

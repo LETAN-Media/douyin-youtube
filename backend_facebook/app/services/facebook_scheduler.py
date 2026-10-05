@@ -190,6 +190,18 @@ async def execute_daily_batch(
     if schedule is None:
         return _batch_result(reason="SCHEDULE_NOT_FOUND")
 
+    # Auto Publish gate: the automatic tick must never enqueue/upload when
+    # the pipeline opted out. Manual "run batch now" (force_now=True) is an
+    # explicit user action and still runs. Checked BEFORE any batch row is
+    # inserted so the daily UNIQUE row is not burned.
+    if not force_now:
+        from ..db.repositories import pipelines as pipelines_repo
+
+        pipeline = await pipelines_repo.get_pipeline(pipeline_id)
+        if pipeline is not None and not pipeline.get("auto_publish", True):
+            logger.info("auto publish disabled for pipeline %s, skipping automatic batch", pipeline_id)
+            return _batch_result(reason="AUTO_PUBLISH_DISABLED")
+
     try:
         tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
     except Exception:

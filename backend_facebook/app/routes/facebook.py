@@ -26,6 +26,11 @@ class PipelineCreate(BaseModel):
     auto_publish: bool = True
 
 
+class PipelineUpdate(BaseModel):
+    enabled: bool | None = None
+    auto_publish: bool | None = None
+
+
 class SourceCreate(BaseModel):
     url: str = Field(min_length=1)
     page_name: str | None = None
@@ -100,6 +105,23 @@ async def get_one_pipeline(pipeline_id: str) -> dict:
     if pipeline is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
     return pipeline
+
+
+@router.patch("/pipelines/{pipeline_id}")
+async def update_one_pipeline(pipeline_id: str, body: PipelineUpdate, _: None = Depends(require_admin)) -> dict:
+    if body.enabled is None and body.auto_publish is None:
+        raise _err(400, "NOTHING_TO_UPDATE", "Provide at least one of: enabled, auto_publish")
+    try:
+        updated = await pipelines.update_pipeline(
+            pipeline_id,
+            enabled=body.enabled,
+            auto_publish=body.auto_publish,
+        )
+    except Exception:
+        raise _err(500, "PIPELINE_UPDATE_FAILED", "Failed to update pipeline")
+    if updated is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+    return updated
 
 
 # ---------- Sources ----------

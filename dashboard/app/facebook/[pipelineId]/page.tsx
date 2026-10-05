@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
-import { Badge } from "@/components/ui";
 import { IconBack } from "@/components/icons";
 import {
   FacebookApiError,
@@ -20,6 +19,7 @@ import {
 import type { FacebookAiSettingsDto, FacebookFlowState, FacebookScheduleDto } from "@/lib/facebook-api";
 import { getFacebookFlowState } from "@/lib/facebook-api";
 import { FacebookTabs, type FacebookTabKey } from "@/components/facebook/FacebookTabs";
+import { FacebookPipelineToggles } from "@/components/facebook/FacebookPipelineToggles";
 import { FacebookOverview } from "@/components/facebook/FacebookOverview";
 import { FacebookSources } from "@/components/facebook/FacebookSources";
 import { FacebookInventory } from "@/components/facebook/FacebookInventory";
@@ -172,14 +172,11 @@ export default async function FacebookPipelinePage({
               <IconBack size={15} />
               Facebook
             </Link>
-            <span className={`inline-flex min-h-[44px] items-center gap-2 rounded-full px-3.5 py-2 text-sm font-bold shadow-sm ring-1 ring-inset ${
-              pipeline.enabled
-                ? "bg-emerald-600 text-white ring-emerald-500"
-                : "bg-white text-slate-600 ring-slate-200"
-            }`}>
-              <span className={`h-2.5 w-2.5 rounded-full ${pipeline.enabled ? "bg-white" : "bg-slate-500"}`} />
-              {pipeline.enabled ? "AUTO ON" : "AUTO OFF"}
-            </span>
+            <FacebookPipelineToggles
+              pipelineId={pipelineId}
+              initialEnabled={pipeline.enabled}
+              initialAutoPublish={pipeline.auto_publish ?? true}
+            />
           </div>
         </div>
 

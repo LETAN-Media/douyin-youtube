@@ -54,6 +54,41 @@ async def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
     }
 
 
+async def update_pipeline(
+    pipeline_id: str,
+    *,
+    enabled: bool | None = None,
+    auto_publish: bool | None = None,
+) -> dict[str, Any] | None:
+    """Partial update: only the fields explicitly provided are changed.
+
+    Name/slug are never touched here. Returns the updated row, or None
+    when the pipeline does not exist (or nothing was provided).
+    """
+    sets: list[str] = []
+    params: dict[str, Any] = {"id": pipeline_id}
+    if enabled is not None:
+        sets.append("enabled = :enabled")
+        params["enabled"] = 1 if enabled else 0
+    if auto_publish is not None:
+        sets.append("auto_publish = :auto_publish")
+        params["auto_publish"] = 1 if auto_publish else 0
+    if not sets:
+        return await get_pipeline(pipeline_id)
+    client = get_client()
+    res = await client.execute(
+        f"UPDATE facebook_pipelines SET {', '.join(sets)}, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id",
+        params,
+    )
+    if (res.rows_affected or 0) == 0:
+        return None
+    updated = await get_pipeline(pipeline_id)
+    assert updated is not None
+    return updated
+
+
 async def get_pipeline_by_slug(slug: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
