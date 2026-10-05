@@ -556,7 +556,10 @@ def test_flow_state_publisher_mapping(db) -> None:
 
     asyncio.run(_make_failed())
     state = asyncio.run(build_flow_state(pid))
-    assert state["steps"]["publisher"] == "error"
+    # Failed history alone (no live queued/processing jobs) reads as ready,
+    # not error — the rows stay visible under Publications with retry.
+    assert state["steps"]["publisher"] == "ready"
+    assert "failed history" in state["details"]["publisher"]
 
 
 # ---------- Task 8B: AI-first publish ----------

@@ -86,8 +86,20 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         publisher_status = "running"
         publisher_detail = f"{processing} uploading"
     elif failed > 0:
-        publisher_status = "error"
-        publisher_detail = f"{failed} failed"
+        # Historical failures must not pin the step red forever: error only
+        # when failures accompany live work (queued/processing jobs). Healed
+        # history surfaces as ready with a note; rows stay visible under
+        # Publications with retry. Never delete history to fake green.
+        from ..db.repositories import publish_queue as publish_queue_repo
+
+        live_queue = await publish_queue_repo.get_pipeline_queue_stats(pipeline_id)
+        live_work = live_queue.get("queued", 0) + live_queue.get("processing", 0)
+        if live_work > 0:
+            publisher_status = "error"
+            publisher_detail = f"{failed} failed"
+        else:
+            publisher_status = "ready"
+            publisher_detail = f"{failed} failed history"
     elif scheduled > 0:
         publisher_status = "ready"
         publisher_detail = f"{scheduled} scheduled"

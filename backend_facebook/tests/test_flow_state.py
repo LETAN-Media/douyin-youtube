@@ -180,3 +180,95 @@ def test_unknown_pipeline_404(db) -> None:
     r = TestClient(create_app()).get("/api/facebook/pipelines/nope/flow-state")
     assert r.status_code == 404
     assert r.json()["error"] == "PIPELINE_NOT_FOUND"
+
+
+# ---------- publisher step: historical failures are not errors ----------
+
+
+def _make_destination(did: str = "ytd_flow", pid: str = "pl_flow") -> dict:
+    from app.db.repositories import destinations
+
+    async def _go():
+        return await destinations.create_destination(
+            destination_id=did, pipeline_id=pid, channel_id="UC_X",
+            channel_name="X",
+        )
+
+    return _run(_go())
+
+
+def _failed_publication(pub_id: str, reel_db_id: str, did: str) -> None:
+    from app.db.repositories import publications
+
+    async def _go():
+        await publications.get_or_create(
+            publication_id=pub_id, reel_db_id=reel_db_id, destination_id=did
+        )
+        await publications.mark_failed(pub_id, "SLOT_MISSED: old failure")
+
+    _run(_go())
+
+
+def _flow_publisher(db) -> tuple[str, str]:
+    client = TestClient(create_app())
+    r = client.get("/api/facebook/pipelines/pl_flow/flow-state")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["steps"]["publisher"], body["details"]["publisher"]
+
+
+def test_publisher_failed_history_is_ready_not_error(db) -> None:
+    _make_pipeline()
+    _make_source()
+    _make_destination()
+    _seed_reel("src_flow", "r1", "new")
+    _failed_publication("pub_old", "src_flow_r1", "ytd_flow")
+
+    status, detail = _flow_publisher(db)
+    assert status == "ready", (status, detail)
+    assert "failed history" in detail
+
+
+def test_publisher_failed_with_live_queue_is_error(db) -> None:
+    from app.db.repositories import publish_queue
+
+    _make_pipeline()
+    _make_source()
+    _make_destination()
+    _seed_reel("src_flow", "r1", "new")
+    _failed_publication("pub_old", "src_flow_r1", "ytd_flow")
+    _seed_reel("src_flow", "r2", "queued")
+
+    async def _enqueue():
+        await publish_queue.enqueue_publish_job(
+            pipeline_id="pl_flow", destination_id="ytd_flow",
+            reel_db_id="src_flow_r2", publication_id="pub_live",
+        )
+
+    _run(_enqueue())
+    status, detail = _flow_publisher(db)
+    assert status == "error", (status, detail)
+    assert "failed" in detail
+
+
+def test_publisher_processing_is_running(db) -> None:
+    from app.db.repositories import publications
+
+    _make_pipeline()
+    _make_source()
+    _make_destination()
+    _seed_reel("src_flow", "r1", "processing")
+
+    async def _mk():
+        await publications.get_or_create(
+            publication_id="pub_run", reel_db_id="src_flow_r1",
+            destination_id="ytd_flow",
+        )
+        client = __import__("app.db.client", fromlist=["get_client"]).get_client()
+        await client.execute(
+            "UPDATE publications SET status = 'processing' WHERE id = 'pub_run'"
+        )
+
+    _run(_mk())
+    status, detail = _flow_publisher(db)
+    assert status == "running", (status, detail)
