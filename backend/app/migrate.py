@@ -1111,6 +1111,26 @@ def _apply_014(cache: SchemaCache, engine: Any) -> None:
             assign_existing_jobs_to_default(engine, default_pipeline_id)
 
 
+def _verify_015(cache: SchemaCache, engine: Any) -> bool:
+    has_pub_dest = "ix_publications_destination_id" in cache.indexes.get("publications", [])
+    has_job_pub = "ix_video_jobs_publication_id" in cache.indexes.get("video_jobs", [])
+    return has_pub_dest and has_job_pub
+
+def _apply_015(cache: SchemaCache, engine: Any) -> None:
+    queries = [
+        "CREATE INDEX IF NOT EXISTS ix_publications_destination_id ON publications(destination_id)",
+        "CREATE INDEX IF NOT EXISTS ix_publications_status_created ON publications(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_publications_status_published ON publications(status, published_at)",
+        "CREATE INDEX IF NOT EXISTS ix_video_jobs_publication_id ON video_jobs(publication_id)"
+    ]
+    with engine.begin() as conn:
+        for q in queries:
+            try:
+                conn.execute(text(q))
+            except Exception as e:
+                pass
+
+
 # Registry of all migrations in chronological order
 MIGRATIONS = [
     MigrationDefinition("20240101_001_core_tables", "Core base tables", _verify_001, _apply_001),
@@ -1127,6 +1147,7 @@ MIGRATIONS = [
     MigrationDefinition("20240112_012_default_pipeline", "Default pipeline seed", _verify_012, _apply_012),
     MigrationDefinition("20240113_013_tenant_multiuser", "Multi-tenant auth & workspace backfill", _verify_013, _apply_013),
     MigrationDefinition("20240114_014_destination_sync", "Legacy YouTube OAuth migration & job assignment", _verify_014, _apply_014),
+    MigrationDefinition("20240115_015_performance_indexes", "Channel workspace performance indexes", _verify_015, _apply_015),
 ]
 
 

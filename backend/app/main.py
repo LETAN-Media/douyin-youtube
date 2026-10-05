@@ -4777,15 +4777,31 @@ def get_channel_detail_endpoint(
     destination_id: str,
     db: Session = Depends(get_db),
 ) -> ChannelDetailResponse:
-    d = require_destination(db, destination_id, youtube_only=True)
+    from app.tenancy import tenant_ctx
+    from sqlalchemy.orm import noload
+    ctx = tenant_ctx()
+    row = db.execute(
+        select(Destination, Pipeline)
+        .options(noload('*'))
+        .outerjoin(Pipeline, Destination.pipeline_id == Pipeline.id)
+        .where(Destination.id == destination_id)
+    ).first()
+    
+    if row is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy channel")
+    d, pipeline = row
+    if (d.platform or "").lower() != "youtube":
+        raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
+    if not ctx.is_system_admin and d.workspace_id not in ctx.workspace_ids:
+        raise HTTPException(status_code=403, detail="Không có quyền truy cập channel")
 
-    pipeline = db.get(Pipeline, d.pipeline_id) if d.pipeline_id else None
 
     sources_data = []
     if pipeline:
         from app.models import DouyinSource
         sources = db.execute(
             select(DouyinSource)
+            .options(noload('*'))
             .where(DouyinSource.pipeline_id == pipeline.id)
             .order_by(DouyinSource.created_at.desc())
         ).scalars().all()
@@ -4810,24 +4826,69 @@ def get_channel_detail_endpoint(
     now_utc = datetime.now(timezone.utc)
     today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    published_today = db.execute(
-        select(func.count(Publication.id))
-        .where(Publication.destination_id == d.id)
-        .where(Publication.status == "published")
-        .where(Publication.published_at >= today_start)
-    ).scalar() or 0
+    from sqlalchemy import text, bindparam
+    from app.scheduler import SHORTS_RESERVED_STATUSES, destination_tz, _resolve_tz, local_day_bounds_for_date, shorts_daily_limit, extra_allowed_today, get_next_upload_slot
+    
+    tz_name = destination_tz(d)
+    tz = _resolve_tz(tz_name)
+    local_today = now_utc.astimezone(tz).date()
+    local_start, local_end = local_day_bounds_for_date(tz_name, local_today)
 
-    queue_count = db.execute(
-        select(func.count(Publication.id))
-        .where(Publication.destination_id == d.id)
-        .where(Publication.status.in_(["queued", "pending", "downloading", "ai_metadata", "uploading"]))
-    ).scalar() or 0
+    res_status = list(SHORTS_RESERVED_STATUSES)
+    q_status = ["queued", "pending", "downloading", "ai_metadata", "uploading"]
 
-    last_published_at = db.execute(
-        select(func.max(Publication.published_at))
-        .where(Publication.destination_id == d.id)
-        .where(Publication.status == "published")
-    ).scalar()
+    is_sqlite = db.bind and db.bind.dialect.name in ("sqlite", "libsql")
+    if is_sqlite:
+        today_utc_val = today_start.isoformat()
+        local_start_val = local_start.isoformat()
+        local_end_val = local_end.isoformat()
+    else:
+        today_utc_val = today_start
+        local_start_val = local_start
+        local_end_val = local_end
+
+    pub_agg = db.execute(
+        text('''
+            SELECT 
+                SUM(CASE WHEN status = 'published' AND published_at >= :today_utc THEN 1 ELSE 0 END) as pub_today_utc,
+                SUM(CASE WHEN status IN :q_status THEN 1 ELSE 0 END) as global_queue,
+                SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) as exact_queued,
+                MAX(CASE WHEN status = 'published' THEN published_at ELSE NULL END) as last_pub,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN status = 'published' AND published_at >= :loc_start AND published_at < :loc_end THEN 1 ELSE 0 END) as cap_pub,
+                SUM(CASE WHEN status IN :res_status AND scheduled_at >= :loc_start AND scheduled_at < :loc_end THEN 1 ELSE 0 END) as cap_res,
+                SUM(CASE WHEN status IN :res_status AND scheduled_at IS NULL AND created_at >= :loc_start AND created_at < :loc_end THEN 1 ELSE 0 END) as cap_leg,
+                (SELECT COALESCE(SUM(extra_allowed), 0) FROM youtube_daily_publish_overrides WHERE destination_id = :did AND date = :loc_today) as extra_allowed,
+                (SELECT COUNT(id) FROM youtube_comments WHERE destination_id = :did) as total_comments,
+                (SELECT SUM(CASE WHEN status = 'replied' AND replied_at >= :today_utc THEN 1 ELSE 0 END) FROM youtube_comments WHERE destination_id = :did) as replies_today
+            FROM publications 
+            WHERE destination_id = :did
+        ''').bindparams(bindparam("q_status", expanding=True), bindparam("res_status", expanding=True)),
+        {
+            "today_utc": today_utc_val,
+            "loc_start": local_start_val,
+            "loc_end": local_end_val,
+            "loc_today": local_today.isoformat(),
+            "q_status": q_status,
+            "res_status": res_status,
+            "did": d.id
+        }
+    ).first()
+
+    published_today = int(pub_agg.pub_today_utc or 0) if pub_agg else 0
+    queue_count = int(pub_agg.global_queue or 0) if pub_agg else 0
+    failed_count = int(pub_agg.failed_count or 0) if pub_agg else 0
+
+    last_published_at_str = pub_agg.last_pub if pub_agg else None
+    last_published_at = None
+    if last_published_at_str:
+        if isinstance(last_published_at_str, str):
+            try:
+                last_published_at = datetime.fromisoformat(last_published_at_str.replace('Z', '+00:00'))
+            except:
+                pass
+        else:
+            last_published_at = last_published_at_str
 
     channel_item = ChannelItem(
         id=d.id,
@@ -4847,6 +4908,7 @@ def get_channel_detail_endpoint(
     pubs = (
         db.execute(
             select(Publication, DouyinVideo, VideoJob)
+            .options(noload('*'))
             .outerjoin(DouyinVideo, Publication.douyin_video_id == DouyinVideo.id)
             .outerjoin(VideoJob, VideoJob.publication_id == Publication.id)
             .where(Publication.destination_id == d.id)
@@ -4893,16 +4955,15 @@ def get_channel_detail_endpoint(
     inventory_videos = []
     inventory_count = 0
     if pipeline:
-        inventory_videos = db.execute(
-            select(DouyinVideo)
+        inv_rows = db.execute(
+            select(DouyinVideo, func.count().over())
+            .options(noload('*'))
             .where(DouyinVideo.pipeline_id == pipeline.id)
             .order_by(DouyinVideo.created_at.desc())
             .limit(100)
-        ).scalars().all()
-        inventory_count = db.execute(
-            select(func.count(DouyinVideo.id))
-            .where(DouyinVideo.pipeline_id == pipeline.id)
-        ).scalar() or 0
+        ).all()
+        inventory_count = inv_rows[0][1] if inv_rows else 0
+        inventory_videos = [r[0] for r in inv_rows]
 
     inventory_data = [
         {
@@ -4920,37 +4981,38 @@ def get_channel_detail_endpoint(
         for v in inventory_videos
     ]
 
-    failed_count = db.execute(
-        select(func.count(Publication.id))
-        .where(Publication.destination_id == d.id)
-        .where(Publication.status == "failed")
-    ).scalar() or 0
-
-    from app.scheduler import get_capacity, get_next_upload_slot
+    cap_pub = int(pub_agg.cap_pub or 0) if pub_agg else 0
+    cap_res = int(pub_agg.cap_res or 0) if pub_agg else 0
+    cap_leg = int(pub_agg.cap_leg or 0) if pub_agg else 0
+    limit = shorts_daily_limit(d)
+    extra = int(pub_agg.extra_allowed or 0) if pub_agg else 0
+    used = cap_pub + cap_res + cap_leg
     slots = d.upload_slots or (pipeline.upload_slots if pipeline else []) or ["08:00", "12:00", "16:00"]
     nxt = get_next_upload_slot(slots, d.timezone or "UTC", now_utc)
     next_slot_str = nxt.isoformat() if nxt else None
-    try:
-        shorts_capacity = get_capacity(db, d, now_utc)
-    except Exception:
-        shorts_capacity = None
+    
+    shorts_capacity = {
+        "destination_id": d.id,
+        "daily_limit": limit,
+        "timezone": tz_name,
+        "today": local_today.isoformat(),
+        "published_today": cap_pub,
+        "scheduled_today": cap_res + cap_leg,
+        "used_today": used,
+        "remaining_today": max(0, limit - used),
+        "extra_allowed_today": extra,
+        "allowed_today": limit + extra,
+        "queued": int(pub_agg.exact_queued or 0) if pub_agg else 0,
+        "next_available_slot": next_slot_str,
+    }
 
-    from app.comment_poller import replies_today as _comment_replies_today
-    from app.youtube import (
-        destination_analytics_scope_status,
-        destination_comment_scope_status,
-    )
-
+    from app.youtube import destination_analytics_scope_status, destination_comment_scope_status
     comment_oauth_ready, comment_oauth_reason = destination_comment_scope_status(d)
     analytics_oauth_ready, analytics_oauth_reason = destination_analytics_scope_status(d)
     analytics_reconnect_required = (not analytics_oauth_ready) and analytics_oauth_reason == "RECONNECT_REQUIRED"
-    comment_count = int(
-        db.execute(
-            select(func.count(YouTubeComment.id))
-            .where(YouTubeComment.destination_id == d.id)
-        ).scalar()
-        or 0
-    )
+
+    comment_count = int(pub_agg.total_comments or 0) if pub_agg else 0
+    replies_today_count = int(pub_agg.replies_today or 0) if pub_agg else 0
 
     return ChannelDetailResponse(
         comment_reply_enabled=bool(d.comment_reply_enabled),
@@ -4973,7 +5035,7 @@ def get_channel_detail_endpoint(
         comment_oauth_ready=comment_oauth_ready,
         comment_oauth_reason=comment_oauth_reason,
         comment_count=comment_count,
-        comment_replies_today=_comment_replies_today(db, d.id),
+        comment_replies_today=replies_today_count,
         analytics_oauth_ready=analytics_oauth_ready,
         analytics_oauth_reason=analytics_oauth_reason,
         analytics_reconnect_required=analytics_reconnect_required,
