@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db.client import migrate
-from .routes import ai_metadata, facebook, flow, health, inventory, publish, scan, schedule, youtube
+from .routes import ai_metadata, facebook, flow, health, inventory, manual, publish, scan, schedule, youtube
 
 logger = logging.getLogger("backend-facebook.main")
 
@@ -182,6 +182,7 @@ def create_app() -> FastAPI:
     app.include_router(publish.router)
     app.include_router(schedule.router)
     app.include_router(ai_metadata.router)
+    app.include_router(manual.router)
 
     return app
 

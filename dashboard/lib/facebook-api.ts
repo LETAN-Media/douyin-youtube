@@ -559,3 +559,129 @@ export async function bulkSkipFacebookReels(
     },
   );
 }
+
+export interface ManualDestinationDto {
+  id: string;
+  pipeline_id: string;
+  pipeline_name: string | null;
+  channel_id: string | null;
+  channel_name: string | null;
+  visibility: string;
+  enabled: boolean;
+  connected: boolean;
+}
+
+export async function listManualDestinations(): Promise<ManualDestinationDto[]> {
+  return fbFetch<ManualDestinationDto[]>(`/api/facebook/manual/destinations`);
+}
+
+export interface ManualResolveDto {
+  source_url: string;
+  caption: string | null;
+  thumbnail_url: string | null;
+  duration: number | null;
+  media_type: string;
+}
+
+export async function resolveManualVideo(url: string): Promise<ManualResolveDto> {
+  return fbFetch<ManualResolveDto>(`/api/facebook/manual/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+}
+
+export interface ManualMetadataDto {
+  title: string;
+  description: string;
+  hashtags: string[];
+  model: string;
+}
+
+export async function generateManualMetadata(payload: {
+  destination_id: string;
+  caption?: string | null;
+  source_url?: string | null;
+}): Promise<ManualMetadataDto> {
+  return fbFetch<ManualMetadataDto>(`/api/facebook/manual/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export interface ManualPublicationDto {
+  id: string;
+  destination_id: string;
+  pipeline_id: string | null;
+  pipeline_name: string | null;
+  channel_id: string | null;
+  channel_name: string | null;
+  source_url: string;
+  caption: string | null;
+  thumbnail_url: string | null;
+  duration: number | null;
+  youtube_title: string | null;
+  youtube_description: string | null;
+  youtube_hashtags: string[];
+  visibility: string;
+  publish_at: string | null;
+  status: string;
+  stage: string | null;
+  youtube_video_id: string | null;
+  youtube_url: string | null;
+  error_code: string | null;
+  error: string | null;
+  retry_count: number;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export async function publishManualVideo(payload: {
+  destination_id: string;
+  source_url: string;
+  title: string;
+  description?: string;
+  hashtags?: string[];
+  visibility?: string;
+  publish_at?: string | null;
+  caption?: string | null;
+  thumbnail_url?: string | null;
+  duration?: number | null;
+  force_duplicate?: boolean;
+}): Promise<ManualPublicationDto> {
+  return fbFetch<ManualPublicationDto>(`/api/facebook/manual/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getManualPublication(id: string): Promise<ManualPublicationDto> {
+  return fbFetch<ManualPublicationDto>(
+    `/api/facebook/manual/publications/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function listManualPublications(params?: {
+  destination_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ items: ManualPublicationDto[]; total: number }> {
+  const qs = new URLSearchParams();
+  if (params?.destination_id) qs.set("destination_id", params.destination_id);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return fbFetch<{ items: ManualPublicationDto[]; total: number }>(
+    `/api/facebook/manual/publications${suffix}`,
+  );
+}
+
+export async function retryManualPublication(id: string): Promise<ManualPublicationDto> {
+  return fbFetch<ManualPublicationDto>(
+    `/api/facebook/manual/publications/${encodeURIComponent(id)}/retry`,
+    { method: "POST" },
+  );
+}

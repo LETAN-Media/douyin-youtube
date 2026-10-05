@@ -118,3 +118,39 @@ async def set_connected(
         "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
         {"channel_id": channel_id, "channel_name": channel_name, "id": destination_id},
     )
+
+
+async def list_connected_with_pipelines() -> list[dict[str, Any]]:
+    """All logged-in (connected) YouTube destinations across pipelines.
+
+    Safe fields only — never credentials. Ordered by channel name.
+    """
+    client = get_client()
+    try:
+        rows = await client.execute(
+            "SELECT d.id, d.pipeline_id, d.channel_id, d.channel_name, "
+            "d.visibility, d.enabled, d.connected, p.name "
+            "FROM youtube_destinations d "
+            "LEFT JOIN facebook_pipelines p ON p.id = d.pipeline_id "
+            "WHERE d.connected = 1 "
+            "ORDER BY d.channel_name, d.id"
+        )
+    except Exception:
+        rows = await client.execute(
+            "SELECT id, pipeline_id, channel_id, channel_name, visibility, "
+            "enabled, connected, NULL FROM youtube_destinations "
+            "WHERE connected = 1 ORDER BY channel_name, id"
+        )
+    out = []
+    for r in rows.rows or []:
+        out.append({
+            "id": r[0],
+            "pipeline_id": r[1],
+            "pipeline_name": r[7],
+            "channel_id": r[2],
+            "channel_name": r[3],
+            "visibility": r[4] or "public",
+            "enabled": bool(r[5]),
+            "connected": True,
+        })
+    return out

@@ -373,6 +373,33 @@ async def _publisher_loop(
                 except Exception:
                     logger.exception("orphan reel recovery failed")
 
+                # Manual jobs claim first (slightly higher priority), but the
+                # single semaphore above guarantees heavy publishing never
+                # runs in parallel with auto jobs: MAX concurrency is 1.
+                try:
+                    from .facebook_manual_publisher import (
+                        handle_unexpected_manual_error,
+                        process_manual_job,
+                    )
+                    from ..db.repositories import manual_publications as manual_repo
+
+                    manual_job = await manual_repo.claim_next_manual_job()
+                except Exception:
+                    logger.exception("manual claim failed")
+                    manual_job = None
+
+                if manual_job is not None:
+                    try:
+                        await process_manual_job(
+                            manual_job, transport=transport, youtube_factory=youtube_factory
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        await handle_unexpected_manual_error(manual_job, exc)
+                    await asyncio.sleep(0.1)
+                    continue
+
                 # Claim next job (fair scheduling)
                 job = await publish_queue.claim_next_job(worker_id=WORKER_ID, max_ttl_seconds=stale_ttl_seconds)
                 if job is None:
@@ -446,6 +473,28 @@ async def run_publisher_once(
             logger.info("healed %d orphaned reel claims", healed)
     except Exception:
         logger.exception("orphan reel recovery failed")
+
+    try:
+        from .facebook_manual_publisher import (
+            handle_unexpected_manual_error,
+            process_manual_job,
+        )
+        from ..db.repositories import manual_publications as manual_repo
+
+        manual_job = await manual_repo.claim_next_manual_job()
+    except Exception:
+        logger.exception("manual claim failed")
+        manual_job = None
+
+    if manual_job is not None:
+        try:
+            result = await process_manual_job(
+                manual_job, transport=transport, youtube_factory=youtube_factory
+            )
+            return result
+        except Exception as exc:
+            await handle_unexpected_manual_error(manual_job, exc)
+            return {"status": "error", "error": str(exc)}
 
     job = await publish_queue.claim_next_job(worker_id=WORKER_ID, max_ttl_seconds=settings.FACEBOOK_PUBLISH_STALE_TTL_SECONDS)
     if job is None:

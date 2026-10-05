@@ -267,6 +267,39 @@ async def migrate() -> None:
         """,
     ]
     await _apply_migration(client, applied, "20241005_14", statements_14)
+    statements_15: list[str] = [
+        """
+        CREATE TABLE IF NOT EXISTS facebook_manual_publications (
+            id TEXT PRIMARY KEY,
+            destination_id TEXT NOT NULL,
+            pipeline_id TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            caption TEXT,
+            thumbnail_url TEXT,
+            duration REAL,
+            youtube_title TEXT,
+            youtube_description TEXT,
+            youtube_hashtags_json TEXT,
+            visibility TEXT NOT NULL DEFAULT 'public',
+            publish_at TEXT,
+            status TEXT NOT NULL DEFAULT 'queued',
+            stage TEXT,
+            youtube_video_id TEXT,
+            error_code TEXT,
+            error TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_manual_pub_destination ON facebook_manual_publications(destination_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_manual_pub_source ON facebook_manual_publications(destination_id, source_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_manual_pub_status ON facebook_manual_publications(status, created_at)",
+    ]
+    await _apply_migration(client, applied, "20241005_15", statements_15)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:
