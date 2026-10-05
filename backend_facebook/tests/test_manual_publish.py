@@ -121,6 +121,7 @@ _KEYS = (
     "ADMIN_TOKEN", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN",
     "TOOLNET_BASE_URL", "TOOLNET_API_KEY", "TOOLNET_MODEL", "TOOLNET_AI_ENABLED",
     "FASTSAVER_BASE_URL", "FASTSAVER_API_KEY",
+    "FACEBOOK_MANUAL_RESOLVER", "MANUAL_FB_PROVIDER_BASE_URL", "MANUAL_FB_PROVIDER_API_KEY",
 )
 _PREV_SETTINGS: dict = {}
 _PREV_ENV: dict = {}
@@ -145,6 +146,9 @@ def setup_function(_func=None) -> None:
     settings.TOOLNET_AI_ENABLED = True
     settings.FASTSAVER_BASE_URL = "https://fastsaver.example.com"
     settings.FASTSAVER_API_KEY = "test_fs_key"
+    # Worker wiring tests use the legacy FastSaver path; the shortcut
+    # adapter has its own mocked tests in test_manual_resolver.py.
+    settings.FACEBOOK_MANUAL_RESOLVER = "fastsaver"
     if TEST_DB_PATH.exists():
         TEST_DB_PATH.unlink()
     for suffix in ("-wal", "-shm", "-journal"):
@@ -232,16 +236,20 @@ def test_resolve_rejects_profile_url() -> None:
 
 
 def test_resolve_returns_safe_preview_only() -> None:
-    import app.services.facebook_manual_publisher as _m  # noqa: F401
-    from app.services import facebook_media as media_mod
+    from app.services import facebook_manual_media as manual_media
 
-    orig_from_settings = media_mod.FacebookMediaResolver.from_settings
+    async def _fake_resolve(url, transport=None):
+        return manual_media.ManualResolvedMedia(
+            source_url=url, download_url="https://cdn.example.com/video.mp4",
+            caption="Caption gốc từ Facebook",
+            thumbnail_url="https://cdn.example.com/thumb.jpg",
+            duration=12.5, provider="shortcut",
+        )
 
-    @classmethod
-    def _mocked(cls, transport=None):
-        return orig_from_settings(transport=fastsaver_transport())
+    import app.routes.manual as manual_routes
 
-    media_mod.FacebookMediaResolver.from_settings = _mocked
+    orig = manual_routes.resolve_manual_media
+    manual_routes.resolve_manual_media = _fake_resolve
     try:
         client = TestClient(create_app())
         r = client.post(
@@ -249,7 +257,7 @@ def test_resolve_returns_safe_preview_only() -> None:
             json={"url": VIDEO_URL},
         )
     finally:
-        media_mod.FacebookMediaResolver.from_settings = orig_from_settings
+        manual_routes.resolve_manual_media = orig
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["caption"] == "Caption gốc từ Facebook"

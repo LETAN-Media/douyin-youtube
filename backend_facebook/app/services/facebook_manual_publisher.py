@@ -23,11 +23,14 @@ from .facebook_ai_metadata import (
     apply_title_template,
 )
 from .facebook_media import (
-    FacebookMediaError,
-    FacebookMediaResolver,
     cleanup_job_dir,
     job_dir,
     sanitize_job_id,
+)
+from .facebook_manual_media import (
+    ManualResolverError,
+    download_manual_media,
+    resolve_manual_media,
 )
 from .facebook_youtube_publisher import (
     YouTubePublisherError,
@@ -174,19 +177,20 @@ async def process_manual_job(
 
         await stage("resolving")
         try:
-            resolver = FacebookMediaResolver.from_settings(transport=transport)
-            media = await resolver.resolve(source_url)
-        except FacebookMediaError as exc:
-            return await _fail_manual(manual_id, "MEDIA_RESOLVE_FAILED", str(exc))
+            # Fresh resolve right before download: direct URLs may expire,
+            # so the preview-time URL is never persisted or reused.
+            media = await resolve_manual_media(source_url, transport=transport)
+        except ManualResolverError as exc:
+            return await _fail_manual(manual_id, exc.code, str(exc))
 
         await stage("downloading")
         try:
-            output = await resolver.download_media(media, job_tmp_id)
+            output = await download_manual_media(media, job_tmp_id, transport=transport)
             file_bytes = output.stat().st_size
             if file_bytes <= 0:
-                raise FacebookMediaError("empty", "Downloaded file is empty.")
-        except FacebookMediaError as exc:
-            code = exc.code if exc.code != "empty" else "MEDIA_DOWNLOAD_FAILED"
+                raise ManualResolverError("empty", "Downloaded file is empty.")
+        except ManualResolverError as exc:
+            code = exc.code if exc.code != "empty" else "MANUAL_DOWNLOAD_FAILED"
             return await _fail_manual(manual_id, code, str(exc))
 
         await stage("uploading")

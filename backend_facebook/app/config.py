@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     # never hard-coded, never logged, never committed.
     FASTSAVER_BASE_URL: str = "https://api.fastsaver.io/v1"
     FASTSAVER_API_KEY: str | None = None
+    # Manual-publish resolver (Task 14): "shortcut" (strict, default),
+    # "shortcut_fastsaver" (shortcut first, FastSaver fallback on
+    # timeout/temporary/unsupported responses — never on validation or
+    # auth errors), or "fastsaver" (legacy behavior). Auto pipeline always
+    # uses FastSaver regardless of this setting.
+    FACEBOOK_MANUAL_RESOLVER: str = "shortcut"
+    # Third-party provider backing the shortcut-derived resolver
+    # (audited from the Snap Video shortcut workflow). Key lives only in
+    # env/Northflank — never commit it, never log it.
+    MANUAL_FB_PROVIDER_BASE_URL: str = "https://api.phimtat.vn"
+    MANUAL_FB_PROVIDER_API_KEY: str | None = None
     FASTSAVER_TIMEOUT: float = 60.0
     FACEBOOK_MEDIA_MAX_BYTES: int = 1_000_000_000
 

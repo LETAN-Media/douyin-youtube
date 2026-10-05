@@ -14,7 +14,7 @@ from ..auth import require_admin
 from ..db.repositories import destinations, manual_publications as manual_repo
 from ..db.repositories import youtube_auth
 from ..services.facebook_manual_publisher import generate_manual_metadata
-from ..services.facebook_media import FacebookMediaError, FacebookMediaResolver
+from ..services.facebook_manual_media import ManualResolverError, resolve_manual_media
 from ..services.facebook_url import is_facebook_url
 from ..services.facebook_youtube_publisher import (
     YouTubePublisherError,
@@ -114,18 +114,18 @@ async def list_all_connected_destinations(_: None = Depends(require_admin)) -> l
 async def resolve_manual_video(body: ManualResolveBody, _: None = Depends(require_admin)) -> dict:
     url = _check_manual_video_url(body.url)
     try:
-        resolver = FacebookMediaResolver.from_settings()
-        media = await resolver.resolve(url)
-    except FacebookMediaError as exc:
-        raise _err(400, "MANUAL_RESOLVE_FAILED", str(exc) or "Không nhận diện được video.")
+        media = await resolve_manual_media(url)
+    except ManualResolverError as exc:
+        raise _err(400, exc.code or "MANUAL_RESOLVE_FAILED", str(exc) or "Không nhận diện được video.")
     except RuntimeError as exc:
         raise _err(503, "MANUAL_RESOLVE_FAILED", str(exc) or "Dịch vụ nhận diện video chưa cấu hình.")
+    # Safe preview only: download_url and provider internals stay server-side.
     return {
-        "source_url": url,
+        "source_url": media.source_url,
         "caption": media.caption,
         "thumbnail_url": media.thumbnail_url,
         "duration": media.duration,
-        "media_type": media.media_type,
+        "media_type": "video",
     }
 
 

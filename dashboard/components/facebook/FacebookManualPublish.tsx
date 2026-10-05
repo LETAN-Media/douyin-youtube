@@ -452,6 +452,9 @@ export function FacebookManualPublish() {
               {resolveError ? (
                 <p className="mt-1.5 text-xs text-rose-600">{resolveError}</p>
               ) : null}
+              <p className="mt-1.5 text-[11px] text-slate-400">
+                Nguồn tải: Shortcut Resolver
+              </p>
             </div>
 
             {preview ? (
