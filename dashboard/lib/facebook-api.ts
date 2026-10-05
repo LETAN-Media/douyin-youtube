@@ -258,6 +258,28 @@ export async function listFacebookDestinations(
   );
 }
 
+export interface CreateFacebookYoutubeDestinationDto {
+  visibility?: string;
+  enabled?: boolean;
+}
+
+export async function createFacebookYoutubeDestination(
+  pipelineId: string,
+  payload: CreateFacebookYoutubeDestinationDto,
+): Promise<FacebookDestinationDto> {
+  return fbFetch<FacebookDestinationDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/youtube-destinations`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        visibility: payload.visibility ?? "public",
+        enabled: payload.enabled ?? true,
+      }),
+    },
+  );
+}
+
 export async function listFacebookPublications(
   pipelineId: string,
   opts: { limit?: number; offset?: number } = {},
