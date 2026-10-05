@@ -517,6 +517,40 @@ async def list_reels_needing_ai(
     return [_reel_to_dict(r) for r in (rows.rows or [])]
 
 
+async def list_ai_ready_reels(
+    pipeline_id: str,
+    config_hash: str,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Find reels in 'new' status that HAVE generated AI metadata matching config_hash.
+    
+    These are the reels ready for scheduler to pick up.
+    
+    A reel is AI-ready if:
+    - status = 'new'
+    - EXISTS generated AI metadata with matching config_hash
+    - pipeline has AI enabled
+    """
+    client = get_client()
+    rows = await client.execute(
+        f"""
+        SELECT {_REEL_COLUMNS} FROM facebook_reels r
+        WHERE {_pipeline_scope(pipeline_id)}
+        AND r.status = 'new'
+        AND EXISTS (
+            SELECT 1 FROM facebook_ai_metadata m
+            WHERE m.reel_db_id = r.id
+            AND m.status = 'generated'
+            AND m.config_hash = :config_hash
+        )
+        ORDER BY r.discovered_at DESC, r.id ASC
+        LIMIT :limit
+        """,
+        {"pipeline_id": pipeline_id, "config_hash": config_hash, "limit": limit},
+    )
+    return [_reel_to_dict(r) for r in (rows.rows or [])]
+
+
 async def execute(sql: str, params: dict[str, Any] | None = None) -> Any:
     """Execute raw SQL query."""
     client = get_client()

@@ -35,7 +35,7 @@ async def create_publication(
 async def get_publication(publication_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, last_error, retry_count, created_at, updated_at FROM publications WHERE id = :id",
+        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at FROM publications WHERE id = :id",
         {"id": publication_id},
     )
     if not rows.rows:
@@ -53,10 +53,11 @@ async def get_publication(publication_id: str) -> dict[str, Any] | None:
         "ai_model": r[8],
         "started_at": r[9],
         "published_at": r[10],
-        "last_error": r[11],
-        "retry_count": r[12],
-        "created_at": r[13],
-        "updated_at": r[14],
+        "scheduled_publish_at": r[11],
+        "last_error": r[12],
+        "retry_count": r[13],
+        "created_at": r[14],
+        "updated_at": r[15],
     }
 
 
@@ -65,7 +66,7 @@ async def get_by_reel_destination(
 ) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, last_error, retry_count, created_at, updated_at FROM publications WHERE reel_db_id = :reel_db_id AND destination_id = :destination_id",
+        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at FROM publications WHERE reel_db_id = :reel_db_id AND destination_id = :destination_id",
         {"reel_db_id": reel_db_id, "destination_id": destination_id},
     )
     if not rows.rows:
@@ -83,10 +84,11 @@ async def get_by_reel_destination(
         "ai_model": r[8],
         "started_at": r[9],
         "published_at": r[10],
-        "last_error": r[11],
-        "retry_count": r[12],
-        "created_at": r[13],
-        "updated_at": r[14],
+        "scheduled_publish_at": r[11],
+        "last_error": r[12],
+        "retry_count": r[13],
+        "created_at": r[14],
+        "updated_at": r[15],
     }
 
 
@@ -199,6 +201,16 @@ async def mark_failed(publication_id: str, error: str) -> None:
     )
 
 
+async def set_scheduled_publish_at(publication_id: str, scheduled_publish_at: str) -> None:
+    """Set the scheduled_publish_at timestamp on an existing publication."""
+    client = get_client()
+    await client.execute(
+        "UPDATE publications SET scheduled_publish_at = :scheduled_publish_at, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {"scheduled_publish_at": scheduled_publish_at, "id": publication_id},
+    )
+
+
 async def status_counts_for_pipeline(pipeline_id: str) -> dict[str, int]:
     """Publication status histogram across a pipeline's destinations. No N+1."""
     client = get_client()
@@ -214,7 +226,7 @@ async def status_counts_for_pipeline(pipeline_id: str) -> dict[str, int]:
 async def list_publications(destination_id: str) -> list[dict[str, Any]]:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, last_error, retry_count, created_at, updated_at FROM publications WHERE destination_id = :destination_id",
+        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at FROM publications WHERE destination_id = :destination_id",
         {"destination_id": destination_id},
     )
     return [
@@ -230,10 +242,11 @@ async def list_publications(destination_id: str) -> list[dict[str, Any]]:
             "ai_model": r[8],
             "started_at": r[9],
             "published_at": r[10],
-            "last_error": r[11],
-            "retry_count": r[12],
-            "created_at": r[13],
-            "updated_at": r[14],
+            "scheduled_publish_at": r[11],
+            "last_error": r[12],
+            "retry_count": r[13],
+            "created_at": r[14],
+            "updated_at": r[15],
         }
         for r in rows.rows
     ]

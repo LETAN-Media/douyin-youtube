@@ -160,6 +160,26 @@ async def _process_one_job(
             **base,
         )
 
+    # Verify config_hash matches current pipeline AI settings
+    from ..db.repositories import ai_settings as ai_settings_repo
+    pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
+    model = settings.TOOLNET_MODEL or ""
+    current_config_hash = ai_settings_repo.compute_config_hash(
+        enabled=pipe_ai_settings.get("enabled", True),
+        system_prompt=pipe_ai_settings.get("system_prompt"),
+        title_template=pipe_ai_settings.get("title_template"),
+        description_template=pipe_ai_settings.get("description_template"),
+        locked_hashtags=pipe_ai_settings.get("locked_hashtags"),
+        language=pipe_ai_settings.get("language"),
+        model=model,
+    )
+    if cached_meta.get("config_hash") != current_config_hash:
+        return await _fail_job(
+            queue_id, publication_id, target_dir, started,
+            "AI_METADATA_STALE", "Cached AI metadata config mismatch. Regenerate required.",
+            **base,
+        )
+
     ai_title = (cached_meta.get("title") or "").strip()
     if not ai_title or len(ai_title) > 100:
         return await _fail_job(
@@ -176,6 +196,14 @@ async def _process_one_job(
         "ai_model": cached_meta.get("model"),
         "title": ai_title,
     }
+
+    # Load scheduled_publish_at from publication
+    pub = await publications.get_publication(publication_id)
+    scheduled_publish_at = pub.get("scheduled_publish_at") if pub else None
+    visibility = destination.get("visibility") or "private"
+    validated_publish_at = None
+    if scheduled_publish_at:
+        validated_publish_at = validate_publish_at(scheduled_publish_at)
 
     try:
         await publish_queue.update_job_status(queue_id, "processing", stage="media_resolve")
@@ -233,13 +261,28 @@ async def _process_one_job(
         )
 
     try:
-        await publications.mark_published(
-            publication_id, youtube_video_id,
-            title=ai_title, description=ai_description,
-            hashtags=ensured.metadata.hashtags, ai_model=ensured.model,
-        )
-        await reels.mark_reel_published(reel_db_id, youtube_video_id)
-        await publish_queue.update_job_status(queue_id, "published", stage="completed")
+        # Determine if we should mark as scheduled (future publishAt) or published (immediate)
+        is_scheduled = validated_publish_at is not None
+        
+        if is_scheduled:
+            await publications.mark_scheduled(
+                publication_id, youtube_video_id,
+                scheduled_publish_at=validated_publish_at,
+                title=ai_title, description=ai_description,
+                hashtags=cached_meta.get("hashtags") or [],
+                ai_model=cached_meta.get("model"),
+            )
+            await reels.mark_reel_scheduled(reel_db_id, youtube_video_id)
+            await publish_queue.update_job_status(queue_id, "scheduled", stage="completed")
+        else:
+            await publications.mark_published(
+                publication_id, youtube_video_id,
+                title=ai_title, description=ai_description,
+                hashtags=cached_meta.get("hashtags") or [],
+                ai_model=cached_meta.get("model"),
+            )
+            await reels.mark_reel_published(reel_db_id, youtube_video_id)
+            await publish_queue.update_job_status(queue_id, "published", stage="completed")
     except Exception as exc:
         cleanup_job_dir(target_dir)
         await publications.mark_failed(

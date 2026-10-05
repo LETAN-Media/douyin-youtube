@@ -276,7 +276,7 @@ async def _enqueue_one_video(
     from ..db.repositories import reels as reels_repo
     if ai_enabled:
         # AI-first: only pick reels with generated AI metadata matching current config
-        reels_with_ai = await reels_repo.list_reels_needing_ai(pipeline_id, config_hash)
+        reels_with_ai = await reels_repo.list_ai_ready_reels(pipeline_id, config_hash)
         if not reels_with_ai:
             logger.info("no AI-ready reels for pipeline %s (AI enabled)", pipeline_id)
             return False
@@ -294,11 +294,9 @@ async def _enqueue_one_video(
             logger.info("no claimable AI-ready reel for pipeline %s", pipeline_id)
             return False
     else:
-        # AI disabled: pick any new reel (legacy behavior)
-        reel, claimed = await reels.claim_next_reel(pipeline_id)
-        if not claimed or reel is None:
-            logger.info("no claimable reel for pipeline %s", pipeline_id)
-            return False
+        # AI disabled: do NOT pick any reel. Require AI for scheduling.
+        logger.info("AI disabled for pipeline %s, skipping scheduling", pipeline_id)
+        return False
 
     reel_db_id = reel["id"]
     reel_id = reel["reel_id"]
@@ -312,9 +310,11 @@ async def _enqueue_one_video(
             await reels.release_claim(reel_db_id)
             return True
 
-        await publications.mark_processing(publication["id"])
-        # Reel is already "queued" after claim_next_reel. Global publisher will advance to "processing".
-        # No need to advance status here.
+        # Persist scheduled_publish_at (utc_publish_at) on the publication
+        await publications.set_scheduled_publish_at(publication["id"], utc_publish_at)
+
+        # Publication stays 'queued' - global publisher will mark 'processing' when it claims the job
+        # Reel is already 'queued' after advance_status. Global publisher will advance to 'processing'.
 
         # Enqueue to global publish queue
         # Priority: higher = more urgent. Use negative index so earlier slots have higher priority.
