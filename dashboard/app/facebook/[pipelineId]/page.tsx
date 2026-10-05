@@ -214,7 +214,7 @@ export default async function FacebookPipelinePage({
           ) : null}
           {activeTab === "destinations" ? (
             destinationsRes.ok ? (
-              <FacebookDestinations initial={destinationsRes.v} />
+              <FacebookDestinations pipelineId={pipelineId} initial={destinationsRes.v} />
             ) : (
               <TabError message={destinationsRes.e} />
             )
