@@ -258,6 +258,20 @@ export interface FacebookAiMetadataDto {
   status: string;
   metadata: { title: string | null; description: string | null; hashtags: string[] };
   model: string | null;
+  generated_at?: string | null;
+}
+
+export interface FacebookAiSettingsDto {
+  pipeline_id: string;
+  enabled: boolean;
+  system_prompt: string;
+  title_template: string;
+  description_template: string;
+  locked_hashtags: string[];
+  language: string;
+  config_hash?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface FacebookScheduleStatus {
@@ -281,6 +295,40 @@ export async function getFacebookAiStats(pipelineId: string): Promise<FacebookAi
   return fbFetch<FacebookAiStatsDto>(
     `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/ai-metadata/stats`,
   );
+}
+
+export async function getFacebookAiSettings(pipelineId: string): Promise<FacebookAiSettingsDto> {
+  return fbFetch<FacebookAiSettingsDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/ai-settings`,
+  );
+}
+
+export async function updateFacebookAiSettings(
+  pipelineId: string,
+  payload: Partial<FacebookAiSettingsDto>,
+): Promise<FacebookAiSettingsDto> {
+  return fbFetch<FacebookAiSettingsDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/ai-settings`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function getFacebookAiSample(
+  pipelineId: string,
+): Promise<FacebookAiMetadataDto | null> {
+  try {
+    const res = await fbFetch<{ ok: boolean; sample: FacebookAiMetadataDto | null }>(
+      `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/ai-metadata/sample`,
+    );
+    return res?.sample ?? null;
+  } catch (err) {
+    if (err instanceof FacebookApiError && err.status === 404) return null;
+    throw err;
+  }
 }
 
 export async function getFacebookReelAiMetadata(

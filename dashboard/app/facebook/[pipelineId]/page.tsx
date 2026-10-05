@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui";
 import { IconBack } from "@/components/icons";
 import {
   FacebookApiError,
+  getFacebookAiSample,
+  getFacebookAiSettings,
   getFacebookAiStats,
   getFacebookPipelineDetail,
   getFacebookReelAiMetadata,
@@ -14,7 +16,7 @@ import {
   listFacebookPublications,
   listFacebookSources,
 } from "@/lib/facebook-api";
-import type { FacebookFlowState } from "@/lib/facebook-api";
+import type { FacebookAiSettingsDto, FacebookFlowState } from "@/lib/facebook-api";
 import { getFacebookFlowState } from "@/lib/facebook-api";
 import { FacebookTabs, type FacebookTabKey } from "@/components/facebook/FacebookTabs";
 import { FacebookOverview } from "@/components/facebook/FacebookOverview";
@@ -118,15 +120,24 @@ export default async function FacebookPipelinePage({
   const initialFlow: FacebookFlowState | null = flowRes.ok ? flowRes.v : null;
   const flowError: string | null = flowRes.ok ? null : flowRes.e;
 
-  // AI metadata stats + one generated sample for the AI tab (server-side).
+  // AI metadata stats + settings + one generated sample for the AI tab (server-side).
   let aiStats: Awaited<ReturnType<typeof getFacebookAiStats>> | null = null;
   let aiStatsError: string | null = null;
-  let aiSample: Awaited<ReturnType<typeof getFacebookReelAiMetadata>> = null;
+  let aiSample: Awaited<ReturnType<typeof getFacebookAiSample>> = null;
+  let aiSettings: FacebookAiSettingsDto | null = null;
   try {
-    aiStats = await getFacebookAiStats(pipelineId);
-    if (inventoryRes.ok) {
-      for (const item of inventoryRes.v.items.slice(0, 8)) {
-        const meta = await getFacebookReelAiMetadata(item.id);
+    const [statsData, sampleData, settingsData] = await Promise.all([
+      getFacebookAiStats(pipelineId).catch(() => null),
+      getFacebookAiSample(pipelineId).catch(() => null),
+      getFacebookAiSettings(pipelineId).catch(() => null),
+    ]);
+    aiStats = statsData;
+    aiSample = sampleData;
+    aiSettings = settingsData;
+
+    if (!aiSample && aiStats && aiStats.generated > 0 && inventoryRes.ok) {
+      for (const item of inventoryRes.v.items) {
+        const meta = await getFacebookReelAiMetadata(item.id).catch(() => null);
         if (meta && meta.status === "generated") {
           aiSample = meta;
           break;
@@ -214,7 +225,12 @@ export default async function FacebookPipelinePage({
           ) : null}
           {activeTab === "ai-processing" ? (
             aiStats ? (
-              <FacebookAiProcessing stats={aiStats} sample={aiSample} />
+              <FacebookAiProcessing
+                pipelineId={pipelineId}
+                stats={aiStats}
+                sample={aiSample}
+                initialSettings={aiSettings}
+              />
             ) : (
               <TabError message={aiStatsError ?? "Không tải được AI metadata."} />
             )
