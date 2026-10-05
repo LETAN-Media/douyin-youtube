@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     FACEBOOK_RECONCILE_ENABLED: bool = False
     FACEBOOK_RECONCILE_POLL_SECONDS: int = 300
 
+    # Global publisher queue (Task 12).
+    FACEBOOK_PUBLISH_CONCURRENCY: int = 1
+    FACEBOOK_PUBLISH_POLL_SECONDS: int = 5
+    FACEBOOK_PUBLISH_WORKER_ENABLED: bool = True
+    FACEBOOK_PUBLISH_STALE_TTL_SECONDS: int = 300
+
     def require_toolnet(self) -> tuple[str, str, str]:
         """Return (base_url, api_key, model) or fail fast with a clear config error."""
         if not self.TOOLNET_AI_ENABLED:

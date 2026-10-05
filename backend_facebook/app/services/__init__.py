@@ -13,6 +13,7 @@ from .facebook_ai_metadata import (
     ensure_ai_metadata,
 )
 from .facebook_download_worker import DownloadJobResult, run_download_next
+from .facebook_global_publisher import get_publisher_status, run_publisher_once
 from .facebook_publish_worker import PublishJobResult, run_publish_next
 from .facebook_youtube_publisher import (
     AUTH_FAILED as YOUTUBE_AUTH_FAILED,
@@ -130,4 +131,6 @@ __all__ = [
     "refresh_if_needed",
     "upload_video",
     "validate_visibility",
+    "get_publisher_status",
+    "run_publisher_once",
 ]

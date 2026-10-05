@@ -44,6 +44,14 @@ async def lifespan(app: FastAPI):
             "reconciler loop started (poll=%ss)",
             settings.FACEBOOK_RECONCILE_POLL_SECONDS,
         )
+    publisher_task = None
+    if settings.FACEBOOK_PUBLISH_WORKER_ENABLED:
+        publisher_task = asyncio.create_task(_publisher_loop())
+        logger.info(
+            "global publisher started (concurrency=%d, poll=%ss)",
+            settings.FACEBOOK_PUBLISH_CONCURRENCY,
+            settings.FACEBOOK_PUBLISH_POLL_SECONDS,
+        )
     yield
     if scheduler_task is not None:
         scheduler_task.cancel()
@@ -61,6 +69,14 @@ async def lifespan(app: FastAPI):
             pass
         except Exception as exc:
             logger.warning("reconciler loop stop skipped: %s", exc)
+    if publisher_task is not None:
+        publisher_task.cancel()
+        try:
+            await publisher_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("publisher loop stop skipped: %s", exc)
     try:
         from .db.client import close_client
 
@@ -95,6 +111,16 @@ async def _reconciler_loop() -> None:
         except Exception as exc:
             logger.warning("reconciler tick failed: %s", exc)
         await asyncio.sleep(max(5, settings.FACEBOOK_RECONCILE_POLL_SECONDS))
+
+
+async def _publisher_loop() -> None:
+    from .services.facebook_global_publisher import _publisher_loop as run_publisher_loop
+
+    await run_publisher_loop(
+        concurrency=settings.FACEBOOK_PUBLISH_CONCURRENCY,
+        poll_seconds=settings.FACEBOOK_PUBLISH_POLL_SECONDS,
+        stale_ttl_seconds=settings.FACEBOOK_PUBLISH_STALE_TTL_SECONDS,
+    )
 
 
 def create_app() -> FastAPI:

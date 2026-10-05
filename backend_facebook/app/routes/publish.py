@@ -5,8 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import require_admin
-from ..db.repositories import pipelines
-from ..services.facebook_publish_worker import run_publish_next
+from ..db.repositories import pipelines, reels, publications, publish_queue, destinations
+from ..services.facebook_global_publisher import run_publisher_once
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-publish"])
 
@@ -22,39 +22,52 @@ async def publish_next(
     pipeline = await pipelines.get_pipeline(pipeline_id)
     if pipeline is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
-    job = await run_publish_next(pipeline_id, destination_id)
-    if job.result == "busy":
-        raise _err(409, "PUBLISH_BUSY", "Another publish job is already running.")
-    if job.result == "no_work":
-        if job.error_code in ("PIPELINE_NOT_FOUND", "DESTINATION_NOT_FOUND"):
-            raise _err(404, job.error_code, "Not found")
+
+    dest = await destinations.get_destination(destination_id)
+    if dest is None or dest.get("pipeline_id") != pipeline_id:
+        raise _err(404, "DESTINATION_NOT_FOUND", "Destination not found")
+
+    # Claim next reel and enqueue to global queue with high priority
+    reel, claimed = await reels.claim_next_reel(pipeline_id)
+    if not claimed or reel is None:
         return {"ok": True, "result": "no_work"}
-    if job.result == "already_published":
+
+    reel_db_id = reel["id"]
+    reel_id = reel["reel_id"]
+    publication_id = f"pub_{__import__('uuid').uuid4().hex[:12]}"
+
+    publication, _ = await publications.get_or_create(
+        publication_id=publication_id, reel_db_id=reel_db_id, destination_id=destination_id
+    )
+    if publication["status"] == "published":
+        await reels.release_claim(reel_db_id)
         return {
             "ok": True,
             "result": "already_published",
-            "reel_id": job.reel_id,
-            "publication_id": job.publication_id,
-            "youtube_video_id": job.youtube_video_id,
+            "reel_id": reel_id,
+            "publication_id": publication["id"],
+            "youtube_video_id": publication.get("youtube_video_id"),
         }
-    if job.result == "failed":
-        return {
-            "ok": False,
-            "result": "failed",
-            "reel_id": job.reel_id,
-            "error_code": job.error_code,
-            "error": job.error,
-        }
+
+    await publications.mark_processing(publication["id"])
+    if not await reels.advance_status(reel_db_id, "new", "queued"):
+        await publications.mark_failed(publication["id"], "CLAIM_LOST")
+        await reels.release_claim(reel_db_id)
+        return {"ok": False, "result": "failed", "error_code": "CLAIM_LOST", "error": "Reel claim lost"}
+
+    # Enqueue with high priority (manual = 2000)
+    await publish_queue.enqueue_publish_job(
+        pipeline_id=pipeline_id,
+        destination_id=destination_id,
+        reel_db_id=reel_db_id,
+        publication_id=publication["id"],
+        priority=2000,
+    )
+
     return {
         "ok": True,
-        "result": "published",
-        "reel_id": job.reel_id,
-        "publication_id": job.publication_id,
-        "youtube_video_id": job.youtube_video_id,
-        "channel_id": job.channel_id,
-        "ai_model": job.ai_model,
-        "ai_cached": job.ai_cached,
-        "title": job.title,
-        "bytes": job.file_bytes,
-        "elapsed_s": round(job.elapsed_s, 1),
+        "result": "enqueued",
+        "reel_id": reel_id,
+        "publication_id": publication["id"],
+        "message": "Job enqueued to global publish queue. Processing will start shortly.",
     }

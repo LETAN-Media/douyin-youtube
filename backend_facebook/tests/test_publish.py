@@ -516,13 +516,15 @@ def test_busy_lock(db, tmp_path) -> None:
 
 def test_endpoint_auth_shape_no_secrets(db, tmp_path, monkeypatch) -> None:
     import app.routes.publish as pub_module
-    from app.services.facebook_publish_worker import PublishJobResult
+    from app.db.repositories import reels as reels_repo
 
-    async def _stub(pid, did, **kw):
-        return PublishJobResult(result="published", reel_id="r1", publication_id="p1",
-                                youtube_video_id="yt1", channel_id="UC", file_bytes=10, elapsed_s=1.0)
+    # Mock reel claim to avoid needing real inventory
+    original_claim = reels_repo.claim_next_reel
+    
+    async def _mock_claim(pipeline_id: str):
+        return {"id": f"{pipeline_id}_r0", "reel_id": "r0"}, True
 
-    monkeypatch.setattr(pub_module, "run_publish_next", _stub)
+    monkeypatch.setattr(reels_repo, "claim_next_reel", _mock_claim)
     client = TestClient(create_app())
     pid, did = seed(n=1)
     r = client.post(f"/api/facebook/pipelines/{pid}/youtube-destinations/{did}/publish-next")
@@ -533,7 +535,7 @@ def test_endpoint_auth_shape_no_secrets(db, tmp_path, monkeypatch) -> None:
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["result"] == "published" and body["youtube_video_id"] == "yt1"
+    assert body["result"] == "enqueued"
     blob = json.dumps(body)
     assert "ya29" not in blob and "rt_test" not in blob and "csecret" not in blob
 

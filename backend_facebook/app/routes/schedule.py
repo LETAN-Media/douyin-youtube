@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
-from ..db.repositories import pipelines, schedules
+from ..db.repositories import pipelines, publish_queue, schedules
+from ..services.facebook_global_publisher import get_publisher_status, run_publisher_once
 from ..services.facebook_scheduler import describe_schedule_status, run_scheduler_tick
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-schedule"])
@@ -135,3 +136,35 @@ async def schedule_today(
         "status": "queued",
         "message": "Batch claimed. Run scheduler tick to execute.",
     }
+
+
+# Global publisher queue endpoints
+@router.get("/publish-queue/status")
+async def get_publish_queue_status(_: None = Depends(require_admin)) -> dict:
+    return await get_publisher_status()
+
+
+@router.get("/publish-queue/jobs")
+async def list_publish_queue_jobs(
+    limit: int = 50, offset: int = 0, _: None = Depends(require_admin)
+) -> dict:
+    jobs = await publish_queue.list_queued_jobs(limit=limit, offset=offset)
+    return {"jobs": jobs, "limit": limit, "offset": offset}
+
+
+@router.get("/publish-queue/stats")
+async def get_publish_queue_stats(pipeline_id: str | None = None, _: None = Depends(require_admin)) -> dict:
+    if pipeline_id:
+        return await publish_queue.get_pipeline_queue_stats(pipeline_id)
+    return await publish_queue.get_queue_stats()
+
+
+@router.post("/publish-queue/process-next")
+async def process_next_publish_job(_: None = Depends(require_admin)) -> dict:
+    return await run_publisher_once()
+
+
+@router.post("/publish-queue/recover")
+async def recover_stale_publish_jobs(_: None = Depends(require_admin)) -> dict:
+    recovered = await publish_queue.recover_stale_jobs()
+    return {"ok": True, "recovered": recovered}

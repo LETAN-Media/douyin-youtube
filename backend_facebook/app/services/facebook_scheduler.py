@@ -1,7 +1,9 @@
 """Daily batch scheduler (Task 9). One batch per day per pipeline/destination.
 
 Tick: enabled schedules -> local batch_time -> exactly-once daily batch ->
-sequential publish up to max_daily_publish with YouTube publishAt slots.
+sequential enqueue up to max_daily_publish with YouTube publishAt slots.
+
+Global publisher worker handles the actual processing.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from ..config import settings
-from ..db.repositories import destinations, publications, reels, schedules
+from ..db.repositories import destinations, publications, reels, schedules, publish_queue
 from .facebook_ai_metadata import MetadataError, ensure_ai_metadata
 from .facebook_media import (
     TMP_ROOT,
@@ -25,7 +27,6 @@ from .facebook_media import (
     cleanup_job_dir,
     job_dir,
 )
-from .facebook_publish_worker import _PUBLISH_LOCK, run_publish_next
 from .facebook_youtube_publisher import (
     YouTubePublisherError,
     finalize_description,
@@ -131,7 +132,7 @@ async def run_scheduler_tick(
 ) -> dict[str, int]:
     """One lightweight tick. Only triggers daily batches whose time has passed."""
     utc_now = _now_utc(now)
-    result = {"checked": 0, "batches_started": 0, "videos_scheduled": 0, "failed": 0}
+    result = {"checked": 0, "batches_started": 0, "videos_enqueued": 0, "failed": 0}
 
     for schedule in await schedules.list_enabled_schedules():
         result["checked"] += 1
@@ -170,11 +171,11 @@ async def run_scheduler_tick(
 
         result["batches_started"] += 1
         try:
-            scheduled = await _run_daily_batch(
+            enqueued = await _run_daily_batch(
                 pipeline_id, destination_id, date_iso, batch_time, schedule,
                 batch_id=batch_id, transport=transport, youtube_factory=youtube_factory,
             )
-            result["videos_scheduled"] += scheduled
+            result["videos_enqueued"] += enqueued
         except Exception as exc:
             logger.exception("daily batch failed for %s", pipeline_id)
             result["failed"] += 1
@@ -197,7 +198,7 @@ async def _run_daily_batch(
     transport: httpx.AsyncBaseTransport | None = None,
     youtube_factory=None,
 ) -> int:
-    """Run one daily batch. Returns number of videos successfully scheduled."""
+    """Run one daily batch. Returns number of videos successfully enqueued."""
     await schedules.mark_batch_started(batch_id)
     max_daily = schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY
     slots = _future_slots_for_today(schedule, _now_utc().astimezone(ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)))
@@ -208,32 +209,33 @@ async def _run_daily_batch(
     quota = min(max_daily, len(slots))
     await schedules.update_batch_planned(batch_id, quota)
 
-    scheduled_count = 0
+    enqueued_count = 0
     failed_count = 0
     for idx in range(quota):
         slot_time, utc_publish_at = slots[idx]
         try:
-            ok = await _schedule_one_video(
+            ok = await _enqueue_one_video(
                 pipeline_id, destination_id, local_date, batch_time,
                 slot_time, utc_publish_at, schedule,
                 batch_id=batch_id, transport=transport, youtube_factory=youtube_factory,
+                slot_index=idx,
             )
             if ok:
-                scheduled_count += 1
+                enqueued_count += 1
             else:
                 failed_count += 1
         except Exception as exc:
             logger.exception("video %d failed in batch %s", idx + 1, batch_id)
             failed_count += 1
 
-    status = "completed" if scheduled_count > 0 else "no_work"
+    status = "completed" if enqueued_count > 0 else "no_work"
     await schedules.mark_batch_finished(
-        batch_id, status, uploaded_count=scheduled_count, failed_count=failed_count,
+        batch_id, status, uploaded_count=enqueued_count, failed_count=failed_count,
     )
-    return scheduled_count
+    return enqueued_count
 
 
-async def _schedule_one_video(
+async def _enqueue_one_video(
     pipeline_id: str,
     destination_id: str,
     local_date: str,
@@ -245,34 +247,9 @@ async def _schedule_one_video(
     batch_id: str,
     transport: httpx.AsyncBaseTransport | None = None,
     youtube_factory=None,
+    slot_index: int = 0,
 ) -> bool:
-    """Schedule exactly one video for one slot. Returns True on success."""
-    if _PUBLISH_LOCK.locked():
-        logger.warning("publish lock busy, skipping slot %s", slot_time)
-        return False
-
-    async with _PUBLISH_LOCK:
-        return await _schedule_one_guarded(
-            pipeline_id, destination_id, local_date, batch_time,
-            slot_time, utc_publish_at, schedule,
-            batch_id=batch_id, transport=transport, youtube_factory=youtube_factory,
-        )
-
-
-async def _schedule_one_guarded(
-    pipeline_id: str,
-    destination_id: str,
-    local_date: str,
-    batch_time: str,
-    slot_time: str,
-    utc_publish_at: str,
-    schedule: dict,
-    *,
-    batch_id: str,
-    transport: httpx.AsyncBaseTransport | None = None,
-    youtube_factory=None,
-) -> bool:
-    """Guarded single-video schedule. No lock held across await."""
+    """Enqueue exactly one video for one slot. Returns True on success."""
     destination = await destinations.get_destination(destination_id)
     if destination is None:
         logger.error("destination missing for pipeline %s", pipeline_id)
@@ -289,8 +266,6 @@ async def _schedule_one_guarded(
 
     reel_db_id = reel["id"]
     reel_id = reel["reel_id"]
-    job_id = f"sch_{uuid.uuid4().hex[:12]}"
-    target_dir = job_dir(job_id, TMP_ROOT)
     publication_id = f"pub_{uuid.uuid4().hex[:12]}"
 
     try:
@@ -299,112 +274,39 @@ async def _schedule_one_guarded(
         )
         if publication["status"] == "published":
             await reels.release_claim(reel_db_id)
-            cleanup_job_dir(target_dir)
             return True
 
         await publications.mark_processing(publication["id"])
-        if not await reels.advance_status(reel_db_id, "queued", "processing"):
-            await publications.mark_failed(publication["id"], "CLAIM_LOST")
-            cleanup_job_dir(target_dir)
-            return False
+        # Reel is already "queued" after claim_next_reel. Global publisher will advance to "processing".
+        # No need to advance status here.
 
-        try:
-            ensured = await ensure_ai_metadata(reel, pipeline_id=pipeline_id, transport=transport)
-        except MetadataError as exc:
-            await publications.mark_failed(publication["id"], f"AI_FAILED: {exc.code}")
-            await reels.record_reel_error(reel_db_id, f"AI_FAILED: {exc.code}")
-            await reels.release_claim(reel_db_id)
-            cleanup_job_dir(target_dir)
-            return False
+        # Enqueue to global publish queue
+        # Priority: higher = more urgent. Use negative index so earlier slots have higher priority.
+        priority = 1000 - slot_index  # First slot gets highest priority
+        await publish_queue.enqueue_publish_job(
+            pipeline_id=pipeline_id,
+            destination_id=destination_id,
+            reel_db_id=reel_db_id,
+            publication_id=publication["id"],
+            priority=priority,
+        )
 
-        ai_title = (ensured.metadata.title or "").strip()
-        if not ai_title or len(ai_title) > 100:
-            await publications.mark_failed(publication["id"], "AI_METADATA_INVALID")
-            await reels.record_reel_error(reel_db_id, "AI_METADATA_INVALID")
-            await reels.release_claim(reel_db_id)
-            cleanup_job_dir(target_dir)
-            return False
-
-        ai_description = finalize_description(ensured.metadata.description, ensured.metadata.hashtags)
-
-        try:
-            resolver = FacebookMediaResolver.from_settings(transport=transport)
-        except FacebookMediaError as exc:
-            await publications.mark_failed(publication["id"], f"MEDIA_SETUP_FAILED: {exc.code}")
-            await reels.record_reel_error(reel_db_id, f"MEDIA_SETUP_FAILED: {exc.code}")
-            await reels.release_claim(reel_db_id)
-            cleanup_job_dir(target_dir)
-            return False
-
-        try:
-            media = await resolver.resolve(reel.get("reel_url") or "")
-            output = await resolver.download_media(media, job_id, tmp_root=TMP_ROOT)
-            file_bytes = output.stat().st_size
-            if file_bytes <= 0:
-                raise FacebookMediaError("MEDIA_DOWNLOAD_FAILED", "Downloaded file is empty.")
-        except Exception as exc:
-            code = exc.code if isinstance(exc, FacebookMediaError) else "DOWNLOAD_FAILED"
-            msg = str(exc)
-            await publications.mark_failed(publication["id"], f"DOWNLOAD_FAILED: {code}")
-            await reels.record_reel_error(reel_db_id, f"DOWNLOAD_FAILED: {code}")
-            await reels.release_claim(reel_db_id)
-            cleanup_job_dir(target_dir)
-            return False
-
-        try:
-            credentials = await load_destination_credentials_async(destination_id)
-            credentials = await refresh_if_needed(destination_id, credentials)
-            validated_publish_at = validate_publish_at(utc_publish_at)
-            youtube_video_id = await __import__('asyncio').to_thread(
-                upload_video, credentials, output, ai_title, ai_description,
-                "private", publish_at=validated_publish_at,
-                youtube_factory=youtube_factory,
-            )
-        except YouTubePublisherError as exc:
-            await publications.mark_failed(publication["id"], f"YT_UPLOAD_FAILED: {exc.code}")
-            await reels.record_reel_error(reel_db_id, f"YT_UPLOAD_FAILED: {exc.code}")
-            await reels.release_claim(reel_db_id)
-            cleanup_job_dir(target_dir)
-            return False
-        except Exception as exc:
-            await publications.mark_failed(publication["id"], f"YT_UPLOAD_UNEXPECTED: {type(exc).__name__}")
-            await reels.record_reel_error(reel_db_id, f"YT_UPLOAD_UNEXPECTED: {type(exc).__name__}")
-            await reels.release_claim(reel_db_id)
-            cleanup_job_dir(target_dir)
-            return False
-
-        try:
-            await publications.mark_scheduled(
-                publication["id"], youtube_video_id,
-                scheduled_publish_at=utc_publish_at,
-                title=ai_title, description=ai_description,
-                hashtags=ensured.metadata.hashtags, ai_model=ensured.model,
-            )
-            await reels.mark_reel_scheduled(reel_db_id, youtube_video_id)
-        except Exception as exc:
-            cleanup_job_dir(target_dir)
-            await reels.release_claim(reel_db_id)
-            logger.exception("DB persist failed after upload vid=%s", youtube_video_id)
-            return False
-
-        cleanup_job_dir(target_dir)
         logger.info(
-            "scheduled reel %s video %s slot %s publishAt %s",
-            reel_id, youtube_video_id, slot_time, utc_publish_at,
+            "enqueued reel %s for slot %s publishAt %s queue_priority=%d",
+            reel_id, slot_time, utc_publish_at, priority,
         )
         return True
 
     except Exception as exc:
-        logger.exception("unexpected error scheduling video in batch %s", batch_id)
+        logger.exception("unexpected error enqueueing video in batch %s", batch_id)
         try:
-            await publications.mark_failed(publication_id, f"BATCH_ERROR: {type(exc).__name__}")
+            await publications.mark_failed(publication_id, f"ENQUEUE_ERROR: {type(exc).__name__}")
         except Exception:
             pass
         try:
             await reels.release_claim(reel_db_id)
         except Exception:
             pass
-        cleanup_job_dir(target_dir)
         return False
 
 

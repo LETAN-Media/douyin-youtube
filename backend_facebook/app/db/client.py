@@ -220,6 +220,30 @@ async def migrate() -> None:
     if not await _has_column(client, "facebook_ai_metadata", "config_hash"):
         statements_10.append("ALTER TABLE facebook_ai_metadata ADD COLUMN config_hash TEXT")
     await _apply_migration(client, applied, "20241005_10", statements_10)
+    statements_11: list[str] = [
+        """
+        CREATE TABLE IF NOT EXISTS facebook_publish_queue (
+            id TEXT PRIMARY KEY,
+            pipeline_id TEXT NOT NULL,
+            destination_id TEXT NOT NULL,
+            reel_db_id TEXT NOT NULL,
+            publication_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            priority INTEGER NOT NULL DEFAULT 0,
+            stage TEXT,
+            error_code TEXT,
+            error TEXT,
+            queued_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_publish_queue_status_priority ON facebook_publish_queue(status, priority, queued_at)",
+        "CREATE INDEX IF NOT EXISTS idx_publish_queue_pipeline ON facebook_publish_queue(pipeline_id, status)",
+    ]
+    await _apply_migration(client, applied, "20241005_11", statements_11)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:
