@@ -211,6 +211,49 @@ async def set_scheduled_publish_at(publication_id: str, scheduled_publish_at: st
     )
 
 
+async def used_slot_times_for_date(
+    pipeline_id: str, date_iso: str, tz_name: str = "Asia/Ho_Chi_Minh"
+) -> list[str]:
+    """Local HH:MM slot times already assigned to this pipeline on a date.
+
+    scheduled_publish_at is stored UTC while slots are local wall-clock, so
+    each timestamp is converted to the pipeline timezone before comparing.
+    Used to keep a manual top-up from double-booking an already taken slot.
+    """
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(tz_name or "Asia/Ho_Chi_Minh")
+    except Exception:
+        tz = timezone.utc
+    client = get_client()
+    rows = await client.execute(
+        """
+        SELECT DISTINCT p.scheduled_publish_at
+        FROM publications p
+        JOIN facebook_reels r ON r.id = p.reel_db_id
+        JOIN facebook_sources s ON s.id = r.source_id
+        WHERE s.pipeline_id = :pipeline_id
+        AND p.scheduled_publish_at IS NOT NULL
+        """,
+        {"pipeline_id": pipeline_id},
+    )
+    out: set[str] = set()
+    for row in rows.rows or []:
+        raw = row[0]
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(tz)
+        if local.date().isoformat() == date_iso:
+            out.add(local.strftime("%H:%M"))
+    return sorted(out)
+
+
 async def status_counts_for_pipeline(pipeline_id: str) -> dict[str, int]:
     """Publication status histogram across a pipeline's destinations. No N+1."""
     client = get_client()

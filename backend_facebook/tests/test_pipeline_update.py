@@ -241,3 +241,83 @@ def test_schedule_status_exposes_full_queue_counts(db) -> None:
     for key in ("queue_queued", "queue_processing", "queue_scheduled", "queue_failed", "queue_total"):
         assert key in status, key
         assert status[key] == 0
+
+
+# ---------- manual top-up of a completed batch ----------
+
+MONDAY_SLOTS = {0: ["11:30", "14:30", "18:30", "20:30", "22:30"]}
+
+
+def _ready(pipe_id: str, src_id: str, rid: str) -> str:
+    from tests.test_scheduler import seed_reel as _seed
+
+    _seed(src_id, rid)
+    reel_db_id = f"{src_id}_{rid}"
+    _mark_ai_ready(pipe_id, reel_db_id)
+    return reel_db_id
+
+
+def test_manual_top_up_completed_batch(db) -> None:
+    pipe, src, dest = _enable("tp1", slots=MONDAY_SLOTS)
+    _ready(pipe["id"], src["id"], "r1")
+
+    first = asyncio.run(
+        execute_daily_batch(pipe["id"], dest["id"], force_now=True, now=_at(12, 0))
+    )
+    assert first["videos_enqueued"] == 1, first
+    assert first["reason"] is None
+
+    _ready(pipe["id"], src["id"], "r2")
+    _ready(pipe["id"], src["id"], "r3")
+    second = asyncio.run(
+        execute_daily_batch(pipe["id"], dest["id"], force_now=True, now=_at(12, 1))
+    )
+
+    # 14:30 taken by the first run; 18:30/20:30/22:30 free; quota 5-1=4.
+    assert second["videos_enqueued"] == 2, second
+    assert second["reason"] is None
+
+    status = asyncio.run(describe_schedule_status(pipe["id"], now=_at(12, 1)))
+    assert status["batch_uploaded"] == 3
+    assert status["scheduled_today"] == 3
+
+
+def test_manual_top_up_never_double_books_a_slot(db) -> None:
+    from app.db.repositories import publications as publications_repo
+
+    pipe, src, dest = _enable("tp2", slots=MONDAY_SLOTS)
+    for rid in ("r1", "r2", "r3", "r4"):
+        _ready(pipe["id"], src["id"], rid)
+
+    asyncio.run(
+        execute_daily_batch(pipe["id"], dest["id"], force_now=True, now=_at(12, 0))
+    )
+    # 4 reels take all 4 future slots; second run finds nothing free.
+    again = asyncio.run(
+        execute_daily_batch(pipe["id"], dest["id"], force_now=True, now=_at(12, 5))
+    )
+    assert again["reason"] == "BATCH_ALREADY_COMPLETED", again
+    assert again["videos_enqueued"] == 4, again
+
+    used = asyncio.run(
+        publications_repo.used_slot_times_for_date(pipe["id"], "2026-10-05")
+    )
+    assert used == ["14:30", "18:30", "20:30", "22:30"], used
+
+
+def test_auto_tick_never_tops_up_completed_batch(db) -> None:
+    from app.services.facebook_scheduler import run_scheduler_tick
+
+    pipe, src, dest = _enable("tp3", slots=MONDAY_SLOTS)
+    _ready(pipe["id"], src["id"], "r1")
+    asyncio.run(
+        execute_daily_batch(pipe["id"], dest["id"], force_now=True, now=_at(12, 0))
+    )
+
+    # The automatic tick must not add anything on top of a completed batch.
+    # (Its response echoes the already-enqueued count; the source of truth
+    # is the batch row, which must stay at 1.)
+    asyncio.run(run_scheduler_tick(now=_at(12, 30)))
+    status = asyncio.run(describe_schedule_status(pipe["id"], now=_at(12, 30)))
+    assert status["batch_uploaded"] == 1
+    assert status["batch_status"] == "completed"

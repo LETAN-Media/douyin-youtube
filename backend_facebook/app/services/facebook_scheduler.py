@@ -183,6 +183,10 @@ async def execute_daily_batch(
       - destination readiness
       - publish queue concurrency (enforced by the global publisher worker)
 
+    Additionally, a manual run on top of an already-completed batch tops up
+    free future slots (never taken twice, never over the daily limit) instead
+    of reporting BATCH_ALREADY_COMPLETED. The automatic tick never tops up.
+
     `force_now=False` (automatic tick) additionally waits for batch_time.
     """
     utc_now = _now_utc(now)
@@ -226,22 +230,31 @@ async def execute_daily_batch(
 
     # Slots are future-only for BOTH paths: force_now must not backfill.
     slots = _future_slots_for_today(schedule, now_local)
-    if not slots:
-        return _batch_result(reason="NO_FUTURE_SLOTS", date=date_iso)
 
     max_daily = schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY
-    quota = min(max_daily, len(slots))
 
     existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
+    topping_up = bool(
+        force_now and existing is not None and existing["status"] == "completed"
+    )
     if existing is not None:
         batch_status = existing["status"]
-        # Terminal-for-today states: never run the same day's batch twice.
-        if batch_status in ("completed", "running"):
+        if batch_status == "running":
             return _batch_result(
                 batch_id=existing["id"],
                 batch_status=batch_status,
-                videos_enqueued=(existing["uploaded_count"] or 0) if batch_status == "completed" else 0,
-                reason="BATCH_ALREADY_COMPLETED" if batch_status == "completed" else "BATCH_IN_PROGRESS",
+                videos_enqueued=0,
+                reason="BATCH_IN_PROGRESS",
+                date=date_iso,
+            )
+        # Completed + automatic tick: never re-run the same day twice.
+        # Completed + manual run: allow topping up free future slots below.
+        if batch_status == "completed" and not topping_up:
+            return _batch_result(
+                batch_id=existing["id"],
+                batch_status=batch_status,
+                videos_enqueued=existing["uploaded_count"] or 0,
+                reason="BATCH_ALREADY_COMPLETED",
                 date=date_iso,
             )
         # 'no_work' / 'failed' stay re-runnable: inventory or AI metadata may have
@@ -251,21 +264,70 @@ async def execute_daily_batch(
         batch_id = existing["id"]
         already_enqueued = existing["uploaded_count"] or 0
         planned_before = existing["planned_count"] or 0
+        failed_before = existing["failed_count"] or 0
     else:
         batch_id, claimed = await _ensure_batch(pipeline_id, destination_id, date_iso, batch_time)
         if not claimed:
             return _batch_result(reason="BATCH_ALREADY_COMPLETED", date=date_iso)
         already_enqueued = 0
         planned_before = 0
+        failed_before = 0
 
-    remaining = quota - already_enqueued
-    if remaining <= 0:
-        return _batch_result(
-            batch_id=batch_id,
-            batch_status=(existing or {}).get("status", "planned"),
-            reason="DAILY_LIMIT_REACHED",
-            date=date_iso,
+    if not slots:
+        if topping_up:
+            return _batch_result(
+                batch_id=batch_id,
+                batch_status="completed",
+                videos_enqueued=already_enqueued,
+                reason="BATCH_ALREADY_COMPLETED",
+                date=date_iso,
+            )
+        return _batch_result(reason="NO_FUTURE_SLOTS", date=date_iso)
+
+    if topping_up:
+        # Manual top-up of a completed batch: only slots nobody took yet,
+        # capped by the remaining daily quota. Dedup (claim + get_or_create)
+        # makes double-booking impossible.
+        from ..db.repositories import publications as publications_repo
+
+        used_times = set(
+            await publications_repo.used_slot_times_for_date(
+                pipeline_id, date_iso, schedule.get("timezone") or _DEFAULT_TIMEZONE
+            )
         )
+        plan_slots = [s for s in slots if s[0] not in used_times]
+        remaining = min(max_daily - already_enqueued, len(plan_slots))
+        if remaining <= 0:
+            return _batch_result(
+                batch_id=batch_id,
+                batch_status="completed",
+                videos_enqueued=already_enqueued,
+                reason="BATCH_ALREADY_COMPLETED",
+                date=date_iso,
+            )
+        # Only top up when new AI-ready work actually exists; otherwise a
+        # plain double-click would flip a friendly BATCH_ALREADY_COMPLETED
+        # into NO_AI_READY noise.
+        _, top_up_hash = await ai_settings_repo.current_config_hash(pipeline_id)
+        if not await reels.list_ai_ready_reels(pipeline_id, top_up_hash):
+            return _batch_result(
+                batch_id=batch_id,
+                batch_status="completed",
+                videos_enqueued=already_enqueued,
+                reason="BATCH_ALREADY_COMPLETED",
+                date=date_iso,
+            )
+    else:
+        quota = min(max_daily, len(slots))
+        remaining = quota - already_enqueued
+        if remaining <= 0:
+            return _batch_result(
+                batch_id=batch_id,
+                batch_status=(existing or {}).get("status", "planned"),
+                reason="DAILY_LIMIT_REACHED",
+                date=date_iso,
+            )
+        plan_slots = slots
 
     await schedules.mark_batch_started(batch_id)
     await schedules.update_batch_planned(batch_id, max(planned_before, already_enqueued + remaining))
@@ -277,7 +339,7 @@ async def execute_daily_batch(
 
     for offset in range(remaining):
         slot_index = already_enqueued + offset
-        slot_time, utc_publish_at = slots[slot_index]
+        slot_time, utc_publish_at = plan_slots[offset]
         try:
             ok, failure = await _enqueue_one_video(
                 pipeline_id, destination_id, date_iso, batch_time,
@@ -296,11 +358,16 @@ async def execute_daily_batch(
             if failure:
                 failure_reasons.append(failure)
 
-    final_status = "completed" if enqueued > 0 else "no_work"
+    # A top-up that added nothing keeps the previous completed state instead
+    # of downgrading to no_work.
+    if enqueued > 0 or already_enqueued > 0:
+        final_status = "completed"
+    else:
+        final_status = "no_work"
     await schedules.mark_batch_finished(
         batch_id, final_status,
         uploaded_count=already_enqueued + enqueued,
-        failed_count=failed,
+        failed_count=failed_before + failed,
     )
 
     if enqueued == 0:
