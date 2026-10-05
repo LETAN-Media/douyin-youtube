@@ -321,7 +321,7 @@ def test_flow_state_sees_running_batch(db) -> None:
     r2 = client.get(f"/api/facebook/pipelines/{pipe['id']}/flow-state")
     assert r2.status_code == 200
     body = r2.json()
-    assert body["steps"]["scheduler"] in ("idle", "running", "done", "not_configured")
+    assert body["steps"]["scheduler"] in ("idle", "running", "done", "not_configured", "waiting")
 # ---------- 13. manual publish remains unchanged ----------
 def test_manual_publish_unchanged(db) -> None:
     from app.services.facebook_publish_worker import run_publish_next

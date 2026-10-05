@@ -114,7 +114,7 @@ def test_scan_running(db) -> None:
     src = _make_source()
     _make_run("run1", src["id"], status="running")
     body = TestClient(create_app()).get("/api/facebook/pipelines/pl_flow/flow-state").json()
-    assert body["steps"]["source"] == "done"
+    assert body["steps"]["source"] == "ready"
     assert body["steps"]["inventory"] == "running"
 
 
@@ -135,8 +135,8 @@ def test_inventory_completed(db) -> None:
     body = TestClient(create_app()).get("/api/facebook/pipelines/pl_flow/flow-state").json()
     assert body["sources"] == 1 and body["inventory"] == 2
     assert body["queued"] == 1 and body["processing"] == 0
-    assert body["steps"]["source"] == "done"
-    assert body["steps"]["inventory"] == "done"
+    assert body["steps"]["source"] == "ready"
+    assert body["steps"]["inventory"] == "ready"
 
 
 def test_scan_failed_no_inventory(db) -> None:
@@ -173,7 +173,7 @@ def test_failed_scan_with_inventory_stays_done(db) -> None:
     )
     body = TestClient(create_app()).get("/api/facebook/pipelines/pl_flow/flow-state").json()
     assert body["inventory"] == 1
-    assert body["steps"]["inventory"] == "done"
+    assert body["steps"]["inventory"] == "ready"
 
 
 def test_unknown_pipeline_404(db) -> None:

@@ -11,12 +11,13 @@ import {
   getFacebookPipelineDetail,
   getFacebookReelAiMetadata,
   getFacebookScheduleStatus,
+  getFacebookSchedule,
   listFacebookDestinations,
   listFacebookInventory,
   listFacebookPublications,
   listFacebookSources,
 } from "@/lib/facebook-api";
-import type { FacebookAiSettingsDto, FacebookFlowState } from "@/lib/facebook-api";
+import type { FacebookAiSettingsDto, FacebookFlowState, FacebookScheduleDto } from "@/lib/facebook-api";
 import { getFacebookFlowState } from "@/lib/facebook-api";
 import { FacebookTabs, type FacebookTabKey } from "@/components/facebook/FacebookTabs";
 import { FacebookOverview } from "@/components/facebook/FacebookOverview";
@@ -90,7 +91,7 @@ export default async function FacebookPipelinePage({
   }
 
   // Tab data from backend_facebook. Each fetch degrades independently.
-  const [sourcesRes, inventoryRes, destinationsRes, publicationsRes, flowRes, scheduleRes] = await Promise.all([
+  const [sourcesRes, inventoryRes, destinationsRes, publicationsRes, flowRes, scheduleRes, scheduleFullRes] = await Promise.all([
     listFacebookSources(pipelineId).then(
       (v) => ({ ok: true as const, v }),
       (e) => ({ ok: false as const, e: e instanceof Error ? e.message : "Lỗi tải sources." }),
@@ -115,10 +116,16 @@ export default async function FacebookPipelinePage({
       (v) => ({ ok: true as const, v }),
       (e) => ({ ok: false as const, e: e instanceof Error ? e.message : "Không tải được scheduler status." }),
     ),
+    getFacebookSchedule(pipelineId).then(
+      (v) => ({ ok: true as const, v }),
+      (e) => ({ ok: false as const, e: e instanceof Error ? e.message : "Không tải được scheduler config." }),
+    ),
   ]);
 
   const initialFlow: FacebookFlowState | null = flowRes.ok ? flowRes.v : null;
   const flowError: string | null = flowRes.ok ? null : flowRes.e;
+
+  const initialSchedule: FacebookScheduleDto | null = scheduleFullRes.ok ? scheduleFullRes.v : null;
 
   // AI metadata stats + settings + one generated sample for the AI tab (server-side).
   let aiStats: Awaited<ReturnType<typeof getFacebookAiStats>> | null = null;
@@ -238,8 +245,10 @@ export default async function FacebookPipelinePage({
           {activeTab === "scheduler" ? (
             scheduleRes.ok ? (
               <FacebookScheduler
-                initialSchedule={{ enabled: pipeline.enabled }}
+                pipelineId={pipelineId}
+                initialSchedule={initialSchedule}
                 initialStatus={scheduleRes.v}
+                destinationId={destinationsRes.ok ? destinationsRes.v[0]?.id ?? null : null}
               />
             ) : (
               <TabError message={scheduleRes.e} />

@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     FACEBOOK_SCHEDULER_ENABLED: bool = False
     FACEBOOK_SCHEDULER_BATCH_TIME: str = "06:00"
     FACEBOOK_SCHEDULER_POLL_SECONDS: int = 30
+    FACEBOOK_SCHEDULER_SLOT_WINDOW_MINUTES: int = 60
     SCHEDULER_JITTER_MINUTES: int = 0
 
     # YouTube scheduled-publication reconciler (Task 10).

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -32,9 +33,9 @@ async def lifespan(app: FastAPI):
     if settings.FACEBOOK_SCHEDULER_ENABLED:
         scheduler_task = asyncio.create_task(_scheduler_loop())
         logger.info(
-            "scheduler loop started (poll=%ss, window=%sm)",
+            "scheduler loop started (poll=%ss, batch_time=%s)",
             settings.FACEBOOK_SCHEDULER_POLL_SECONDS,
-            settings.FACEBOOK_SCHEDULER_SLOT_WINDOW_MINUTES,
+            settings.FACEBOOK_SCHEDULER_BATCH_TIME,
         )
     reconciler_task = None
     if settings.FACEBOOK_RECONCILE_ENABLED:

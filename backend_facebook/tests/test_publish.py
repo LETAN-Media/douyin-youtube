@@ -543,7 +543,7 @@ def test_flow_state_publisher_mapping(db) -> None:
 
     pid, did = seed(n=2)
     state = asyncio.run(build_flow_state(pid))
-    assert state["steps"]["youtube_destination"] == "done"
+    assert state["steps"]["youtube_destination"] == "ready"
     assert state["steps"]["publisher"] == "idle"
 
     async def _make_failed():

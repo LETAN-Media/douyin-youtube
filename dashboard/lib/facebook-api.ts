@@ -368,6 +368,67 @@ export async function getFacebookScheduleStatus(pipelineId: string): Promise<Fac
   );
 }
 
+export interface FacebookScheduleDto {
+  id: string;
+  pipeline_id: string;
+  timezone: string;
+  enabled: boolean;
+  max_daily_publish: number;
+  batch_time: string;
+  slots: Record<string, string[]>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export async function getFacebookSchedule(pipelineId: string): Promise<FacebookScheduleDto> {
+  return fbFetch<FacebookScheduleDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/schedule`,
+  );
+}
+
+export interface UpdateFacebookScheduleDto {
+  enabled?: boolean;
+  timezone?: string;
+  max_daily_publish?: number;
+  batch_time?: string;
+  slots?: Record<string, string[]>;
+}
+
+export async function updateFacebookSchedule(
+  pipelineId: string,
+  payload: UpdateFacebookScheduleDto,
+): Promise<FacebookScheduleDto> {
+  return fbFetch<FacebookScheduleDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/schedule`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function runSchedulerTick(): Promise<{ checked: number; batches_started: number; videos_scheduled: number; failed: number }> {
+  return fbFetch(
+    `/api/facebook/scheduler/tick`,
+    { method: "POST" },
+  );
+}
+
+export async function runSchedulerReconcile(): Promise<{ checked: number; published: number; left_scheduled: number; errors: number }> {
+  return fbFetch(
+    `/api/facebook/scheduler/reconcile`,
+    { method: "POST" },
+  );
+}
+
+export async function scheduleToday(pipelineId: string, destinationId: string): Promise<{ ok: boolean; batch_id: string; status: string; message: string }> {
+  return fbFetch(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/youtube-destinations/${encodeURIComponent(destinationId)}/schedule-today`,
+    { method: "POST" },
+  );
+}
+
 export interface FacebookSkipResult {
   ok: boolean;
   reel_id: string;

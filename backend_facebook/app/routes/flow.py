@@ -5,7 +5,7 @@ GET /api/facebook/pipelines/{pipeline_id}/flow-state
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter
 from zoneinfo import ZoneInfo
 
@@ -40,40 +40,63 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
 
     if not fb_sources:
         source_status = "idle"
+        source_detail = "no sources"
     elif any_source_error:
         source_status = "error"
+        source_detail = "Source error"
     elif any_enabled_source:
-        source_status = "done"
+        source_status = "ready"
+        source_detail = f"{len(fb_sources)} sources"
     else:
         source_status = "idle"
+        source_detail = "no enabled sources"
 
     if any_scanning:
         inventory_status = "running"
+        inventory_detail = f"{stats.get('processing', 0)} scanning, {inventory} total"
     elif any_failed and inventory == 0:
         inventory_status = "error"
+        inventory_detail = "Scan failed, no inventory"
     elif inventory > 0:
-        inventory_status = "done"
+        inventory_status = "ready"
+        inventory_detail = f"{inventory} videos"
     else:
         inventory_status = "idle"
+        inventory_detail = "no videos"
 
     yt_destinations = await destinations.list_destinations(pipeline_id)
-    if any(
-        d.get("connected") and d.get("enabled", True) and d.get("channel_id")
-        for d in yt_destinations
-    ):
-        youtube_destination_status = "done"
+    connected_dest = [
+        d for d in yt_destinations
+        if d.get("connected") and d.get("enabled", True) and d.get("channel_id")
+    ]
+    if connected_dest:
+        youtube_destination_status = "ready"
+        youtube_destination_detail = f"{len(connected_dest)} connected"
     else:
         youtube_destination_status = "idle"
+        youtube_destination_detail = "no connected destination"
 
     pub_counts = await publications.status_counts_for_pipeline(pipeline_id)
-    if pub_counts.get("processing", 0) > 0:
+    processing = pub_counts.get("processing", 0)
+    failed = pub_counts.get("failed", 0)
+    published = pub_counts.get("published", 0)
+    scheduled = pub_counts.get("scheduled", 0)
+
+    if processing > 0:
         publisher_status = "running"
-    elif pub_counts.get("failed", 0) > 0:
+        publisher_detail = f"{processing} uploading"
+    elif failed > 0:
         publisher_status = "error"
-    elif pub_counts.get("published", 0) > 0:
+        publisher_detail = f"{failed} failed"
+    elif scheduled > 0:
+        publisher_status = "ready"
+        publisher_detail = f"{scheduled} scheduled"
+    elif published > 0:
         publisher_status = "done"
+        publisher_detail = f"{published} published"
     else:
         publisher_status = "idle"
+        publisher_detail = "no publications"
 
     from ..db.repositories import ai_metadata as ai_metadata_repo
     from ..config import settings as app_settings
@@ -89,20 +112,34 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         and pipeline_ai_settings.get("enabled", True)
     )
     ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
+    pending = ai_stats.get("pending", 0)
+    generated = ai_stats.get("generated", 0)
+    failed = ai_stats.get("failed", 0)
+    total = ai_stats.get("total_reels", 0)
+
     if not ai_configured:
         ai_metadata_status = "not_configured"
-    elif ai_stats.get("pending", 0) > 0:
-        ai_metadata_status = "running"
-    elif ai_stats.get("failed", 0) > 0:
+        ai_metadata_detail = "AI not configured"
+    elif pending > 0 and generated == 0:
+        ai_metadata_status = "ready"
+        ai_metadata_detail = f"{pending} pending"
+    elif pending > 0 and generated > 0:
+        ai_metadata_status = "partial"
+        ai_metadata_detail = f"{generated} generated, {pending} pending"
+    elif failed > 0 and generated == 0:
         ai_metadata_status = "error"
-    elif ai_stats.get("generated", 0) > 0:
+        ai_metadata_detail = f"{failed} failed"
+    elif generated > 0 and pending == 0:
         ai_metadata_status = "done"
+        ai_metadata_detail = f"{generated} generated"
     else:
         ai_metadata_status = "idle"
+        ai_metadata_detail = "no reels"
 
     schedule = await schedules.get_schedule(pipeline_id)
     if schedule is None or not schedule.get("enabled"):
         scheduler_status = "not_configured"
+        scheduler_detail = "Scheduler not configured"
     else:
         utc_now = datetime.now(timezone.utc)
         tz = ZoneInfo(schedule.get("timezone") or "Asia/Ho_Chi_Minh")
@@ -111,12 +148,26 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         batch = await schedules.get_batch_for_pipeline_date(pipeline_id, date_iso)
         if batch and batch.get("status") in ("queued", "running"):
             scheduler_status = "running"
+            scheduler_detail = f"Running · {batch.get('uploaded_count', 0)}/{batch.get('planned_count', 0)} videos"
         elif batch and batch.get("status") == "failed":
             scheduler_status = "error"
+            scheduler_detail = f"Failed: {batch.get('last_error', 'unknown')}"
         elif batch and batch.get("status") == "completed":
             scheduler_status = "done"
-        else:
+            scheduler_detail = f"Completed · {batch.get('uploaded_count', 0)} videos"
+        elif batch and batch.get("status") == "no_work":
             scheduler_status = "idle"
+            scheduler_detail = "No new inventory"
+        else:
+            # No batch today - show next batch time
+            scheduler_status = "waiting"
+            batch_time = schedule.get("batch_time") or "06:00"
+            batch_hour, batch_minute = map(int, batch_time.split(":"))
+            candidate = now_local.replace(hour=batch_hour, minute=batch_minute, second=0, microsecond=0)
+            if candidate <= now_local:
+                candidate = candidate + timedelta(days=1)
+            next_batch_local = candidate.strftime("%H:%M")
+            scheduler_detail = f"Waiting · next batch {next_batch_local}"
 
     return {
         "pipeline_id": pipeline_id,
@@ -133,6 +184,14 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
             "scheduler": scheduler_status,
             "publisher": publisher_status,
             "youtube_destination": youtube_destination_status,
+        },
+        "details": {
+            "source": source_detail,
+            "inventory": inventory_detail,
+            "ai_metadata": ai_metadata_detail,
+            "scheduler": scheduler_detail,
+            "publisher": publisher_detail,
+            "youtube_destination": youtube_destination_detail,
         },
     }
 
