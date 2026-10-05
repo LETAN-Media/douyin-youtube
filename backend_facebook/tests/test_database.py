@@ -51,7 +51,7 @@ async def test_migration_partial_state_recovers() -> None:
         await migrate()  # must not fail with duplicate-column
         rows = await client.execute("SELECT version FROM schema_migrations ORDER BY id")
         versions = [r[0] for r in rows.rows]
-        assert set(versions) == {"20241003_01", "20241003_02", "20241003_03", "20241003_04", "20241003_05", "20241003_06", "20241003_07", "20241003_08", "20241003_09", "20241005_10", "20241005_11", "20241005_12"}
+        assert set(versions) == {"20241003_01", "20241003_02", "20241003_03", "20241003_04", "20241003_05", "20241003_06", "20241003_07", "20241003_08", "20241003_09", "20241005_10", "20241005_11", "20241005_12", "20241005_13", "20241005_14"}
         await migrate()  # fully idempotent afterwards
     finally:
         teardown()

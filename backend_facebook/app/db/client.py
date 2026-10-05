@@ -248,13 +248,14 @@ async def migrate() -> None:
     if not await _has_column(client, "facebook_reels", "ai_claimed_at"):
         statements_12.append("ALTER TABLE facebook_reels ADD COLUMN ai_claimed_at TEXT")
     await _apply_migration(client, applied, "20241005_12", statements_12)
-    statements_13: list[str] = [
-        """
-        CREATE INDEX IF NOT EXISTS idx_ai_metadata_next_retry ON facebook_ai_metadata(next_retry_at)
-        """,
-    ]
+    statements_13: list[str] = []
     if not await _has_column(client, "facebook_ai_metadata", "next_retry_at"):
         statements_13.append("ALTER TABLE facebook_ai_metadata ADD COLUMN next_retry_at TEXT")
+    statements_13.append(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_metadata_next_retry ON facebook_ai_metadata(next_retry_at)
+        """
+    )
     await _apply_migration(client, applied, "20241005_13", statements_13)
     statements_14: list[str] = [
         """
