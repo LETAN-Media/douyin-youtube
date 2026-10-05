@@ -19,6 +19,7 @@ import {
 import type { FacebookAiSettingsDto, FacebookFlowState, FacebookScheduleDto } from "@/lib/facebook-api";
 import { getFacebookFlowState } from "@/lib/facebook-api";
 import { FacebookTabs, type FacebookTabKey } from "@/components/facebook/FacebookTabs";
+import { FacebookPipelineRename } from "@/components/facebook/FacebookPipelineRename";
 import { FacebookPipelineToggles } from "@/components/facebook/FacebookPipelineToggles";
 import { FacebookOverview } from "@/components/facebook/FacebookOverview";
 import { FacebookSources } from "@/components/facebook/FacebookSources";
@@ -160,7 +161,7 @@ export default async function FacebookPipelinePage({
       <div className="w-full min-w-0">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <h1 className="truncate text-xl font-extrabold tracking-tight text-slate-900 sm:text-2xl">{pipeline.name}</h1>
+            <FacebookPipelineRename pipelineId={pipelineId} initialName={pipeline.name} />
             <p className="mt-1 text-xs text-slate-500 sm:text-sm">
               <span className="font-mono">/{pipeline.slug}</span>
               <span className="mx-1.5 text-slate-300">·</span>

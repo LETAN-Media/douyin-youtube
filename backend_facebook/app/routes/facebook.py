@@ -29,6 +29,7 @@ class PipelineCreate(BaseModel):
 class PipelineUpdate(BaseModel):
     enabled: bool | None = None
     auto_publish: bool | None = None
+    name: str | None = Field(default=None, max_length=200)
 
 
 class SourceCreate(BaseModel):
@@ -109,14 +110,19 @@ async def get_one_pipeline(pipeline_id: str) -> dict:
 
 @router.patch("/pipelines/{pipeline_id}")
 async def update_one_pipeline(pipeline_id: str, body: PipelineUpdate, _: None = Depends(require_admin)) -> dict:
-    if body.enabled is None and body.auto_publish is None:
-        raise _err(400, "NOTHING_TO_UPDATE", "Provide at least one of: enabled, auto_publish")
+    if body.enabled is None and body.auto_publish is None and body.name is None:
+        raise _err(400, "NOTHING_TO_UPDATE", "Provide at least one of: enabled, auto_publish, name")
+    if body.name is not None and not body.name.strip():
+        raise _err(400, "INVALID_NAME", "Pipeline name must not be empty")
     try:
         updated = await pipelines.update_pipeline(
             pipeline_id,
             enabled=body.enabled,
             auto_publish=body.auto_publish,
+            name=body.name,
         )
+    except ValueError as exc:
+        raise _err(400, "INVALID_NAME", str(exc) or "Invalid pipeline name")
     except Exception:
         raise _err(500, "PIPELINE_UPDATE_FAILED", "Failed to update pipeline")
     if updated is None:

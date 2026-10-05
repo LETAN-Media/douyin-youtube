@@ -59,11 +59,13 @@ async def update_pipeline(
     *,
     enabled: bool | None = None,
     auto_publish: bool | None = None,
+    name: str | None = None,
 ) -> dict[str, Any] | None:
     """Partial update: only the fields explicitly provided are changed.
 
-    Name/slug are never touched here. Returns the updated row, or None
-    when the pipeline does not exist (or nothing was provided).
+    Slug is never touched here (URLs/labels keep working). Empty names are
+    rejected with ValueError. Returns the updated row, or None when the
+    pipeline does not exist (or nothing was provided).
     """
     sets: list[str] = []
     params: dict[str, Any] = {"id": pipeline_id}
@@ -73,6 +75,14 @@ async def update_pipeline(
     if auto_publish is not None:
         sets.append("auto_publish = :auto_publish")
         params["auto_publish"] = 1 if auto_publish else 0
+    if name is not None:
+        clean = name.strip()
+        if not clean:
+            raise ValueError("Pipeline name must not be empty.")
+        if len(clean) > 200:
+            raise ValueError("Pipeline name is too long (max 200).")
+        sets.append("name = :name")
+        params["name"] = clean
     if not sets:
         return await get_pipeline(pipeline_id)
     client = get_client()

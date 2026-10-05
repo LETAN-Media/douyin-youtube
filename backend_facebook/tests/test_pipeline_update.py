@@ -181,3 +181,53 @@ def test_schedule_status_exposes_batch_and_queue_counts(db) -> None:
     assert status["batch_uploaded"] == 1
     assert status["batch_failed"] == 3  # 3 slots left with no reel to claim
     assert status["queue_queued"] == 1
+
+
+# ---------- rename ----------
+
+
+def test_rename_preserves_slug_and_flags(db) -> None:
+    pipe = make_pipeline("rn1")
+
+    updated = _set_flags(pipe["id"], name="CHÀNG HIU VLOG")
+
+    assert updated is not None
+    assert updated["name"] == "CHÀNG HIU VLOG"
+    assert updated["slug"] == pipe["slug"]
+    assert updated["enabled"] is True
+    assert updated["auto_publish"] is True
+
+
+def test_rename_rejects_empty_name(db) -> None:
+    import pytest
+
+    pipe = make_pipeline("rn2")
+    with pytest.raises(ValueError):
+        asyncio.run(pipelines.update_pipeline(pipe["id"], name="   "))
+
+
+def test_patch_route_renames_pipeline(db) -> None:
+    pipe = make_pipeline("rn3")
+    client = TestClient(create_app())
+    r = client.patch(
+        f"/api/facebook/pipelines/{pipe['id']}",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"name": "CHÀNG HIU VLOG"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "CHÀNG HIU VLOG"
+    assert body["slug"] == pipe["slug"]
+    reloaded = asyncio.run(pipelines.get_pipeline(pipe["id"]))
+    assert reloaded is not None and reloaded["name"] == "CHÀNG HIU VLOG"
+
+
+def test_patch_route_400_for_blank_name(db) -> None:
+    pipe = make_pipeline("rn4")
+    client = TestClient(create_app())
+    r = client.patch(
+        f"/api/facebook/pipelines/{pipe['id']}",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"name": "   "},
+    )
+    assert r.status_code == 400, r.text

@@ -228,6 +228,7 @@ export async function getFacebookPipelineDetail(pipelineId: string): Promise<Fac
 export interface UpdateFacebookPipelineDto {
   enabled?: boolean;
   auto_publish?: boolean;
+  name?: string;
 }
 
 export async function updateFacebookPipeline(

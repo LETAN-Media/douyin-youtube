@@ -19,21 +19,22 @@ export async function PATCH(
         { status: 400 },
       );
     }
-    let body: { enabled?: unknown; auto_publish?: unknown };
+    let body: { enabled?: unknown; auto_publish?: unknown; name?: unknown };
     try {
-      body = (await request.json()) as { enabled?: unknown; auto_publish?: unknown };
+      body = (await request.json()) as { enabled?: unknown; auto_publish?: unknown; name?: unknown };
     } catch {
       return NextResponse.json(
         { error: "Body không hợp lệ.", message: "Body không hợp lệ." },
         { status: 400 },
       );
     }
-    const payload: { enabled?: boolean; auto_publish?: boolean } = {};
+    const payload: { enabled?: boolean; auto_publish?: boolean; name?: string } = {};
     if (typeof body.enabled === "boolean") payload.enabled = body.enabled;
     if (typeof body.auto_publish === "boolean") payload.auto_publish = body.auto_publish;
-    if (payload.enabled === undefined && payload.auto_publish === undefined) {
+    if (typeof body.name === "string" && body.name.trim()) payload.name = body.name.trim();
+    if (payload.enabled === undefined && payload.auto_publish === undefined && payload.name === undefined) {
       return NextResponse.json(
-        { error: "Cần ít nhất một field: enabled, auto_publish.", message: "Cần ít nhất một field: enabled, auto_publish." },
+        { error: "Cần ít nhất một field: enabled, auto_publish, name.", message: "Cần ít nhất một field: enabled, auto_publish, name." },
         { status: 400 },
       );
     }
