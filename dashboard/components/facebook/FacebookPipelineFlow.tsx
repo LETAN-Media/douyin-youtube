@@ -100,7 +100,7 @@ const STATUS_META: Record<
     label: "Waiting",
     chip: "bg-amber-50 text-amber-700 ring-amber-200",
     dot: "bg-amber-500",
-    pulse: true,
+    pulse: false,
     icon: <IconClock size={11} />,
   },
   running: {
@@ -150,23 +150,14 @@ export const DEFAULT_FACEBOOK_FLOW_STEPS: FacebookFlowStep[] = [
 ];
 
 function edgeLook(a: FacebookFlowVisualStatus, b: FacebookFlowVisualStatus, gradientId: string): FlowEdgeLook {
-  // Use helper functions to avoid TypeScript narrowing issues
+  // Only animate when a step is actively RUNNING
   const isError = (s: FacebookFlowVisualStatus) => s === "error";
   const isRunning = (s: FacebookFlowVisualStatus) => s === "running";
-  const isReady = (s: FacebookFlowVisualStatus) => s === "ready";
-  const isWaiting = (s: FacebookFlowVisualStatus) => s === "waiting";
-  const isPartial = (s: FacebookFlowVisualStatus) => s === "partial";
   const isDone = (s: FacebookFlowVisualStatus) => s === "done";
-  const isIdle = (s: FacebookFlowVisualStatus) => s === "idle";
-  const isNotConfigured = (s: FacebookFlowVisualStatus) => s === "not_configured";
 
   if (isError(a) || isError(b)) return { kind: "failed" };
   if (isRunning(a) || isRunning(b)) return { kind: "active", gradientId };
-  if (isReady(a) && !isIdle(b) && !isNotConfigured(b)) return { kind: "active", gradientId };
-  if (isWaiting(a)) return { kind: "active", gradientId };
-  if (isPartial(a) && !isIdle(b) && !isNotConfigured(b) && !isError(b)) return { kind: "active", gradientId };
   if (isDone(a) && isDone(b)) return { kind: "faded" };
-  if (isDone(a)) return { kind: "active", gradientId };
   return { kind: "idle" };
 }
 
@@ -178,23 +169,28 @@ function StepBox({ step }: { step: FacebookFlowStep }) {
   // Use detail from step if provided, otherwise fallback to subtitle
   const displayDetail = step.detail ?? step.subtitle;
 
+  const isRunning = status === "running";
+  const isError = status === "error";
+
   return (
     <div
       className={`flex w-full min-w-0 items-center gap-3 rounded-2xl border bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all duration-200 sm:p-3.5 ${
-        status === "running" || status === "waiting"
+        isRunning
           ? "border-indigo-400 ring-2 ring-indigo-200"
-          : status === "error"
+          : isError
             ? "border-rose-400 ring-2 ring-rose-200"
             : status === "ready" || status === "partial"
               ? "border-emerald-200"
               : status === "done"
                 ? "border-emerald-200"
-                : "border-slate-200/90"
+                : status === "waiting"
+                  ? "border-amber-200"
+                  : "border-slate-200/90"
       }`}
       style={
-        status === "running" || status === "waiting"
+        isRunning
           ? { filter: "drop-shadow(0 0 8px rgba(99,102,241,0.30))" }
-          : status === "error"
+          : isError
             ? { filter: "drop-shadow(0 0 8px rgba(244,63,94,0.30))" }
             : undefined
       }
