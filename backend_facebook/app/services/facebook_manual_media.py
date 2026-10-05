@@ -37,10 +37,13 @@ logger = logging.getLogger(__name__)
 # Same UA the shortcut sends when downloading media.
 PROVIDER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 )
 
 SNAPVIDEO_ENDPOINT = "/json/snapvideo.json"
+# The shortcut never GETs the JSON endpoint directly: it base64-encodes the
+# whole API URL and fetches it through this proxy (actions 11-13).
+REDIRECT_ENDPOINT = "/snapvideo/red64.php"
 PROVIDER_TIMEOUT = 25.0
 MAX_BYTES = 1_000_000_000
 CHUNK_SIZE = 1024 * 256
@@ -86,7 +89,10 @@ def _provider_config() -> tuple[str, str]:
     from ..config import settings
 
     base_url = (settings.MANUAL_FB_PROVIDER_BASE_URL or "").strip().rstrip("/")
-    api_key = (settings.MANUAL_FB_PROVIDER_API_KEY or "").strip()
+    api_key = (
+        (settings.MANUAL_FB_PROVIDER_API_KEY or "").strip()
+        or (settings.PHIMTAT_API_KEY or "").strip()
+    )
     if not base_url:
         raise ManualResolverError(AUTH_FAILED, "Manual provider base URL is not configured.")
     if not api_key:
@@ -102,7 +108,8 @@ def _pick_media_url(medias: object) -> str | None:
     """First usable file URL from the provider's medias map."""
     if not isinstance(medias, dict):
         return None
-    fallback: str | None = None
+    first_valid: str | None = None
+    label_match: str | None = None
     for label, url in medias.items():
         if not isinstance(url, str):
             continue
@@ -112,15 +119,18 @@ def _pick_media_url(medias: object) -> str | None:
         lowered_label = str(label or "").lower()
         if any(hint in lowered_label for hint in _SKIP_LABEL_HINTS):
             continue
-        if any(hint in text.lower() for hint in ("{{open-url}}",)):
+        if "{{open-url}}" in text.lower():
             continue
-        # Prefer probable video files, but keep the first http URL as
-        # fallback — the downloader enforces content-type anyway.
+        # Direct file hints win immediately; a labeled MP4 entry (e.g.
+        # "MP4 HD") is second choice; otherwise the first surviving http
+        # URL — the downloader enforces content-type anyway.
         if ".mp4" in text.lower() or ".mov" in text.lower() or "red64.php" in text.lower():
             return text
-        if fallback is None:
-            fallback = text
-    return fallback
+        if "mp4" in lowered_label and label_match is None:
+            label_match = text
+        if first_valid is None:
+            first_valid = text
+    return label_match if label_match is not None else first_valid
 
 
 # Facebook URL shapes accepted for manual mode. Bare profile/page URLs are
@@ -131,19 +141,55 @@ _VIDEO_MARKERS = ("/reel/", "/videos/", "/watch", "/share/")
 def is_manual_video_url(raw_url: str | None) -> bool:
     from urllib.parse import urlparse
 
-    from ..services.facebook_url import is_facebook_url
+    from ..services.facebook_url import ALLOWED_HOSTS, is_facebook_url
 
-    if not raw_url or not is_facebook_url(raw_url):
+    if not isinstance(raw_url, str) or not raw_url.strip():
         return False
     try:
         parsed = urlparse(raw_url.strip())
     except Exception:
         return False
+    if (parsed.scheme or "").lower() not in ("http", "https"):
+        return False
     host = (parsed.hostname or "").lower()
+    # Manual mode additionally accepts fb.watch short links. The shared
+    # ALLOWED_HOSTS (auto pipeline) is intentionally left untouched.
+    if host not in ALLOWED_HOSTS and host != "fb.watch":
+        return False
     if host == "fb.watch":
         return True
     path = (parsed.path or "").lower()
     return any(m in path for m in _VIDEO_MARKERS)
+
+
+# iPhone UA used to unwrap /share/ redirect wrappers into canonical URLs.
+SHARE_RESOLVE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
+)
+SHARE_RESOLVE_TIMEOUT = 15.0
+
+
+async def resolve_share_url(
+    url: str, transport: httpx.AsyncBaseTransport | None = None
+) -> str:
+    """/share/ links are redirect wrappers: follow them (iPhone UA) to the
+    canonical /reel/ URL before calling the provider. Any failure returns
+    the original URL — the provider gets the last word on validity."""
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=SHARE_RESOLVE_TIMEOUT,
+            headers={"User-Agent": SHARE_RESOLVE_UA},
+            follow_redirects=True,
+        ) as client:
+            resp = await client.get(url.strip())
+            final = str(resp.url or "").strip()
+            if final and "facebook.com" in final and "/share/" not in final:
+                return final
+    except Exception:
+        pass
+    return url.strip()
 
 
 class ShortcutDerivedFacebookResolver:
@@ -171,19 +217,28 @@ class ShortcutDerivedFacebookResolver:
     async def resolve(self, url: str) -> ManualResolvedMedia:
         if not is_manual_video_url(url):
             raise ManualResolverError(UNSUPPORTED, "Not a supported Facebook video URL.")
-        b64url = base64.b64encode(url.strip().encode("utf-8")).decode("ascii")
-        params = {
-            "api-key": self._api_key,
-            "lang": "vi",
-            "ver": "7",
-            "ask_format": "false",
-            "show_menu": "false",
-            "skip_update": "true",
-            "b64": b64url,
-        }
+        from urllib.parse import quote
+
+        # /share/ links wrap the real URL: unwrap first (iPhone UA), exactly
+        # like the proven client flow. Falls back to the original URL.
+        target = url.strip()
+        if "/share/" in target.lower():
+            target = await resolve_share_url(target, transport=self._transport)
+        b64url = base64.b64encode(target.encode("utf-8")).decode("ascii")
+        # Build the API URL exactly like the shortcut (action 8 template),
+        # then wrap it the way the shortcut fetches it (actions 11-13):
+        # base64(api_url) through red64.php.
+        api_url = (
+            f"{self.base_url}{SNAPVIDEO_ENDPOINT}"
+            f"?api-key={self._api_key}&lang=vi&ver=7"
+            f"&ask_format=false&show_menu=false&skip_update=false"
+            f"&b64={b64url}"
+        )
+        wrapped = base64.b64encode(api_url.encode("utf-8")).decode("ascii")
+        fetch_url = f"{self.base_url}{REDIRECT_ENDPOINT}?url={quote(wrapped, safe='')}"
         try:
             async with self._client(PROVIDER_TIMEOUT) as client:
-                resp = await client.get(SNAPVIDEO_ENDPOINT, params=params)
+                resp = await client.get(fetch_url)
         except httpx.TimeoutException:
             raise ManualResolverError(TIMEOUT, "Manual provider resolve timed out.")
         except (httpx.ConnectError, httpx.NetworkError) as exc:

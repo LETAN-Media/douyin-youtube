@@ -38,9 +38,11 @@ class Settings(BaseSettings):
     FACEBOOK_MANUAL_RESOLVER: str = "shortcut"
     # Third-party provider backing the shortcut-derived resolver
     # (audited from the Snap Video shortcut workflow). Key lives only in
-    # env/Northflank — never commit it, never log it.
+    # env/Northflank — never commit it, never log it. PHIMTAT_API_KEY is
+    # accepted as an alias for the same value.
     MANUAL_FB_PROVIDER_BASE_URL: str = "https://api.phimtat.vn"
     MANUAL_FB_PROVIDER_API_KEY: str | None = None
+    PHIMTAT_API_KEY: str | None = None
     FASTSAVER_TIMEOUT: float = 60.0
     FACEBOOK_MEDIA_MAX_BYTES: int = 1_000_000_000
 

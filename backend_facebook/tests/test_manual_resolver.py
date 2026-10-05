@@ -32,6 +32,7 @@ ADMIN = "test_admin_token"
 _KEYS = (
     "ADMIN_TOKEN", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN",
     "FACEBOOK_MANUAL_RESOLVER", "MANUAL_FB_PROVIDER_BASE_URL", "MANUAL_FB_PROVIDER_API_KEY",
+    "PHIMTAT_API_KEY",
     "FASTSAVER_BASE_URL", "FASTSAVER_API_KEY",
 )
 _PREV_SETTINGS: dict = {}
@@ -86,6 +87,8 @@ def teardown_function(_func=None) -> None:
 
 REEL = "https://www.facebook.com/reel/123456789/"
 
+SHARE_REEL = "https://www.facebook.com/share/v/1K8ZxRDSSy/?mibextid=wwXIfr"
+
 CANNED_MEDIAS = {
     "title": "Funny cats compilation",
     "thumbnail": "https://cdn.example.com/t.jpg",
@@ -109,9 +112,15 @@ GUIDE_ONLY = {
 
 
 def provider_transport(payload=None, status=200) -> httpx.MockTransport:
+    import base64 as _b64
+    from urllib.parse import parse_qs, urlparse
+
     def handler(req: httpx.Request) -> httpx.Response:
-        assert req.url.path == "/json/snapvideo.json"
-        assert "api-key" in req.url.params
+        # Faithful to the shortcut: JSON API fetched wrapped through red64.
+        assert req.url.path == "/snapvideo/red64.php", req.url.path
+        wrapped = parse_qs(urlparse(str(req.url)).query)["url"][0]
+        api_url = _b64.b64decode(wrapped).decode()
+        assert "api-key" in api_url and "b64=" in api_url
         return httpx.Response(status, json=payload or {})
 
     return httpx.MockTransport(handler)
@@ -159,6 +168,7 @@ def test_adapter_401_is_auth_failed() -> None:
 
 def test_missing_key_fails_without_http() -> None:
     settings.MANUAL_FB_PROVIDER_API_KEY = ""
+    settings.PHIMTAT_API_KEY = ""
 
     def _boom(req: httpx.Request) -> httpx.Response:
         raise AssertionError("no HTTP must happen without a key")
@@ -166,6 +176,16 @@ def test_missing_key_fails_without_http() -> None:
     with pytest.raises(ManualResolverError) as exc:
         asyncio.run(resolve_manual_media(REEL, transport=httpx.MockTransport(_boom)))
     assert exc.value.code == "MANUAL_RESOLVER_AUTH_FAILED"
+
+
+def test_phimtat_api_key_alias_accepted() -> None:
+    from app.services.facebook_manual_media import _provider_config
+
+    settings.MANUAL_FB_PROVIDER_API_KEY = ""
+    settings.PHIMTAT_API_KEY = "alias_key_value"
+    base_url, api_key = _provider_config()
+    assert base_url == "https://provider.example.com"
+    assert api_key == "alias_key_value"
 
 
 def test_invalid_url_never_touches_provider() -> None:
@@ -178,6 +198,43 @@ def test_invalid_url_never_touches_provider() -> None:
             transport=httpx.MockTransport(_boom),
         ))
     assert exc.value.code == "MANUAL_RESOLVER_UNSUPPORTED"
+
+
+def test_share_links_accepted_as_video_urls() -> None:
+    from app.services.facebook_manual_media import is_manual_video_url
+
+    assert is_manual_video_url(SHARE_REEL)
+    assert is_manual_video_url("https://www.facebook.com/reel/123/")
+    assert is_manual_video_url("https://fb.watch/abc123/")
+    assert not is_manual_video_url("https://www.facebook.com/somepage")
+    assert not is_manual_video_url("not a url")
+
+
+def test_share_url_unwrapped_before_provider_call() -> None:
+    from app.services.facebook_manual_media import resolve_share_url
+
+    seen: list = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(str(req.url))
+        if "/share/" in str(req.url):
+            return httpx.Response(302, headers={"Location": "https://www.facebook.com/reel/999/"})
+        return httpx.Response(200, json=CANNED_MEDIAS)
+
+    transport = httpx.MockTransport(handler)
+    out = asyncio.run(resolve_share_url(SHARE_REEL, transport=transport))
+    assert out == "https://www.facebook.com/reel/999/"
+    assert seen and "/share/" in seen[0]
+
+
+def test_share_unwrap_failure_keeps_original() -> None:
+    from app.services.facebook_manual_media import resolve_share_url
+
+    def _boom(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down", request=req)
+
+    out = asyncio.run(resolve_share_url(SHARE_REEL, transport=httpx.MockTransport(_boom)))
+    assert out == SHARE_REEL
 
 
 def test_fallback_on_timeout_never_on_auth() -> None:
@@ -259,7 +316,7 @@ def test_shortcut_end_to_end_mocked_publish() -> None:
     from app.services.facebook_manual_publisher import process_manual_job
 
     def handler(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/json/snapvideo.json":
+        if req.url.path == "/snapvideo/red64.php":
             return httpx.Response(200, json=CANNED_MEDIAS)
         if "cdn.example.com/v720.mp4" in str(req.url):
             return httpx.Response(200, content=b"1" * 2048,
