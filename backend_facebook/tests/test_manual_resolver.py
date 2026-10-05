@@ -135,7 +135,9 @@ def test_pick_media_url_filters_chrome() -> None:
 
 def test_adapter_parses_medias_and_metadata() -> None:
     r = ShortcutDerivedFacebookResolver(
-        "https://provider.example.com", "k",
+        "https://provider.example.com/json/snapvideo.json",
+        "https://provider.example.com/snapvideo/red64.php",
+        "k", 60.0,
         transport=provider_transport(CANNED_MEDIAS),
     )
     out = asyncio.run(r.resolve(REEL))
@@ -148,7 +150,9 @@ def test_adapter_parses_medias_and_metadata() -> None:
 
 def test_adapter_guide_only_is_unsupported() -> None:
     r = ShortcutDerivedFacebookResolver(
-        "https://provider.example.com", "k",
+        "https://provider.example.com/json/snapvideo.json",
+        "https://provider.example.com/snapvideo/red64.php",
+        "k", 60.0,
         transport=provider_transport(GUIDE_ONLY),
     )
     with pytest.raises(ManualResolverError) as exc:
@@ -158,7 +162,9 @@ def test_adapter_guide_only_is_unsupported() -> None:
 
 def test_adapter_401_is_auth_failed() -> None:
     r = ShortcutDerivedFacebookResolver(
-        "https://provider.example.com", "bad",
+        "https://provider.example.com/json/snapvideo.json",
+        "https://provider.example.com/snapvideo/red64.php",
+        "bad", 60.0,
         transport=provider_transport({}, status=401),
     )
     with pytest.raises(ManualResolverError) as exc:
@@ -183,8 +189,9 @@ def test_phimtat_api_key_alias_accepted() -> None:
 
     settings.MANUAL_FB_PROVIDER_API_KEY = ""
     settings.PHIMTAT_API_KEY = "alias_key_value"
-    base_url, api_key = _provider_config()
-    assert base_url == "https://provider.example.com"
+    api_base, redirect_url, api_key, timeout = _provider_config()
+    assert api_base == "https://api.phimtat.vn/json/snapvideo.json"
+    assert redirect_url == "https://api.phimtat.vn/snapvideo/red64.php"
     assert api_key == "alias_key_value"
 
 
@@ -346,3 +353,78 @@ def test_shortcut_end_to_end_mocked_publish() -> None:
     assert result["result"] == "published", result
     row = asyncio.run(manual_repo.get_manual_publication(mid))
     assert row is not None and row["status"] == "published"
+
+
+def test_warning_title_filtered_but_media_kept() -> None:
+    payload = {
+        "title": "⚠️ Phím tắt chỉ dùng cho mục đích cá nhân, không reup",
+        "thumbnail": "https://cdn.example.com/t.jpg",
+        "source": "facebook",
+        "medias": {"🎬 MP4 HD": "https://cdn.example.com/v.mp4"},
+    }
+    r = ShortcutDerivedFacebookResolver(
+        "https://provider.example.com/json/snapvideo.json",
+        "https://provider.example.com/snapvideo/red64.php",
+        "k", 60.0,
+        transport=provider_transport(payload),
+    )
+    out = asyncio.run(r.resolve(REEL))
+    assert out.caption is None
+    assert out.thumbnail_url == "https://cdn.example.com/t.jpg"
+    assert out.download_url == "https://cdn.example.com/v.mp4"
+
+
+def test_phimtat_disabled_shortcut_strict() -> None:
+    settings.PHIMTAT_ENABLED = False
+    try:
+        with pytest.raises(ManualResolverError) as exc:
+            asyncio.run(resolve_manual_media(REEL))
+        assert exc.value.code == "MANUAL_RESOLVER_UNSUPPORTED"
+    finally:
+        settings.PHIMTAT_ENABLED = True
+
+
+def test_provider_config_prefers_phimtat_env() -> None:
+    from app.services.facebook_manual_media import _provider_config
+
+    settings.PHIMTAT_API_BASE_URL = "https://custom.example.com/json/snapvideo.json"
+    settings.PHIMTAT_REDIRECT_URL = "https://custom.example.com/snapvideo/red64.php"
+    settings.PHIMTAT_API_KEY = "custom_key"
+    settings.PHIMTAT_TIMEOUT_SECONDS = 42
+    try:
+        api_base, redirect_url, api_key, timeout = _provider_config()
+        assert api_base == "https://custom.example.com/json/snapvideo.json"
+        assert redirect_url == "https://custom.example.com/snapvideo/red64.php"
+        assert api_key == "custom_key"
+        assert timeout == 42.0
+    finally:
+        settings.PHIMTAT_API_BASE_URL = "https://api.phimtat.vn/json/snapvideo.json"
+        settings.PHIMTAT_REDIRECT_URL = "https://api.phimtat.vn/snapvideo/red64.php"
+        settings.PHIMTAT_API_KEY = "test_provider_key"
+        settings.PHIMTAT_TIMEOUT_SECONDS = 60
+
+
+def test_direct_vs_app_pick_same_media() -> None:
+    """Regression §7: the canned proven payload must resolve identically
+    through the adapter (thumbnail, caption, MP4 HD pick)."""
+    payload = {
+        "title": "Facebook 4",
+        "source": "facebook",
+        "thumbnail": "https://example/thumb.jpg",
+        "medias": {"🎬 MP4 HD": "https://example/video.mp4"},
+    }
+    # Direct reference logic (mirrors the proven client script).
+    medias = payload["medias"]
+    direct_url = medias.get("🎬 MP4 HD") or next(
+        (u for u in medias.values() if isinstance(u, str) and ".mp4" in u), None
+    )
+    r = ShortcutDerivedFacebookResolver(
+        "https://provider.example.com/json/snapvideo.json",
+        "https://provider.example.com/snapvideo/red64.php",
+        "k", 60.0,
+        transport=provider_transport(payload),
+    )
+    out = asyncio.run(r.resolve(REEL))
+    assert out.download_url == direct_url == "https://example/video.mp4"
+    assert out.caption == "Facebook 4"
+    assert out.thumbnail_url == "https://example/thumb.jpg"

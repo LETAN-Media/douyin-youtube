@@ -40,13 +40,19 @@ PROVIDER_UA = (
     "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 )
 
-SNAPVIDEO_ENDPOINT = "/json/snapvideo.json"
-# The shortcut never GETs the JSON endpoint directly: it base64-encodes the
-# whole API URL and fetches it through this proxy (actions 11-13).
-REDIRECT_ENDPOINT = "/snapvideo/red64.php"
-PROVIDER_TIMEOUT = 25.0
 MAX_BYTES = 1_000_000_000
 CHUNK_SIZE = 1024 * 256
+
+# Exact media label preferred by the proven client flow.
+MP4_HD_LABEL = "🎬 MP4 HD"
+
+# A provider "title" containing any of these is a usage notice, not the
+# video caption: keep thumbnail/media, but null the caption.
+WARNING_TITLE_HINTS = (
+    "phím tắt chỉ dùng",
+    "chỉ dùng cho mục đích cá nhân",
+    "không reup",
+)
 
 # Typed errors for the manual resolver.
 UNSUPPORTED = "MANUAL_RESOLVER_UNSUPPORTED"
@@ -85,27 +91,44 @@ class ManualResolvedMedia:
     provider: str
 
 
-def _provider_config() -> tuple[str, str]:
+def _provider_config() -> tuple[str, str, str, float]:
+    """Canonical PHIMTAT_* config with MANUAL_FB_* legacy fallback.
+
+    Returns (api_base_url, redirect_url, api_key, timeout_seconds).
+    Never logs or returns anything besides these four values.
+    """
     from ..config import settings
 
-    base_url = (settings.MANUAL_FB_PROVIDER_BASE_URL or "").strip().rstrip("/")
+    api_base = (settings.PHIMTAT_API_BASE_URL or "").strip()
+    redirect_url = (settings.PHIMTAT_REDIRECT_URL or "").strip()
+    if not api_base or not redirect_url:
+        legacy_base = (settings.MANUAL_FB_PROVIDER_BASE_URL or "").strip().rstrip("/")
+        if legacy_base:
+            api_base = api_base or f"{legacy_base}/json/snapvideo.json"
+            redirect_url = redirect_url or f"{legacy_base}/snapvideo/red64.php"
     api_key = (
-        (settings.MANUAL_FB_PROVIDER_API_KEY or "").strip()
-        or (settings.PHIMTAT_API_KEY or "").strip()
+        (settings.PHIMTAT_API_KEY or "").strip()
+        or (settings.MANUAL_FB_PROVIDER_API_KEY or "").strip()
     )
-    if not base_url:
-        raise ManualResolverError(AUTH_FAILED, "Manual provider base URL is not configured.")
+    try:
+        timeout = float(settings.PHIMTAT_TIMEOUT_SECONDS or 60)
+    except (TypeError, ValueError):
+        timeout = 60.0
+    timeout = min(max(timeout, 5.0), 300.0)
+    if not api_base or not redirect_url:
+        raise ManualResolverError(AUTH_FAILED, "Manual provider endpoints are not configured.")
     if not api_key:
         raise ManualResolverError(
             AUTH_FAILED,
             "Manual provider API key is not configured. "
-            "Set MANUAL_FB_PROVIDER_API_KEY (or use FACEBOOK_MANUAL_RESOLVER=shortcut_fastsaver).",
+            "Set PHIMTAT_API_KEY (or use FACEBOOK_MANUAL_RESOLVER=shortcut_fastsaver).",
         )
-    return base_url, api_key
+    return api_base, redirect_url, api_key, timeout
 
 
 def _pick_media_url(medias: object) -> str | None:
-    """First usable file URL from the provider's medias map."""
+    """The proven client flow: medias["MP4 HD"] first, else any URL with
+    .mp4, else the labeled MP4 entry, else the first surviving http URL."""
     if not isinstance(medias, dict):
         return None
     first_valid: str | None = None
@@ -121,6 +144,8 @@ def _pick_media_url(medias: object) -> str | None:
             continue
         if "{{open-url}}" in text.lower():
             continue
+        if str(label or "") == MP4_HD_LABEL:
+            return text
         # Direct file hints win immediately; a labeled MP4 entry (e.g.
         # "MP4 HD") is second choice; otherwise the first surviving http
         # URL — the downloader enforces content-type anyway.
@@ -131,6 +156,18 @@ def _pick_media_url(medias: object) -> str | None:
         if first_valid is None:
             first_valid = text
     return label_match if label_match is not None else first_valid
+
+
+def _filter_caption(title: object) -> str | None:
+    """Provider usage notices are not video captions."""
+    if not isinstance(title, str) or not title.strip():
+        return None
+    lowered = title.lower()
+    if any(hint in lowered for hint in WARNING_TITLE_HINTS):
+        return None
+    if "snapvideo" in lowered:
+        return None
+    return title
 
 
 # Facebook URL shapes accepted for manual mode. Bare profile/page URLs are
@@ -197,20 +234,23 @@ class ShortcutDerivedFacebookResolver:
 
     def __init__(
         self,
-        base_url: str,
+        api_base: str,
+        redirect_url: str,
         api_key: str,
+        timeout: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self.base_url = base_url
+        self.api_base = api_base
+        self.redirect_url = redirect_url
         self._api_key = api_key
+        self._timeout = timeout
         self._transport = transport
 
     def _client(self, timeout: float) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             transport=self._transport,
-            base_url=self.base_url,
             timeout=timeout,
-            headers={"User-Agent": PROVIDER_UA, "Accept": "application/json"},
+            headers={"User-Agent": PROVIDER_UA},
             follow_redirects=True,
         )
 
@@ -225,19 +265,18 @@ class ShortcutDerivedFacebookResolver:
         if "/share/" in target.lower():
             target = await resolve_share_url(target, transport=self._transport)
         b64url = base64.b64encode(target.encode("utf-8")).decode("ascii")
-        # Build the API URL exactly like the shortcut (action 8 template),
-        # then wrap it the way the shortcut fetches it (actions 11-13):
-        # base64(api_url) through red64.php.
+        # Build the API URL exactly like the proven client flow, then fetch
+        # it wrapped through red64.php (never GET the JSON endpoint directly).
         api_url = (
-            f"{self.base_url}{SNAPVIDEO_ENDPOINT}"
+            f"{self.api_base}"
             f"?api-key={self._api_key}&lang=vi&ver=7"
             f"&ask_format=false&show_menu=false&skip_update=false"
             f"&b64={b64url}"
         )
         wrapped = base64.b64encode(api_url.encode("utf-8")).decode("ascii")
-        fetch_url = f"{self.base_url}{REDIRECT_ENDPOINT}?url={quote(wrapped, safe='')}"
+        fetch_url = f"{self.redirect_url}?url={quote(wrapped, safe='')}"
         try:
-            async with self._client(PROVIDER_TIMEOUT) as client:
+            async with self._client(self._timeout) as client:
                 resp = await client.get(fetch_url)
         except httpx.TimeoutException:
             raise ManualResolverError(TIMEOUT, "Manual provider resolve timed out.")
@@ -265,14 +304,11 @@ class ShortcutDerivedFacebookResolver:
                 UNSUPPORTED, "Provider has no downloadable media for this URL."
             )
         thumbnail = data.get("thumbnail")
-        caption = data.get("title")
-        # The provider's "title" is often an upsell notice, not a caption.
-        if isinstance(caption, str) and "snapvideo" in caption.lower():
-            caption = None
+        caption = _filter_caption(data.get("title"))
         return ManualResolvedMedia(
             source_url=url.strip(),
             download_url=media_url,
-            caption=caption if isinstance(caption, str) else None,
+            caption=caption,
             thumbnail_url=thumbnail if isinstance(thumbnail, str) else None,
             duration=None,
             provider="shortcut",
@@ -320,13 +356,18 @@ async def resolve_manual_media(
     mode = (settings.FACEBOOK_MANUAL_RESOLVER or "shortcut").strip().lower()
     if mode == "fastsaver":
         return await _resolve_via_fastsaver(url, transport)
+    phimtat_on = bool(getattr(settings, "PHIMTAT_ENABLED", True))
     if mode == "shortcut_fastsaver":
+        if not phimtat_on:
+            return await _resolve_via_fastsaver(url, transport)
         try:
-            base_url, api_key = _provider_config()
+            api_base, redirect_url, api_key, timeout = _provider_config()
         except ManualResolverError:
             return await _resolve_via_fastsaver(url, transport)
         try:
-            resolver = ShortcutDerivedFacebookResolver(base_url, api_key, transport=transport)
+            resolver = ShortcutDerivedFacebookResolver(
+                api_base, redirect_url, api_key, timeout, transport=transport
+            )
             return await resolver.resolve(url)
         except ManualResolverError as exc:
             if exc.code not in _FALLBACK_ELIGIBLE:
@@ -334,8 +375,12 @@ async def resolve_manual_media(
             logger.info("shortcut resolver %s, falling back to FastSaver", exc.code)
             return await _resolve_via_fastsaver(url, transport)
     # Strict shortcut mode.
-    base_url, api_key = _provider_config()
-    resolver = ShortcutDerivedFacebookResolver(base_url, api_key, transport=transport)
+    if not phimtat_on:
+        raise ManualResolverError(UNSUPPORTED, "PHIMTAT provider is disabled (PHIMTAT_ENABLED=false).")
+    api_base, redirect_url, api_key, timeout = _provider_config()
+    resolver = ShortcutDerivedFacebookResolver(
+        api_base, redirect_url, api_key, timeout, transport=transport
+    )
     return await resolver.resolve(url)
 
 
