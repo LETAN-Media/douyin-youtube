@@ -255,14 +255,50 @@ async def _enqueue_one_video(
         logger.error("destination missing for pipeline %s", pipeline_id)
         return False
 
-    if not await schedules.has_new_inventory(pipeline_id):
-        logger.info("no new inventory for pipeline %s", pipeline_id)
-        return False
+    # Check if AI is enabled for this pipeline
+    from ..db.repositories import ai_settings as ai_settings_repo
+    pipe_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
+    ai_enabled = pipe_ai_settings.get("enabled", True)
+    
+    # Get config_hash for AI metadata matching
+    model = settings.TOOLNET_MODEL or ""
+    config_hash = ai_settings_repo.compute_config_hash(
+        enabled=pipe_ai_settings.get("enabled", True),
+        system_prompt=pipe_ai_settings.get("system_prompt"),
+        title_template=pipe_ai_settings.get("title_template"),
+        description_template=pipe_ai_settings.get("description_template"),
+        locked_hashtags=pipe_ai_settings.get("locked_hashtags"),
+        language=pipe_ai_settings.get("language"),
+        model=model,
+    ) if ai_enabled else None
 
-    reel, claimed = await reels.claim_next_reel(pipeline_id)
-    if not claimed or reel is None:
-        logger.info("no claimable reel for pipeline %s", pipeline_id)
-        return False
+    # Find a reel with AI metadata ready
+    from ..db.repositories import reels as reels_repo
+    if ai_enabled:
+        # AI-first: only pick reels with generated AI metadata matching current config
+        reels_with_ai = await reels_repo.list_reels_needing_ai(pipeline_id, config_hash)
+        if not reels_with_ai:
+            logger.info("no AI-ready reels for pipeline %s (AI enabled)", pipeline_id)
+            return False
+        
+        # Try to claim one of the AI-ready reels
+        reel = None
+        claimed = False
+        for candidate in reels_with_ai:
+            claimed = await reels_repo.advance_status(candidate["id"], "new", "queued")
+            if claimed:
+                reel = candidate
+                break
+        
+        if not claimed or reel is None:
+            logger.info("no claimable AI-ready reel for pipeline %s", pipeline_id)
+            return False
+    else:
+        # AI disabled: pick any new reel (legacy behavior)
+        reel, claimed = await reels.claim_next_reel(pipeline_id)
+        if not claimed or reel is None:
+            logger.info("no claimable reel for pipeline %s", pipeline_id)
+            return False
 
     reel_db_id = reel["id"]
     reel_id = reel["reel_id"]
@@ -292,8 +328,8 @@ async def _enqueue_one_video(
         )
 
         logger.info(
-            "enqueued reel %s for slot %s publishAt %s queue_priority=%d",
-            reel_id, slot_time, utc_publish_at, priority,
+            "enqueued reel %s for slot %s publishAt %s queue_priority=%d ai_enabled=%s",
+            reel_id, slot_time, utc_publish_at, priority, ai_enabled,
         )
         return True
 

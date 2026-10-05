@@ -52,6 +52,14 @@ async def lifespan(app: FastAPI):
             settings.FACEBOOK_PUBLISH_CONCURRENCY,
             settings.FACEBOOK_PUBLISH_POLL_SECONDS,
         )
+    ai_worker_task = None
+    if settings.FACEBOOK_AI_WORKER_ENABLED:
+        ai_worker_task = asyncio.create_task(_ai_worker_loop())
+        logger.info(
+            "AI metadata worker started (concurrency=%d, poll=%ss)",
+            settings.FACEBOOK_AI_WORKER_CONCURRENCY,
+            settings.FACEBOOK_AI_WORKER_POLL_SECONDS,
+        )
     yield
     if scheduler_task is not None:
         scheduler_task.cancel()
@@ -77,6 +85,14 @@ async def lifespan(app: FastAPI):
             pass
         except Exception as exc:
             logger.warning("publisher loop stop skipped: %s", exc)
+    if ai_worker_task is not None:
+        ai_worker_task.cancel()
+        try:
+            await ai_worker_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("AI worker loop stop skipped: %s", exc)
     try:
         from .db.client import close_client
 
@@ -120,6 +136,16 @@ async def _publisher_loop() -> None:
         concurrency=settings.FACEBOOK_PUBLISH_CONCURRENCY,
         poll_seconds=settings.FACEBOOK_PUBLISH_POLL_SECONDS,
         stale_ttl_seconds=settings.FACEBOOK_PUBLISH_STALE_TTL_SECONDS,
+    )
+
+
+async def _ai_worker_loop() -> None:
+    from .services.facebook_ai_worker import _worker_loop as run_ai_worker_loop
+
+    await run_ai_worker_loop(
+        concurrency=settings.FACEBOOK_AI_WORKER_CONCURRENCY,
+        poll_seconds=settings.FACEBOOK_AI_WORKER_POLL_SECONDS,
+        stale_ttl_seconds=settings.FACEBOOK_AI_WORKER_STALE_TTL_SECONDS,
     )
 
 

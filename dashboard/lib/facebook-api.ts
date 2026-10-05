@@ -11,6 +11,13 @@ export type FacebookFlowBackendStatus =
   | "error"
   | "not_configured";
 
+export type FacebookFlowActiveEdge =
+  | "source->inventory"
+  | "inventory->ai_metadata"
+  | "ai_metadata->scheduler"
+  | "scheduler->publisher"
+  | "publisher->youtube_destination";
+
 export interface FacebookFlowState {
   pipeline_id: string;
   live: boolean;
@@ -35,6 +42,8 @@ export interface FacebookFlowState {
     publisher: string;
     youtube_destination: string;
   };
+  active_stage?: string | null;
+  active_edges?: FacebookFlowActiveEdge[];
 }
 
 export class FacebookApiError extends Error {

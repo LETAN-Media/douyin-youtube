@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     FACEBOOK_PUBLISH_WORKER_ENABLED: bool = True
     FACEBOOK_PUBLISH_STALE_TTL_SECONDS: int = 300
 
+    # AI metadata background worker (Task 13).
+    FACEBOOK_AI_WORKER_ENABLED: bool = True
+    FACEBOOK_AI_WORKER_CONCURRENCY: int = 1
+    FACEBOOK_AI_WORKER_POLL_SECONDS: int = 10
+    FACEBOOK_AI_WORKER_STALE_TTL_SECONDS: int = 300
+
     def require_toolnet(self) -> tuple[str, str, str]:
         """Return (base_url, api_key, model) or fail fast with a clear config error."""
         if not self.TOOLNET_AI_ENABLED:

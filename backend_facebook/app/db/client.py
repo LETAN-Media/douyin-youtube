@@ -244,6 +244,10 @@ async def migrate() -> None:
         "CREATE INDEX IF NOT EXISTS idx_publish_queue_pipeline ON facebook_publish_queue(pipeline_id, status)",
     ]
     await _apply_migration(client, applied, "20241005_11", statements_11)
+    statements_12: list[str] = []
+    if not await _has_column(client, "facebook_reels", "ai_claimed_at"):
+        statements_12.append("ALTER TABLE facebook_reels ADD COLUMN ai_claimed_at TEXT")
+    await _apply_migration(client, applied, "20241005_12", statements_12)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

@@ -12,6 +12,7 @@ from .facebook_ai_metadata import (
     ToolNetConfig,
     ensure_ai_metadata,
 )
+from .facebook_ai_worker import get_ai_worker_status, run_ai_worker_once
 from .facebook_download_worker import DownloadJobResult, run_download_next
 from .facebook_global_publisher import get_publisher_status, run_publisher_once
 from .facebook_publish_worker import PublishJobResult, run_publish_next
@@ -133,4 +134,6 @@ __all__ = [
     "validate_visibility",
     "get_publisher_status",
     "run_publisher_once",
+    "get_ai_worker_status",
+    "run_ai_worker_once",
 ]

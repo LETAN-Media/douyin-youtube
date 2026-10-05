@@ -147,8 +147,16 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         date_iso = now_local.date().isoformat()
         batch = await schedules.get_batch_for_pipeline_date(pipeline_id, date_iso)
         if batch and batch.get("status") in ("queued", "running"):
-            scheduler_status = "running"
-            scheduler_detail = f"Running · {batch.get('uploaded_count', 0)}/{batch.get('planned_count', 0)} videos"
+            # Only show "running" if there's actual work (planned_count > 0)
+            planned = batch.get('planned_count', 0)
+            uploaded = batch.get('uploaded_count', 0)
+            if planned > 0:
+                scheduler_status = "running"
+                scheduler_detail = f"Running · {uploaded}/{planned} videos"
+            else:
+                # Batch exists but no work - show as idle/waiting
+                scheduler_status = "idle"
+                scheduler_detail = "No work for today"
         elif batch and batch.get("status") == "failed":
             scheduler_status = "error"
             scheduler_detail = f"Failed: {batch.get('last_error', 'unknown')}"
@@ -193,6 +201,22 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
             "publisher": publisher_detail,
             "youtube_destination": youtube_destination_detail,
         },
+        "active_stage": _compute_active_stage(
+            source_status,
+            inventory_status,
+            ai_metadata_status,
+            scheduler_status,
+            publisher_status,
+            youtube_destination_status,
+        ),
+        "active_edges": _compute_active_edges(
+            source_status,
+            inventory_status,
+            ai_metadata_status,
+            scheduler_status,
+            publisher_status,
+            youtube_destination_status,
+        ),
     }
 
 
@@ -202,3 +226,76 @@ async def get_flow_state(pipeline_id: str) -> dict:
     if state is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
     return state
+
+
+def _compute_active_stage(
+    source_status: str,
+    inventory_status: str,
+    ai_metadata_status: str,
+    scheduler_status: str,
+    publisher_status: str,
+    youtube_destination_status: str,
+) -> str | None:
+    """Determine which stage is currently active (doing work right now).
+    
+    Only stages with 'running' status are considered active.
+    """
+    # Check in pipeline order
+    stages = [
+        ("source", source_status),
+        ("inventory", inventory_status),
+        ("ai_metadata", ai_metadata_status),
+        ("scheduler", scheduler_status),
+        ("publisher", publisher_status),
+        ("youtube_destination", youtube_destination_status),
+    ]
+    
+    for name, status in stages:
+        if status == "running":
+            return name
+    
+    return None
+
+
+def _compute_active_edges(
+    source_status: str,
+    inventory_status: str,
+    ai_metadata_status: str,
+    scheduler_status: str,
+    publisher_status: str,
+    youtube_destination_status: str,
+) -> list[str]:
+    """Determine which edges should animate based on active runtime work.
+    
+    An edge animates when:
+    - Source node is 'running' (work happening at source)
+    - Destination node is 'running' (work happening at destination)
+    
+    Only the edge INTO the running node animates.
+    """
+    edges = []
+    
+    stages = [
+        ("source", source_status),
+        ("inventory", inventory_status),
+        ("ai_metadata", ai_metadata_status),
+        ("scheduler", scheduler_status),
+        ("publisher", publisher_status),
+        ("youtube_destination", youtube_destination_status),
+    ]
+    
+    # Edge names correspond to transition from previous to current
+    edge_names = [
+        None,  # source has no incoming edge
+        "source->inventory",
+        "inventory->ai_metadata",
+        "ai_metadata->scheduler",
+        "scheduler->publisher",
+        "publisher->youtube_destination",
+    ]
+    
+    for i, (name, status) in enumerate(stages):
+        if status == "running" and i > 0:
+            edges.append(edge_names[i])
+    
+    return edges

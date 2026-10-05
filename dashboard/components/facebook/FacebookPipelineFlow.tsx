@@ -1,6 +1,7 @@
 "use client";
 
 import { useId } from "react";
+import type { FacebookFlowBackendStatus, FacebookFlowActiveEdge } from "@/lib/facebook-api";
 import { Card } from "@/components/ui";
 import {
   IconAlert,
@@ -14,18 +15,6 @@ import {
 } from "@/components/icons";
 import { FlowEdge, type FlowEdgeLook } from "@/components/pipeline/FlowConnector";
 import { vPath } from "@/lib/flowLayout";
-
-// Backend statuses from GET /api/facebook/pipelines/{pipeline_id}/flow-state
-// We keep them 1:1 with backend semantics - no forced mapping.
-export type FacebookFlowBackendStatus =
-  | "idle"
-  | "ready"
-  | "waiting"
-  | "running"
-  | "partial"
-  | "done"
-  | "error"
-  | "not_configured";
 
 // Visual states for UI (subset of backend statuses + internal)
 // These map 1:1 with backend statuses where possible
@@ -149,15 +138,18 @@ export const DEFAULT_FACEBOOK_FLOW_STEPS: FacebookFlowStep[] = [
   { key: "destination", title: "YouTube Destination", subtitle: "Channel", status: "idle" },
 ];
 
-function edgeLook(a: FacebookFlowVisualStatus, b: FacebookFlowVisualStatus, gradientId: string): FlowEdgeLook {
-  // Only animate when a step is actively RUNNING
+function edgeLook(
+  a: FacebookFlowVisualStatus,
+  b: FacebookFlowVisualStatus,
+  gradientId: string,
+  isActive: boolean
+): FlowEdgeLook {
+  // Only animate when edge is marked active by backend
   const isError = (s: FacebookFlowVisualStatus) => s === "error";
-  const isRunning = (s: FacebookFlowVisualStatus) => s === "running";
-  const isDone = (s: FacebookFlowVisualStatus) => s === "done";
 
   if (isError(a) || isError(b)) return { kind: "failed" };
-  if (isRunning(a) || isRunning(b)) return { kind: "active", gradientId };
-  if (isDone(a) && isDone(b)) return { kind: "faded" };
+  if (isActive) return { kind: "active", gradientId };
+  if (a === "done" && b === "done") return { kind: "faded" };
   return { kind: "idle" };
 }
 
@@ -234,10 +226,20 @@ function Connector({ d, look }: { d: string; look: FlowEdgeLook }) {
   );
 }
 
+const EDGE_KEYS: FacebookFlowActiveEdge[] = [
+  "source->inventory",
+  "inventory->ai_metadata",
+  "ai_metadata->scheduler",
+  "scheduler->publisher",
+  "publisher->youtube_destination",
+];
+
 export function FacebookPipelineFlow({
   steps = DEFAULT_FACEBOOK_FLOW_STEPS,
+  activeEdges = [],
 }: {
   steps?: FacebookFlowStep[];
+  activeEdges?: FacebookFlowActiveEdge[];
 }) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const gradientId = `fb-flow-grad-${uid}`;
@@ -263,6 +265,7 @@ export function FacebookPipelineFlow({
                   normalizeFlowStatus(step.status),
                   normalizeFlowStatus(steps[idx + 1].status),
                   gradientId,
+                  activeEdges.includes(EDGE_KEYS[idx]),
                 )}
               />
             ) : null}
@@ -273,7 +276,13 @@ export function FacebookPipelineFlow({
   );
 }
 
-export function FacebookPipelineFlowCard({ steps }: { steps?: FacebookFlowStep[] }) {
+export function FacebookPipelineFlowCard({
+  steps,
+  activeEdges,
+}: {
+  steps?: FacebookFlowStep[];
+  activeEdges?: FacebookFlowActiveEdge[];
+}) {
   return (
     <Card className="p-0">
       <div className="border-b border-slate-100 px-4 py-2.5 sm:px-5">
@@ -282,7 +291,7 @@ export function FacebookPipelineFlowCard({ steps }: { steps?: FacebookFlowStep[]
         </p>
       </div>
       <div className="p-4 sm:px-5">
-        <FacebookPipelineFlow steps={steps} />
+        <FacebookPipelineFlow steps={steps} activeEdges={activeEdges} />
       </div>
     </Card>
   );

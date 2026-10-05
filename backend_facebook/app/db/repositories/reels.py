@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Any
 
 from ..client import get_client
@@ -433,6 +434,93 @@ async def recover_stale_queued(max_age_minutes: int = 120) -> int:
         {"cutoff": f"-{max(1, max_age_minutes)} minutes"},
     )
     return res.rows_affected or 0
+
+
+async def claim_ai_processing(reel_db_id: str) -> bool:
+    """Atomically claim a reel for AI processing: new -> ai_processing.
+    
+    Returns True only if the reel was in 'new' status.
+    """
+    client = get_client()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    res = await client.execute(
+        "UPDATE facebook_reels SET status = 'ai_processing', ai_claimed_at = :now, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id AND status = 'new'",
+        {"id": reel_db_id, "now": now_iso},
+    )
+    return (res.rows_affected or 0) > 0
+
+
+async def release_ai_claim(reel_db_id: str) -> bool:
+    """Release AI claim: ai_processing -> new. Only if currently ai_processing."""
+    client = get_client()
+    res = await client.execute(
+        "UPDATE facebook_reels SET status = 'new', ai_claimed_at = NULL, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id AND status = 'ai_processing'",
+        {"id": reel_db_id},
+    )
+    return (res.rows_affected or 0) > 0
+
+
+async def list_reels_needing_ai(
+    pipeline_id: str,
+    config_hash: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Find reels in 'new' status that need AI metadata generation.
+    
+    A reel needs AI if:
+    - status = 'new'
+    - no generated AI metadata with matching config_hash
+    - pipeline has AI enabled
+    """
+    client = get_client()
+    
+    if config_hash is None:
+        # Find reels with no AI metadata at all
+        rows = await client.execute(
+            f"""
+            SELECT {_REEL_COLUMNS} FROM facebook_reels r
+            WHERE {_pipeline_scope(pipeline_id)}
+            AND r.status = 'new'
+            AND NOT EXISTS (
+                SELECT 1 FROM facebook_ai_metadata m
+                WHERE m.reel_db_id = r.id
+                AND m.status = 'generated'
+            )
+            ORDER BY r.discovered_at DESC, r.id ASC
+            LIMIT :limit
+            """,
+            {"pipeline_id": pipeline_id, "limit": limit},
+        )
+    else:
+        # Find reels where AI metadata is missing or stale
+        rows = await client.execute(
+            f"""
+            SELECT {_REEL_COLUMNS} FROM facebook_reels r
+            WHERE {_pipeline_scope(pipeline_id)}
+            AND r.status = 'new'
+            AND NOT EXISTS (
+                SELECT 1 FROM facebook_ai_metadata m
+                WHERE m.reel_db_id = r.id
+                AND m.status = 'generated'
+                AND m.config_hash = :config_hash
+            )
+            ORDER BY r.discovered_at DESC, r.id ASC
+            LIMIT :limit
+            """,
+            {"pipeline_id": pipeline_id, "config_hash": config_hash, "limit": limit},
+        )
+    
+    return [_reel_to_dict(r) for r in (rows.rows or [])]
+
+
+async def execute(sql: str, params: dict[str, Any] | None = None) -> Any:
+    """Execute raw SQL query."""
+    client = get_client()
+    return await client.execute(sql, params or {})
 
 
 async def skip_reel(reel_db_id: str) -> dict[str, Any] | None:

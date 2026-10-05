@@ -121,7 +121,10 @@ export function FacebookFlowLive({
         <Metric label="FAILED" value={state.failed} tone={state.failed > 0 ? "red" : undefined} />
       </div>
       <div className={error ? "opacity-70" : ""}>
-        <FacebookPipelineFlowCard steps={toSteps(state)} />
+        <FacebookPipelineFlowCard
+          steps={toSteps(state)}
+          activeEdges={state.active_edges || []}
+        />
       </div>
     </div>
   );
