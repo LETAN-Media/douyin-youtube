@@ -759,32 +759,44 @@ def dashboard_stats(
     from sqlalchemy import text as _text
 
     today_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    is_sqlite = db.bind and db.bind.dialect.name in ("sqlite", "libsql")
+    if is_sqlite:
+        cast_sql = "CAST(COUNT(*) AS TEXT)"
+        bool_true = "1"
+        string_agg_sql = "GROUP_CONCAT(DISTINCT last_skip_reason)"
+        today_val = today_start.isoformat()
+    else:
+        cast_sql = "COUNT(*)::TEXT"
+        bool_true = "TRUE"
+        string_agg_sql = "STRING_AGG(DISTINCT last_skip_reason, '|')"
+        today_val = today_start
 
     _agg_sql = _text(
-        "SELECT pipeline_id, metric, value FROM ("
-        "SELECT pipeline_id, 'job_total' AS metric, COUNT(*)::TEXT AS value FROM video_jobs WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'job_published', COUNT(*)::TEXT FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'job_pending', COUNT(*)::TEXT FROM video_jobs WHERE pipeline_id IN :pids AND status = 'pending' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'source_count', COUNT(*)::TEXT FROM douyin_sources WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_total', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_backlog', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'backlog' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_new', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'new' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_scheduled', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'scheduled' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'inv_published', COUNT(*)::TEXT FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'dest_count', COUNT(*)::TEXT FROM destinations WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'dest_connected', COUNT(*)::TEXT FROM destinations WHERE pipeline_id IN :pids AND enabled = TRUE AND connected = TRUE AND credentials IS NOT NULL AND LOWER(platform) = 'youtube' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'skip_reasons', STRING_AGG(DISTINCT last_skip_reason, '|') FROM destinations WHERE pipeline_id IN :pids AND last_skip_reason IS NOT NULL GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_total', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_failed', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status = 'failed' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_scheduled', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status IN ('scheduled', 'queued') GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'pub_published', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'today_vj', COUNT(*)::TEXT FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' AND created_at >= :today GROUP BY pipeline_id "
-        "UNION ALL SELECT pipeline_id, 'today_pub', COUNT(*)::TEXT FROM publications WHERE pipeline_id IN :pids AND status = 'published' AND published_at >= :today GROUP BY pipeline_id"
-        ") AS agg"
+        f"SELECT pipeline_id, metric, value FROM ("
+        f"SELECT pipeline_id, 'job_total' AS metric, {cast_sql} AS value FROM video_jobs WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'job_published', {cast_sql} FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'job_pending', {cast_sql} FROM video_jobs WHERE pipeline_id IN :pids AND status = 'pending' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'source_count', {cast_sql} FROM douyin_sources WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'inv_total', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'inv_backlog', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'backlog' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'inv_new', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'new' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'inv_scheduled', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'scheduled' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'inv_published', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'dest_count', {cast_sql} FROM destinations WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'dest_connected', {cast_sql} FROM destinations WHERE pipeline_id IN :pids AND enabled = {bool_true} AND connected = {bool_true} AND credentials IS NOT NULL AND LOWER(platform) = 'youtube' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'skip_reasons', {string_agg_sql} FROM destinations WHERE pipeline_id IN :pids AND last_skip_reason IS NOT NULL GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'pub_total', {cast_sql} FROM publications WHERE pipeline_id IN :pids GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'pub_failed', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status = 'failed' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'pub_scheduled', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status IN ('scheduled', 'queued') GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'pub_published', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'today_vj', {cast_sql} FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' AND created_at >= :today GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'today_pub', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status = 'published' AND published_at >= :today GROUP BY pipeline_id"
+        f") AS agg"
     ).bindparams(_bindparam("pids", expanding=True))
     _t_agg = time.perf_counter()
     _agg_rows = db.execute(
-        _agg_sql, {"pids": pipeline_ids, "today": today_start}
+        _agg_sql, {"pids": pipeline_ids, "today": today_val}
     ).all()
     timings["q_agg_ms"] = int((time.perf_counter() - _t_agg) * 1000)
 
@@ -864,7 +876,7 @@ def dashboard_stats(
                 auto_reasons[pid] = "NO_AVAILABLE_INVENTORY"
             else:
                 _skip_raw = _gs(pid, "skip_reasons")
-                reasons = [s for s in (_skip_raw.split("|") if _skip_raw else []) if s]
+                reasons = [s for s in (_skip_raw.replace(",", "|").split("|") if _skip_raw else []) if s]
                 if reasons:
                     found: str | None = None
                     for cand in (
