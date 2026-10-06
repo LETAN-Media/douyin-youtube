@@ -38,8 +38,9 @@ def test_pool_load_skips_unconfigured_and_legacy_primary(monkeypatch):
 
     monkeypatch.setattr(settings, "DRAMA_API_PRIMARY_HOST", "")
     monkeypatch.setattr(settings, "DRAMA_API_PRIMARY_KEY", "")
-    monkeypatch.setattr(settings, "DRAMA_API_FALLBACK_1_HOST", "")
-    monkeypatch.setattr(settings, "DRAMA_API_FALLBACK_1_KEY", "")
+    for i in (1, 2, 3, 4):
+        monkeypatch.setattr(settings, f"DRAMA_API_FALLBACK_{i}_HOST", "")
+        monkeypatch.setattr(settings, f"DRAMA_API_FALLBACK_{i}_KEY", "")
     monkeypatch.setattr(settings, "DRAMA_API_FALLBACK_2_HOST", "fb2.example.com")
     monkeypatch.setattr(settings, "DRAMA_API_FALLBACK_2_KEY", "k2")
     monkeypatch.setattr(settings, "DRAMA_API_HOST", "legacy.example.com")
@@ -243,7 +244,15 @@ def test_circuit_breaker_cooldown_and_recovery(monkeypatch):
         base_mod.PROVIDERS.update(orig)
 
 
-def test_429_only_independent_hosts(monkeypatch, caplog):
+def _named_ep(name, host, key):
+    return pool_mod.ProviderEndpoint(
+        name=name, host=host, base_url=f"https://{host}",
+        api_key=key, priority=0 if name == "primary" else 1,
+        enabled=True, providers=(),
+    )
+
+
+def test_429_only_independent_pools(monkeypatch, caplog):
     import app.services.providers.base as base_mod
 
     calls: list = []
@@ -251,29 +260,40 @@ def test_429_only_independent_hosts(monkeypatch, caplog):
     orig = base_mod.PROVIDERS.copy()
     base_mod.PROVIDERS["starshort"] = _fake_adapter_factory(calls, behaviors)
     pool_mod.reset_pool_state()
-    # Same host twice: second must be skipped (shared quota pool).
-    monkeypatch.setattr(
-        pool_mod, "load_pool_from_settings",
-        lambda: [_ep("primary", host="same.example.com"),
-                 _ep("fallback_1", host="same.example.com")],
-    )
     try:
+        # Same host AND same key: one quota pool -> fallback skipped.
+        monkeypatch.setattr(
+            pool_mod, "load_pool_from_settings",
+            lambda: [_named_ep("primary", "same.example.com", "k_SHARED"),
+                     _named_ep("fallback_1", "same.example.com", "k_SHARED")],
+        )
         with caplog.at_level("WARNING"):
             with pytest.raises(pool_mod.PoolExhausted) as exc:
                 run(pool_mod.execute("starshort", "search_series", query="love"))
         assert exc.value.code == "ALL_PROVIDERS_FAILED"
-        assert calls == ["primary"]  # fallback_1 skipped: same limited host
-        assert "k_primary" not in caplog.text and "k_fallback" not in caplog.text
-        # Different host: failover proceeds.
+        assert calls == ["primary"]
+        assert "k_SHARED" not in caplog.text
+        # Same host but DIFFERENT keys: independent pools -> failover proceeds.
         pool_mod.reset_pool_state()
         calls.clear()
         monkeypatch.setattr(
             pool_mod, "load_pool_from_settings",
-            lambda: [_ep("primary", host="h1.example.com"),
-                     _ep("fallback_1", host="h2.example.com")],
+            lambda: [_named_ep("primary", "h1.example.com", "k_1"),
+                     _named_ep("fallback_1", "h1.example.com", "k_2")],
         )
         result, ep = run(pool_mod.execute("starshort", "search_series", query="love"))
         assert result == ["s9"] and ep == "fallback_1"
+        # Different hosts: failover proceeds.
+        pool_mod.reset_pool_state()
+        calls.clear()
+        monkeypatch.setattr(
+            pool_mod, "load_pool_from_settings",
+            lambda: [_named_ep("primary", "h1.example.com", "k_1"),
+                     _named_ep("fallback_1", "h2.example.com", "k_2")],
+        )
+        result, ep = run(pool_mod.execute("starshort", "search_series", query="love"))
+        assert result == ["s9"] and ep == "fallback_1"
+        assert "k_1" not in caplog.text and "k_2" not in caplog.text
     finally:
         base_mod.PROVIDERS.clear()
         base_mod.PROVIDERS.update(orig)

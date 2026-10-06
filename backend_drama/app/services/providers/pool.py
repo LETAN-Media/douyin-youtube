@@ -61,13 +61,15 @@ class _CircuitState:
 
 
 _states: dict[str, _CircuitState] = {}
-# Hosts under rate-limit backoff (quota pools are per key/host).
-_limited_hosts: dict[str, float] = {}
+# Rate-limited quota pools, keyed by (host, api_key): quotas are per key,
+# so same-host endpoints with different keys stay independent, while the
+# same credentials are never hammered.
+_limited_pools: dict[tuple[str, str], float] = {}
 
 
 def reset_pool_state() -> None:
     _states.clear()
-    _limited_hosts.clear()
+    _limited_pools.clear()
 
 
 def _state_for(name: str) -> _CircuitState:
@@ -166,10 +168,11 @@ def _is_usable(ep: ProviderEndpoint, now: float) -> bool:
     state = _state_for(ep.name)
     if state.unhealthy_until > now or state.rate_limited_until > now:
         return False
-    # Same-host endpoints share one rate-limited quota pool: only hosts
-    # without an active backoff are eligible. Independent hosts are tried,
-    # the same pool is never hammered, keys never rotated to bypass limits.
-    if _limited_hosts.get(ep.host, 0.0) > now:
+    # Same credentials share one rate-limited quota pool: only pools
+    # without an active backoff are eligible. Different keys on the same
+    # host are independent and still tried; keys are never rotated to
+    # bypass limits — a limited pool is skipped, never forced.
+    if _limited_pools.get((ep.host, ep.api_key), 0.0) > now:
         return False
     return True
 
@@ -233,7 +236,7 @@ async def execute(
                 retry_after = getattr(exc, "retry_after", None)
                 wait = retry_after if isinstance(retry_after, (int, float)) and retry_after > 0 else RATE_LIMIT_COOLDOWN_SECONDS
                 _record_failure(ep.name, rate_limited=True, retry_after=wait)
-                _limited_hosts[ep.host] = time.monotonic() + min(wait, 600.0)
+                _limited_pools[(ep.host, ep.api_key)] = time.monotonic() + min(wait, 600.0)
                 attempts.append({"endpoint": ep.name, "code": code})
                 logger.warning(
                     "provider=%s host=%s status=429 rate_limited; independent hosts only",
