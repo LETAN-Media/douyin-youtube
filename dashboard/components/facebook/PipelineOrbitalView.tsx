@@ -26,6 +26,9 @@ export interface PipelineOrbitalViewProps {
   nodes: OrbitalNodeDatum[];
   activeEdges?: string[];
   height?: number;
+  /** YouTube channel avatar (circular core). Falls back to initial letter. */
+  channelAvatarUrl?: string | null;
+  channelName?: string | null;
 }
 
 const INDIGO = "#4f46e5";
@@ -83,12 +86,21 @@ export function PipelineOrbitalView({
   nodes,
   activeEdges = [],
   height = 380,
+  channelAvatarUrl = null,
+  channelName = null,
 }: PipelineOrbitalViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   // Keep latest props for the rAF loop without re-subscribing.
-  const dataRef = useRef({ pipelineName, nodes, activeEdges });
-  dataRef.current = { pipelineName, nodes, activeEdges };
+  const dataRef = useRef({ pipelineName, nodes, activeEdges, channelAvatarUrl, channelName });
+  dataRef.current = { pipelineName, nodes, activeEdges, channelAvatarUrl, channelName };
+  // Avatar image cache (per URL). Loads async; the running loop picks it
+  // up automatically, static mode redraws on load.
+  const avatarRef = useRef<{ url: string | null; img: HTMLImageElement | null; ready: boolean }>({
+    url: null,
+    img: null,
+    ready: false,
+  });
 
   useEffect(() => {
     const canvasEl = canvasRef.current;
@@ -107,6 +119,37 @@ export function PipelineOrbitalView({
     let io: IntersectionObserver | null = null;
 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function ensureAvatar(onReady?: () => void) {
+      const url = dataRef.current.channelAvatarUrl;
+      const cache = avatarRef.current;
+      if (!url) {
+        cache.url = null;
+        cache.img = null;
+        cache.ready = false;
+        return;
+      }
+      if (cache.url === url) return; // already loading / loaded
+      cache.url = url;
+      cache.img = null;
+      cache.ready = false;
+      const img = new Image();
+      img.referrerPolicy = "no-referrer";
+      img.onload = () => {
+        if (avatarRef.current.url === url) {
+          avatarRef.current.img = img;
+          avatarRef.current.ready = true;
+          onReady?.();
+        }
+      };
+      img.onerror = () => {
+        if (avatarRef.current.url === url) {
+          avatarRef.current.img = null;
+          avatarRef.current.ready = false;
+        }
+      };
+      img.src = url;
+    }
 
     function resize() {
       const w = Math.max(280, wrap.clientWidth);
@@ -153,7 +196,8 @@ export function PipelineOrbitalView({
     }
 
     function draw(t: number) {
-      const { pipelineName: name, nodes: ns } = dataRef.current;
+      const { pipelineName: name, nodes: ns, channelName } = dataRef.current;
+      ensureAvatar();
       const W = width;
       const H = height;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -335,36 +379,38 @@ export function PipelineOrbitalView({
         }
       }
 
-      // --- core hub: flat ring + name plate (no bloom planet) ---
-      const breathe = 1 + 0.04 * Math.sin(t * 2.2);
-      ctx.strokeStyle = "rgba(79,70,229,0.35)";
-      ctx.lineWidth = 1.4;
+      // --- core hub: circular channel avatar (fallback: initial) ---
+      const AVATAR_R = 22;
+      const avatar = avatarRef.current;
+      ctx.save();
       ctx.beginPath();
-      ctx.arc(cx, cy, 30 * breathe, 0, Math.PI * 2);
-      ctx.stroke();
-      const tick = (t * 0.5) % (Math.PI * 2);
-      ctx.strokeStyle = INDIGO;
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 30 * breathe, tick, tick + Math.PI * 0.5);
-      ctx.stroke();
-      ctx.fillStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(cx, cy, 22, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.arc(cx, cy, AVATAR_R, 0, Math.PI * 2);
+      ctx.clip();
+      if (avatar.ready && avatar.img) {
+        // cover-fit the square-ish avatar into the circle
+        const iw = avatar.img.naturalWidth || AVATAR_R * 2;
+        const ih = avatar.img.naturalHeight || AVATAR_R * 2;
+        const s = Math.max((AVATAR_R * 2) / iw, (AVATAR_R * 2) / ih);
+        const dw = iw * s;
+        const dh = ih * s;
+        ctx.drawImage(avatar.img, cx - dw / 2, cy - dh / 2, dw, dh);
+      } else {
+        ctx.fillStyle = "#eef1ff";
+        ctx.fillRect(cx - AVATAR_R, cy - AVATAR_R, AVATAR_R * 2, AVATAR_R * 2);
+        const initial = ((channelName || name || "?").trim().charAt(0) || "?").toUpperCase();
+        ctx.fillStyle = INDIGO;
+        ctx.font = "800 20px system-ui, -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(initial, cx, cy + 1);
+        ctx.textBaseline = "alphabetic";
+      }
+      ctx.restore();
       ctx.strokeStyle = "#e0e7ff";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       ctx.beginPath();
-      ctx.arc(cx, cy, 22, 0, Math.PI * 2);
+      ctx.arc(cx, cy, AVATAR_R, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.fillStyle = INDIGO;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 5 + Math.sin(t * 4) * 0.7, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(cx, cy, 2, 0, Math.PI * 2);
-      ctx.fill();
 
       const short = name.length > 22 ? name.slice(0, 21) + "…" : name;
       ctx.textAlign = "center";
@@ -386,8 +432,10 @@ export function PipelineOrbitalView({
 
     if (reduced) {
       resize();
+      ensureAvatar(() => drawStatic());
       drawStatic();
     } else {
+      ensureAvatar();
       io = new IntersectionObserver(
         (entries) => {
           if (entries[0]?.isIntersecting && !document.hidden) start();

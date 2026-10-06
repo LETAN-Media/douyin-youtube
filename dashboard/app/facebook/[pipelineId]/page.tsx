@@ -22,6 +22,7 @@ import { FacebookTabs, type FacebookTabKey } from "@/components/facebook/Faceboo
 import { FacebookPipelineRename } from "@/components/facebook/FacebookPipelineRename";
 import { FacebookPipelineToggles } from "@/components/facebook/FacebookPipelineToggles";
 import { FacebookOverview } from "@/components/facebook/FacebookOverview";
+import { getChannelAvatarUrl } from "@/lib/youtube-avatar";
 import { FacebookSources } from "@/components/facebook/FacebookSources";
 import { FacebookInventory } from "@/components/facebook/FacebookInventory";
 import { FacebookDestinations } from "@/components/facebook/FacebookDestinations";
@@ -126,6 +127,20 @@ export default async function FacebookPipelinePage({
   const initialFlow: FacebookFlowState | null = flowRes.ok ? flowRes.v : null;
   const flowError: string | null = flowRes.ok ? null : flowRes.e;
 
+  // Core avatar: first connected YouTube channel of this pipeline.
+  // Hard-bounded (2.5s) so a slow YouTube fetch never blocks the page;
+  // falls back to an initial-letter avatar.
+  const connectedDest = destinationsRes.ok
+    ? destinationsRes.v.find((d) => d.connected && d.channel_id) ?? null
+    : null;
+  const channelAvatarUrl = connectedDest?.channel_id
+    ? await Promise.race([
+        getChannelAvatarUrl(connectedDest.channel_id).catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
+      ])
+    : null;
+  const channelName = connectedDest?.channel_name ?? null;
+
   const initialSchedule: FacebookScheduleDto | null = scheduleFullRes.ok ? scheduleFullRes.v : null;
 
   // AI metadata stats + settings + one generated sample for the AI tab (server-side).
@@ -190,6 +205,8 @@ export default async function FacebookPipelinePage({
               pipelineId={pipelineId}
               initialFlow={initialFlow}
               flowError={flowError}
+              channelAvatarUrl={channelAvatarUrl}
+              channelName={channelName}
             />
           ) : null}
           {activeTab === "sources" ? (

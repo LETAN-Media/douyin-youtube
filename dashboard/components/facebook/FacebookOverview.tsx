@@ -38,11 +38,15 @@ export function FacebookOverview({
   pipelineId,
   initialFlow,
   flowError,
+  channelAvatarUrl,
+  channelName,
 }: {
   pipeline: FacebookPipelineDto;
   pipelineId: string;
   initialFlow: FacebookFlowState | null;
   flowError: string | null;
+  channelAvatarUrl?: string | null;
+  channelName?: string | null;
 }) {
   const [enabled, setEnabled] = useState(pipeline.enabled);
   const [autoPublish, setAutoPublish] = useState(pipeline.auto_publish);
@@ -73,6 +77,8 @@ export function FacebookOverview({
           pipelineName={pipeline.name}
           nodes={toOrbitalNodes(flowState)}
           activeEdges={flowState.active_edges || []}
+          channelAvatarUrl={channelAvatarUrl ?? null}
+          channelName={channelName ?? pipeline.name}
         />
       ) : null}
       <FacebookFlowLive
