@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="backend-drama", version=settings.VERSION)
+    app = FastAPI(title="backend-drama", version=settings.VERSION, lifespan=lifespan)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception):

@@ -45,3 +45,16 @@ def test_config_defaults_and_overrides(monkeypatch):
     s2 = Settings()
     assert s2.PORT == 9999
     assert s2.RAPIDIX_TIMEOUT_SECONDS == 45.0
+
+
+def test_lifespan_attached_and_migrates(db):
+    from app.db import client as dbc
+    from app.main import create_app
+
+    assert create_app().router.lifespan_context is not None
+    conn = dbc.get_client()
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    for t in ("drama_pipelines", "drama_sources", "drama_series",
+              "drama_episodes", "schema_migrations"):
+        assert t in tables, t
