@@ -185,6 +185,39 @@ async def get_one_source(source_id: str) -> dict:
     return _source_response(source)
 
 
+class SourceUpdate(BaseModel):
+    enabled: bool
+
+
+@router.patch("/sources/{source_id}")
+async def update_one_source(
+    source_id: str, body: SourceUpdate, _: None = Depends(require_admin)
+) -> dict:
+    updated = await sources.update_source_enabled(source_id, body.enabled)
+    if updated is None:
+        raise _err(404, "SOURCE_NOT_FOUND", "Source not found")
+    return _source_response(updated)
+
+
+@router.delete("/sources/{source_id}")
+async def delete_one_source(
+    source_id: str, _: None = Depends(require_admin)
+) -> dict:
+    """Delete a source with no inventory. Sources that already produced
+    videos are protected (disable them instead) so AI stats, scheduler and
+    inventory joins keep working."""
+    outcome = await sources.delete_source(source_id)
+    if outcome == "not_found":
+        raise _err(404, "SOURCE_NOT_FOUND", "Source not found")
+    if outcome == "has_reels":
+        count = await sources.count_reels_for_source(source_id)
+        raise _err(
+            409, "SOURCE_HAS_VIDEOS",
+            f"Nguồn còn {count} video trong Inventory. Hãy tắt nguồn thay vì xoá.",
+        )
+    return {"ok": True, "id": source_id, "deleted": True}
+
+
 # ---------- Aggregates ----------
 
 

@@ -39,6 +39,9 @@ export function FacebookDestinations({
   const [authUrls, setAuthUrls] = useState<Record<string, string>>({});
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState<FacebookDestinationDto | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
   // Intended final visibility is public: scheduler uploads private first,
   // YouTube flips to public at publishAt.
   const [newDestVisibility, setNewDestVisibility] = useState("public");
@@ -135,6 +138,39 @@ export function FacebookDestinations({
       return;
     }
     await createAndConnect();
+  }
+
+  async function disconnect(destinationId: string) {
+    if (disconnecting) return;
+    setDisconnecting(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `${proxyUrl()}/${encodeURIComponent(destinationId)}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const serverMessage = await parseErrorMessage(res);
+        if (res.status === 409) {
+          throw new Error(
+            serverMessage || "Kênh đang có video chờ/đang upload. Hãy đợi hoàn tất rồi ngắt kết nối.",
+          );
+        }
+        throw new Error(friendlyError(res.status, serverMessage, "Không ngắt kết nối được."));
+      }
+      setDestinations((prev) => prev.filter((d) => d.id !== destinationId));
+      setAuthUrls((m) => {
+        const next = { ...m };
+        delete next[destinationId];
+        return next;
+      });
+      setConfirmDisconnect(null);
+      setMenuOpenId(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Không ngắt kết nối được.");
+    } finally {
+      setDisconnecting(false);
+    }
   }
 
   const pendingDestination = destinations.find((d) => !d.connected);
@@ -242,6 +278,31 @@ export function FacebookDestinations({
                       Tiếp tục tới Google →
                     </a>
                   ) : null}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      title="Tùy chọn kênh"
+                      onClick={() => setMenuOpenId(menuOpenId === d.id ? null : d.id)}
+                      className="inline-flex h-9 min-w-[44px] items-center justify-center rounded-xl border border-slate-200 bg-white px-2 text-sm font-extrabold text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+                    >
+                      ⋯
+                    </button>
+                    {menuOpenId === d.id ? (
+                      <div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMenuOpenId(null);
+                            setError(null);
+                            setConfirmDisconnect(d);
+                          }}
+                          className="flex min-h-[44px] w-full items-center gap-2 px-4 py-2.5 text-left text-xs font-bold text-rose-600 transition hover:bg-rose-50"
+                        >
+                          🗑 Ngắt kết nối
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             ))}
@@ -259,6 +320,40 @@ export function FacebookDestinations({
           </div>
         )}
       </div>
+
+      {confirmDisconnect ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-4 backdrop-blur-[2px] sm:items-center">
+          <div className="fade-up w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-base font-extrabold tracking-tight text-slate-900">
+              Ngắt kết nối {confirmDisconnect.channel_name ?? "kênh này"}?
+            </h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+              Kênh sẽ biến mất khỏi danh sách. Lịch sử đăng cũ vẫn được giữ.
+              Credentials YouTube của connection này sẽ bị xoá.
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (disconnecting) return;
+                  setConfirmDisconnect(null);
+                }}
+                className="min-h-[44px] flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600"
+              >
+                Huỷ
+              </button>
+              <button
+                type="button"
+                onClick={() => void disconnect(confirmDisconnect.id)}
+                disabled={disconnecting}
+                className="min-h-[44px] flex-1 rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-sm transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-70"
+              >
+                {disconnecting ? "Đang ngắt…" : "Ngắt kết nối"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </Card>
   );
 }

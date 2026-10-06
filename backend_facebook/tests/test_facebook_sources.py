@@ -335,3 +335,68 @@ def test_health(db) -> None:
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"ok": True, "service": "backend-facebook", "version": "1.0.0"}
+
+
+# ---------- source update (enable/disable) + delete ----------
+
+
+def _make_pipeline_with_source(db, suffix: str = "upd") -> tuple[str, str]:
+    async def _go():
+        pipe = await pipelines.create_pipeline(
+            pipeline_id=f"pl_{suffix}", name=f"P {suffix}", slug=f"pl-{suffix}"
+        )
+        src = await sources.create_source(
+            source_id=f"src_{suffix}", pipeline_id=pipe["id"],
+            page_id=f"page_{suffix}", reels_url=f"https://www.facebook.com/{suffix}/reels/",
+        )
+        return pipe["id"], src["id"]
+
+    return asyncio.run(_go())
+
+
+def test_update_source_enabled_toggle(db) -> None:
+    pipe_id, src_id = _make_pipeline_with_source(db, "tgl")
+    client = make_client()
+    off = client.patch(
+        f"/api/facebook/sources/{src_id}", headers=AUTH_HEADERS, json={"enabled": False}
+    )
+    assert off.status_code == 200, off.text
+    assert off.json()["enabled"] is False
+    on = client.patch(
+        f"/api/facebook/sources/{src_id}", headers=AUTH_HEADERS, json={"enabled": True}
+    )
+    assert on.status_code == 200, on.text
+    assert on.json()["enabled"] is True
+    missing = client.patch(
+        "/api/facebook/sources/src_nope", headers=AUTH_HEADERS, json={"enabled": True}
+    )
+    assert missing.status_code == 404, missing.text
+
+
+def test_delete_empty_source(db) -> None:
+    _pipe_id, src_id = _make_pipeline_with_source(db, "delempty")
+    client = make_client()
+    r = client.delete(f"/api/facebook/sources/{src_id}", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+    again = client.delete(f"/api/facebook/sources/{src_id}", headers=AUTH_HEADERS)
+    assert again.status_code == 404, again.text
+
+
+def test_delete_source_with_reels_is_409(db) -> None:
+    from app.db.repositories import reels
+
+    pipe_id, src_id = _make_pipeline_with_source(db, "delbusy")
+
+    async def _seed_reel():
+        await reels.insert_reel_if_new(
+            reel_db_id=f"{src_id}_r1", source_id=src_id, reel_id="r1",
+        )
+
+    asyncio.run(_seed_reel())
+    client = make_client()
+    r = client.delete(f"/api/facebook/sources/{src_id}", headers=AUTH_HEADERS)
+    assert r.status_code == 409, r.text
+    assert r.json()["error"] == "SOURCE_HAS_VIDEOS"
+    # Source still there and toggle still works.
+    assert asyncio.run(sources.get_source(src_id)) is not None

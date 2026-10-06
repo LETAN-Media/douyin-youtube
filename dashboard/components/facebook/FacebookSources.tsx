@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardHeader, Badge, btnSmall, inputCls, labelCls } from "@/components/ui";
 import { IconSources } from "@/components/icons";
@@ -39,6 +39,16 @@ export function FacebookSources({
   const [bulkUrls, setBulkUrls] = useState("");
   const [adding, setAdding] = useState(false);
   const [addResults, setAddResults] = useState<AddResult[]>([]);
+  const [items, setItems] = useState<FacebookSourceDto[]>(sources);
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<FacebookSourceDto | null>(null);
+  const [working, setWorking] = useState(false);
+  const [rowError, setRowError] = useState<string | null>(null);
+
+  // Keep local list in sync when the server re-renders with fresh data.
+  useEffect(() => {
+    setItems(sources);
+  }, [sources]);
 
   async function addSources() {
     const urls = bulkUrls
@@ -82,8 +92,54 @@ export function FacebookSources({
     }
   }
 
-  async function scanNow(sourceId: string) {
-    setScanning((m) => ({ ...m, [sourceId]: "starting" }));
+  async function toggleEnabled(source: FacebookSourceDto) {
+    if (working) return;
+    setWorking(true);
+    setRowError(null);
+    setMenuOpenId(null);
+    const next = !source.enabled;
+    try {
+      const res = await fetch(`/api/facebook/sources/${encodeURIComponent(source.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorMessage(res));
+      }
+      setItems((prev) => prev.map((s) => (s.id === source.id ? { ...s, enabled: next } : s)));
+      router.refresh();
+    } catch (err) {
+      setRowError(err instanceof Error ? err.message : "Không cập nhật được nguồn.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function deleteSource(sourceId: string) {
+    if (working) return;
+    setWorking(true);
+    setRowError(null);
+    try {
+      const res = await fetch(`/api/facebook/sources/${encodeURIComponent(sourceId)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const message = await parseErrorMessage(res);
+        if (res.status === 409) throw new Error(message);
+        throw new Error(message);
+      }
+      setItems((prev) => prev.filter((s) => s.id !== sourceId));
+      setConfirmDelete(null);
+      router.refresh();
+    } catch (err) {
+      setRowError(err instanceof Error ? err.message : "Không xoá được nguồn.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function scanNow(sourceId: string) {   setScanning((m) => ({ ...m, [sourceId]: "starting" }));
     try {
       const res = await fetch("/api/facebook/scan", {
         method: "POST",
@@ -103,7 +159,7 @@ export function FacebookSources({
   return (
     <Card>
       <CardHeader
-        title={`Facebook Sources (${sources.length})`}
+        title={`Facebook Sources (${items.length})`}
         subtitle="Quản lý Fanpage nguồn cho pipeline này"
         icon={<IconSources size={16} />}
       />
@@ -142,11 +198,11 @@ export function FacebookSources({
             </ul>
           ) : null}
         </div>
-        {sources.length === 0 && addResults.length === 0 ? (
+        {items.length === 0 && addResults.length === 0 ? (
           <div className="p-6 text-center text-sm text-slate-500">Chưa có Facebook source</div>
         ) : null}
         <div className="space-y-3 p-4 sm:px-5">
-          {sources.map((s) => {
+          {items.map((s) => {
             const st = sourceStatus(s);
             const state = scanning[s.id];
             return (
@@ -185,17 +241,87 @@ export function FacebookSources({
                   >
                     {state === "starting" ? "Đang bắt đầu…" : "Quét ngay"}
                   </button>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      title="Tùy chọn nguồn"
+                      onClick={() => setMenuOpenId(menuOpenId === s.id ? null : s.id)}
+                      className="inline-flex h-9 min-w-[44px] items-center justify-center rounded-xl border border-slate-200 bg-white px-2 text-sm font-extrabold text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+                    >
+                      ⋯
+                    </button>
+                    {menuOpenId === s.id ? (
+                      <div className="absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+                        <button
+                          type="button"
+                          onClick={() => void toggleEnabled(s)}
+                          disabled={working}
+                          className="flex min-h-[44px] w-full items-center px-4 py-2.5 text-left text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
+                        >
+                          {s.enabled ? "⏸ Tắt nguồn" : "▶ Bật nguồn"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMenuOpenId(null);
+                            setRowError(null);
+                            setConfirmDelete(s);
+                          }}
+                          className="flex min-h-[44px] w-full items-center px-4 py-2.5 text-left text-xs font-bold text-rose-600 transition hover:bg-rose-50"
+                        >
+                          🗑 Xoá nguồn
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
                 {state && state !== "starting" ? (
                   <p className="mt-2 text-xs text-slate-500">
                     {state === "started" ? "Đã xếp hàng scan." : state}
                   </p>
                 ) : null}
+                {rowError ? (
+                  <p className="mt-2 text-xs text-rose-600">{rowError}</p>
+                ) : null}
               </div>
             );
           })}
         </div>
       </div>
+
+      {confirmDelete ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-4 backdrop-blur-[2px] sm:items-center">
+          <div className="fade-up w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-base font-extrabold tracking-tight text-slate-900">
+              Xoá nguồn {confirmDelete.page_name ?? confirmDelete.page_id}?
+            </h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+              Nguồn sẽ bị xoá khỏi pipeline. Chỉ xoá được nguồn chưa có video nào —
+              nguồn đã có video thì hãy <b>Tắt nguồn</b> thay vì xoá để giữ Inventory.
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (working) return;
+                  setConfirmDelete(null);
+                }}
+                className="min-h-[44px] flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600"
+              >
+                Huỷ
+              </button>
+              <button
+                type="button"
+                onClick={() => void deleteSource(confirmDelete.id)}
+                disabled={working}
+                className="min-h-[44px] flex-1 rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-sm transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-70"
+              >
+                {working ? "Đang xoá…" : "Xoá"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </Card>
   );
 }

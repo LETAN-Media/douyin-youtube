@@ -774,3 +774,26 @@ export interface AiModelOption {
 export async function listAiModels(): Promise<{ models: AiModelOption[] }> {
   return fbFetch<{ models: AiModelOption[] }>(`/api/facebook/ai-models`);
 }
+
+export async function updateFacebookSource(
+  sourceId: string,
+  payload: { enabled: boolean },
+): Promise<FacebookSourceDto> {
+  return fbFetch<FacebookSourceDto>(
+    `/api/facebook/sources/${encodeURIComponent(sourceId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function deleteFacebookSource(
+  sourceId: string,
+): Promise<{ ok: boolean; id: string; deleted: boolean }> {
+  return fbFetch<{ ok: boolean; id: string; deleted: boolean }>(
+    `/api/facebook/sources/${encodeURIComponent(sourceId)}`,
+    { method: "DELETE" },
+  );
+}

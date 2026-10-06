@@ -174,3 +174,44 @@ async def record_scan_finished(
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
             {"status": status, "error": error, "total": discovered_total, "id": source_id},
         )
+
+
+async def update_source_enabled(source_id: str, enabled: bool) -> dict[str, Any] | None:
+    """Toggle a source on/off. Returns the updated row or None if missing."""
+    client = get_client()
+    res = await client.execute(
+        "UPDATE facebook_sources SET enabled = :enabled, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = :id",
+        {"enabled": 1 if enabled else 0, "id": source_id},
+    )
+    if (res.rows_affected or 0) == 0:
+        return await get_source(source_id)
+    return await get_source(source_id)
+
+
+async def count_reels_for_source(source_id: str) -> int:
+    """Inventory rows referencing this source."""
+    client = get_client()
+    rows = await client.execute(
+        "SELECT COUNT(*) FROM facebook_reels WHERE source_id = :id",
+        {"id": source_id},
+    )
+    return rows.rows[0][0] if rows.rows else 0
+
+
+async def delete_source(source_id: str) -> str:
+    """Delete a source. Returns 'deleted' | 'has_reels' | 'not_found'.
+
+    Sources with inventory are protected: deleting one would drop its
+    videos out of AI stats/scheduler joins. Disable instead.
+    """
+    existing = await get_source(source_id)
+    if existing is None:
+        return "not_found"
+    if await count_reels_for_source(source_id) > 0:
+        return "has_reels"
+    client = get_client()
+    await client.execute(
+        "DELETE FROM facebook_sources WHERE id = :id", {"id": source_id}
+    )
+    return "deleted"
