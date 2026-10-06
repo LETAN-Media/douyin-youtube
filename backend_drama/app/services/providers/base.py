@@ -23,10 +23,12 @@ MAX_ATTEMPTS = len(RETRY_BACKOFF_SECONDS) + 1
 class ProviderError(Exception):
     """Typed provider error. Never carries API keys or signed URLs."""
 
-    def __init__(self, code: str, message: str, retry_after: float | None = None) -> None:
+    def __init__(self, code: str, message: str, retry_after: float | None = None,
+                 http_status: int | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
+        self.http_status = http_status
 
 
 def _redact(obj: Any) -> Any:
@@ -189,6 +191,7 @@ class RapidApiProvider:
         last_error = "unknown"
         code = "TEMPORARY"
         retry_after: float | None = None
+        last_http: int | None = None
         for attempt in range(MAX_ATTEMPTS):
             try:
                 async with httpx.AsyncClient(
@@ -203,35 +206,41 @@ class RapidApiProvider:
             except (httpx.ConnectError, httpx.NetworkError):
                 last_error, code = "unreachable", "TEMPORARY"
             else:
+                last_http = resp.status_code
                 if resp.status_code == 429:
                     last_error, code = "rate limited (429)", "RATE_LIMITED"
                     retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
                 elif resp.status_code == 404:
-                    raise ProviderError("NOT_FOUND", "Provider has no such resource.")
+                    raise ProviderError("NOT_FOUND", "Provider has no such resource.",
+                                        http_status=404)
                 elif resp.status_code == 403:
                     raise ProviderError(
-                        "AUTH_FAILED",
-                        "Provider refused the request (not subscribed or bad key).",
+                        "SUBSCRIPTION_ERROR",
+                        "Provider refused the request (not subscribed).",
+                        http_status=403,
                     )
                 elif resp.status_code in (401,):
-                    raise ProviderError("AUTH_FAILED", "Provider rejected the API key.")
+                    raise ProviderError("AUTH_FAILED", "Provider rejected the API key.",
+                                        http_status=401)
                 elif resp.status_code in (500, 502, 503, 504):
                     last_error, code = f"server error ({resp.status_code})", "TEMPORARY"
                 elif resp.status_code != 200:
                     raise ProviderError(
-                        "INVALID_RESPONSE", f"Provider returned HTTP {resp.status_code}."
+                        "INVALID_RESPONSE", f"Provider returned HTTP {resp.status_code}.",
+                        http_status=resp.status_code,
                     )
                 else:
                     try:
                         return resp.json()
                     except ValueError:
-                        raise ProviderError("INVALID_RESPONSE", "Provider returned invalid JSON.")
+                        raise ProviderError("INVALID_RESPONSE", "Provider returned invalid JSON.",
+                                            http_status=200)
             if attempt < MAX_ATTEMPTS - 1:
                 logger.info("provider %s, retry %d (%s)", last_error, attempt + 1, _redact(params))
                 await asyncio.sleep(RETRY_BACKOFF_SECONDS[attempt])
                 continue
             raise ProviderError(code, f"Provider request failed: {last_error}.",
-                                retry_after=retry_after)
+                                retry_after=retry_after, http_status=last_http)
         raise ProviderError("TEMPORARY", "Provider request failed.")
 
     @staticmethod

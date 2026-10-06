@@ -120,7 +120,7 @@ def test_timeout_fails_over_to_fallback(monkeypatch):
         result, ep = run(pool_mod.execute("starshort", "search_series", query="love"))
         assert result == ["s2"] and ep == "fallback_1"
         assert calls == ["primary", "fallback_1"]
-        assert pool_mod.pool_health()["primary"] == "healthy"  # 1 failure < threshold
+        assert pool_mod.pool_health()["primary"]["status"] == "degraded"  # 1 failure < threshold
     finally:
         base_mod.PROVIDERS.clear()
         base_mod.PROVIDERS.update(orig)
@@ -163,6 +163,7 @@ def test_401_is_config_error_no_retry(monkeypatch):
             run(pool_mod.execute("starshort", "search_series", query="love"))
         assert exc.value.code == "CONFIG_ERROR"
         assert calls == ["primary"]  # never touched fallback
+        assert pool_mod.pool_health()["primary"]["status"] == "auth_error"
     finally:
         base_mod.PROVIDERS.clear()
         base_mod.PROVIDERS.update(orig)
@@ -229,7 +230,7 @@ def test_circuit_breaker_cooldown_and_recovery(monkeypatch):
             with pytest.raises(pool_mod.PoolExhausted):
                 run(pool_mod.execute("starshort", "search_series", query="love"))
         assert calls == ["primary"] * 3
-        assert pool_mod.pool_health()["primary"] == "cooldown"
+        assert pool_mod.pool_health()["primary"]["status"] == "cooldown"
         # 4th call skips the endpoint entirely (no new attempt).
         with pytest.raises(pool_mod.PoolExhausted):
             run(pool_mod.execute("starshort", "search_series", query="love"))
@@ -297,3 +298,78 @@ def test_429_only_independent_pools(monkeypatch, caplog):
     finally:
         base_mod.PROVIDERS.clear()
         base_mod.PROVIDERS.update(orig)
+
+
+def test_403_maps_subscription_error_no_retry(monkeypatch):
+    import app.services.providers.base as base_mod
+
+    calls: list = []
+    behaviors = {"primary": ("raise", "SUBSCRIPTION_ERROR")}
+    orig = base_mod.PROVIDERS.copy()
+    base_mod.PROVIDERS["starshort"] = _fake_adapter_factory(calls, behaviors)
+    pool_mod.reset_pool_state()
+    monkeypatch.setattr(
+        pool_mod, "load_pool_from_settings",
+        lambda: [_ep("primary"), _ep("fallback_1", host="h2.example.com")],
+    )
+    try:
+        with pytest.raises(pool_mod.PoolExhausted) as exc:
+            run(pool_mod.execute("starshort", "search_series", query="love"))
+        assert exc.value.code == "SUBSCRIPTION_ERROR"
+        assert calls == ["primary"]
+        assert pool_mod.pool_health()["primary"]["status"] == "subscription_error"
+    finally:
+        base_mod.PROVIDERS.clear()
+        base_mod.PROVIDERS.update(orig)
+
+
+def test_health_states_degraded_and_half_open():
+    pool_mod.reset_pool_state()
+    eps = [_ep("primary")]
+    assert pool_mod.pool_health(eps)["primary"]["status"] == "healthy"
+    pool_mod._record_failure("primary", code="TIMEOUT", http_status=502)
+    assert pool_mod.pool_health(eps)["primary"]["status"] == "degraded"
+    pool_mod._record_failure("primary", code="TIMEOUT", http_status=502)
+    pool_mod._record_failure("primary", code="TIMEOUT", http_status=503)
+    h = pool_mod.pool_health(eps)["primary"]
+    assert h["status"] == "cooldown"
+    assert h["last_http"] == 503
+    # Cooldown expiry -> half-open (eligible for one probe).
+    pool_mod._states["primary"].unhealthy_until = 0.0
+    assert pool_mod.pool_health(eps)["primary"]["status"] == "half_open"
+    pool_mod._record_success("primary", http_status=200)
+    h = pool_mod.pool_health(eps)["primary"]
+    assert h["status"] == "healthy" and h["last_http"] == 200
+
+
+def test_endpoint_name_override_from_env(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "DRAMA_API_PRIMARY_NAME", "short_drama_pro")
+    monkeypatch.setattr(settings, "DRAMA_API_PRIMARY_HOST", "sdp.example.com")
+    monkeypatch.setattr(settings, "DRAMA_API_PRIMARY_KEY", "k_main")
+    monkeypatch.setattr(settings, "DRAMA_API_PRIMARY_BASE_URL", "")
+    monkeypatch.setattr(settings, "DRAMA_API_BASE_URL", "")
+    for i in (1, 2, 3, 4):
+        monkeypatch.setattr(settings, f"DRAMA_API_FALLBACK_{i}_HOST", "")
+        monkeypatch.setattr(settings, f"DRAMA_API_FALLBACK_{i}_KEY", "")
+    eps = pool_mod.load_pool_from_settings()
+    assert [e.name for e in eps] == ["short_drama_pro"]
+    assert eps[0].base_url == "https://sdp.example.com"
+
+
+def test_providers_health_endpoint_has_no_secrets(db):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    r = client.get(
+        "/api/drama/providers/health",
+        headers={"X-Admin-Token": "test_admin_token"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()["upstreams"]
+    blob = r.text.lower()
+    assert "rapidapi-key" not in blob and "api_key" not in blob
+    assert isinstance(body, dict)

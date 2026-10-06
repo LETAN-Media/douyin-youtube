@@ -210,16 +210,27 @@ def test_rapidix_wrapper_delegates():
 
 
 def test_provider_auth_error_typed():
-    def handler(req: httpx.Request) -> httpx.Response:
+    def denied(req: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"message": "not subscribed"})
 
     async def _go():
-        p = get_provider("starshort", transport=httpx.MockTransport(handler))
+        p = get_provider("starshort", transport=httpx.MockTransport(denied))
+        with pytest.raises(ProviderError) as exc:
+            await p.search_series("love")
+        assert exc.value.code == "SUBSCRIPTION_ERROR"
+
+    run(_go())
+
+    def bad_key(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "bad key"})
+
+    async def _go2():
+        p = get_provider("starshort", transport=httpx.MockTransport(bad_key))
         with pytest.raises(ProviderError) as exc:
             await p.search_series("love")
         assert exc.value.code == "AUTH_FAILED"
 
-    run(_go())
+    run(_go2())
 
 
 def test_scanner_uses_registry_provider(db):

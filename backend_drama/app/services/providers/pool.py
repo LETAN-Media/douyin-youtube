@@ -1,20 +1,30 @@
-"""RapidAPI provider failover pool: 1 primary + up to 4 fallbacks.
+"""Multi-upstream failover: 1 primary + up to 4 fallbacks.
+
+Separates two concepts that must not be confused:
+
+- Content provider (starshort, dramabox, ...): WHAT catalog is served.
+  Implemented by adapters; output is always normalized.
+- Upstream vendor (Short Drama Pro, ReelShort Unofficial, ...): WHO serves
+  the HTTP API. One content provider may be served by several upstreams.
+
+Flow: Scanner -> content adapter -> UpstreamRouter (this pool) ->
+primary upstream -> fallback upstreams -> normalize -> DB.
 
 - Loads slots from DRAMA_API_PRIMARY_* / DRAMA_API_FALLBACK_{1..4}_*.
   Legacy DRAMA_API_HOST/BASE_URL/KEY map to the primary slot.
-  Unconfigured slots are skipped.
+  Unconfigured slots are skipped. Optional _NAME overrides the slot name.
 - Failover on: network error, timeout, 5xx, invalid response, temporary
-  unavailability. 401/403 stop immediately (CONFIG_ERROR, no retry).
-  404/data-not-found returns NOT_FOUND without touching other providers.
-  429 moves only to a *different host* (independent quota); same-host
-  endpoints are skipped until their backoff expires. No key rotation.
-- Circuit breaker: 3 consecutive failures -> 5-minute cooldown (skip).
-  After cooldown the endpoint is probed again naturally.
-- Capability routing: an endpoint serves a content provider only when its
+  unavailability. 401/403 stop immediately (auth/subscription error, no
+  retry, no spam). 404/data-not-found returns NOT_FOUND without touching
+  other upstreams. 429 cools down only its own (host, key) pool and moves
+  to independent credentials. No key rotation to bypass limits.
+- Circuit breaker per upstream: CLOSED -> 3 consecutive failures -> OPEN
+  (5-minute cooldown, skipped) -> HALF_OPEN (single probe after cooldown)
+  -> CLOSED on success or OPEN again on failure.
+- Capability routing: an upstream serves a content provider only when its
   _PROVIDERS list is empty (all) or contains the name.
-- Logs never contain keys or signed URLs (host + status only).
-
-All state is in-memory per process; reset_pool_state() exists for tests.
+- Logs and health snapshots never contain keys or signed URLs (host +
+  status/code only).
 """
 
 import logging
@@ -27,7 +37,7 @@ import httpx
 logger = logging.getLogger("backend-drama-pool")
 
 FAILOVERABLE_CODES = frozenset({"TIMEOUT", "TEMPORARY", "INVALID_RESPONSE"})
-CONFIG_ERROR_CODES = frozenset({"AUTH_FAILED", "CONFIG_ERROR"})
+CONFIG_ERROR_CODES = frozenset({"AUTH_FAILED", "SUBSCRIPTION_ERROR", "CONFIG_ERROR"})
 NOT_FOUND_CODES = frozenset({"NOT_FOUND"})
 
 CIRCUIT_FAILURE_THRESHOLD = 3
@@ -37,7 +47,9 @@ RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 
 @dataclass(frozen=True)
 class ProviderEndpoint:
-    name: str  # "primary" | "fallback_1" .. "fallback_4"
+    """One upstream vendor slot."""
+
+    name: str  # display name (NAME env or slot name)
     host: str
     base_url: str
     api_key: str
@@ -57,7 +69,11 @@ class ProviderEndpoint:
 class _CircuitState:
     consecutive_failures: int = 0
     unhealthy_until: float = 0.0
+    probing: bool = False
     rate_limited_until: float = 0.0
+    last_http: int | None = None
+    last_code: str | None = None
+    opened: bool = False
 
 
 _states: dict[str, _CircuitState] = {}
@@ -87,20 +103,21 @@ def _parse_providers(raw: str | None) -> tuple[str, ...]:
 
 
 def load_pool_from_settings() -> list[ProviderEndpoint]:
-    """Build the ordered endpoint pool. Legacy DRAMA_API_* is the primary."""
+    """Build the ordered upstream pool. Legacy DRAMA_API_* is the primary."""
     from ...config import settings
 
     def slot(
-        name: str, priority: int, host: str | None, base: str | None,
-        key: str | None, providers: str | None,
+        slot_name: str, priority: int, name: str | None, host: str | None,
+        base: str | None, key: str | None, providers: str | None,
     ) -> ProviderEndpoint | None:
         host = (host or "").strip()
         key = (key or "").strip()
         if not host or not key:
             return None
         base_url = (base or "").strip().rstrip("/") or f"https://{host}"
+        display = (name or "").strip() or slot_name
         return ProviderEndpoint(
-            name=name, host=host, base_url=base_url, api_key=key,
+            name=display, host=host, base_url=base_url, api_key=key,
             priority=priority, enabled=True,
             providers=_parse_providers(providers),
         )
@@ -108,6 +125,7 @@ def load_pool_from_settings() -> list[ProviderEndpoint]:
     endpoints: list[ProviderEndpoint] = []
     primary = slot(
         "primary", 0,
+        settings.DRAMA_API_PRIMARY_NAME,
         settings.DRAMA_API_PRIMARY_HOST or settings.DRAMA_API_HOST,
         settings.DRAMA_API_PRIMARY_BASE_URL or settings.DRAMA_API_BASE_URL,
         settings.DRAMA_API_PRIMARY_KEY or settings.drama_api_key(),
@@ -118,6 +136,7 @@ def load_pool_from_settings() -> list[ProviderEndpoint]:
     for i in (1, 2, 3, 4):
         fb = slot(
             f"fallback_{i}", i,
+            getattr(settings, f"DRAMA_API_FALLBACK_{i}_NAME", None),
             getattr(settings, f"DRAMA_API_FALLBACK_{i}_HOST", None),
             getattr(settings, f"DRAMA_API_FALLBACK_{i}_BASE_URL", None),
             getattr(settings, f"DRAMA_API_FALLBACK_{i}_KEY", None),
@@ -128,57 +147,97 @@ def load_pool_from_settings() -> list[ProviderEndpoint]:
     return sorted(endpoints, key=lambda e: e.priority)
 
 
-def pool_health(endpoints: list[ProviderEndpoint] | None = None) -> dict[str, str]:
-    """Safe status snapshot: {endpoint_name: healthy|cooldown|rate_limited}."""
+def endpoint_status(name: str) -> str:
+    """One upstream's state: healthy|degraded|cooldown|half_open|
+    rate_limited|auth_error|subscription_error. Never exposes secrets."""
+    state = _state_for(name)
+    now = time.monotonic()
+    if state.last_code == "AUTH_FAILED":
+        return "auth_error"
+    if state.last_code == "SUBSCRIPTION_ERROR":
+        return "subscription_error"
+    if state.unhealthy_until > now:
+        return "cooldown"
+    if state.opened:
+        # Cooldown expired, awaiting the single half-open probe.
+        return "half_open"
+    if state.consecutive_failures > 0:
+        # Flaky but below the trip threshold.
+        return "degraded"
+    if state.rate_limited_until > now:
+        return "rate_limited"
+    return "healthy"
+
+
+def pool_health(endpoints: list[ProviderEndpoint] | None = None) -> dict[str, dict[str, Any]]:
+    """Safe status snapshot per upstream. No keys, no URLs with secrets."""
     if endpoints is None:
         endpoints = load_pool_from_settings()
-    now = time.monotonic()
-    out: dict[str, str] = {}
+    out: dict[str, dict[str, Any]] = {}
     for ep in endpoints:
         state = _state_for(ep.name)
-        if state.unhealthy_until > now:
-            out[ep.name] = "cooldown"
-        elif state.rate_limited_until > now:
-            out[ep.name] = "rate_limited"
-        else:
-            out[ep.name] = "healthy"
+        out[ep.name] = {
+            "status": endpoint_status(ep.name),
+            "host": ep.host,
+            "last_http": state.last_http,
+        }
     return out
 
 
-def _record_success(name: str) -> None:
+def _record_success(name: str, http_status: int | None = None) -> None:
     state = _state_for(name)
     state.consecutive_failures = 0
     state.unhealthy_until = 0.0
+    state.probing = False
+    state.opened = False
+    state.opened = False
     state.rate_limited_until = 0.0
+    state.last_http = http_status
+    state.last_code = None
 
-
-def _record_failure(name: str, *, rate_limited: bool = False,
+def _record_failure(name: str, *, code: str | None = None,
+                    http_status: int | None = None,
+                    rate_limited: bool = False,
                     retry_after: float | None = None) -> None:
     state = _state_for(name)
+    state.last_code = code
+    state.last_http = http_status
     if rate_limited:
         wait = retry_after if retry_after and retry_after > 0 else RATE_LIMIT_COOLDOWN_SECONDS
         state.rate_limited_until = time.monotonic() + min(wait, 600.0)
         return
+    state.probing = False
     state.consecutive_failures += 1
     if state.consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD:
         state.unhealthy_until = time.monotonic() + CIRCUIT_COOLDOWN_SECONDS
+        state.opened = True
 
 
-def _is_usable(ep: ProviderEndpoint, now: float) -> bool:
+def _is_usable(ep: ProviderEndpoint, now: float) -> tuple[bool, str]:
+    """(usable, reason). Half-open upstreams admit exactly one probe."""
     state = _state_for(ep.name)
-    if state.unhealthy_until > now or state.rate_limited_until > now:
-        return False
+    if state.unhealthy_until > now:
+        return False, "cooldown"
+    if state.consecutive_failures > 0 and not state.probing:
+        # First attempt after failures is the half-open probe; concurrent
+        # attempts back off instead of hammering.
+        state.probing = True
+        return True, "half_open_probe"
+    if state.probing:
+        return False, "half_open_busy"
+    if state.rate_limited_until > now:
+        return False, "rate_limited"
     # Same credentials share one rate-limited quota pool: only pools
     # without an active backoff are eligible. Different keys on the same
     # host are independent and still tried; keys are never rotated to
     # bypass limits — a limited pool is skipped, never forced.
     if _limited_pools.get((ep.host, ep.api_key), 0.0) > now:
-        return False
-    return True
+        return False, "rate_limited"
+    return True, "ok"
 
 
 class PoolExhausted(Exception):
-    """All usable endpoints failed. Carries per-endpoint codes, no secrets."""
+    """All usable upstreams failed. Carries per-endpoint codes, no secrets."""
 
     def __init__(self, code: str, message: str, attempts: list[dict[str, str]]) -> None:
         super().__init__(message)
@@ -192,10 +251,10 @@ async def execute(
     transport: httpx.AsyncBaseTransport | None = None,
     **kwargs: Any,
 ) -> tuple[Any, str]:
-    """Run one adapter operation across the failover pool.
+    """Run one adapter operation across the upstream pool.
 
-    Returns (result, endpoint_name). Builds a fresh adapter per endpoint
-    with that endpoint's credentials. See module docstring for policy.
+    Returns (result, upstream_name). Scanner -> content adapter ->
+    UpstreamRouter (here) -> primary -> fallbacks. See module docstring.
     """
     from . import get_provider
 
@@ -205,26 +264,29 @@ async def execute(
     if not endpoints:
         raise PoolExhausted(
             "NOT_CONFIGURED",
-            f"No provider endpoint configured for '{provider_name}'.",
+            f"No upstream endpoint configured for '{provider_name}'.",
             [],
         )
     attempts: list[dict[str, str]] = []
     for ep in endpoints:
-        if not _is_usable(ep, time.monotonic()):
+        usable, _reason = _is_usable(ep, time.monotonic())
+        if not usable:
             continue
         adapter = get_provider(provider_name, transport=transport, endpoint=ep)
         try:
             result = await getattr(adapter, operation)(**kwargs)
         except Exception as exc:
             code = getattr(exc, "code", "TEMPORARY") or "TEMPORARY"
+            http_status = getattr(exc, "http_status", None)
             if code in CONFIG_ERROR_CODES:
+                _record_failure(ep.name, code=code, http_status=http_status)
                 logger.warning(
-                    "provider=%s host=%s config error=%s; not retrying",
+                    "upstream=%s host=%s config error=%s; not retrying",
                     ep.name, ep.host, code,
                 )
                 raise PoolExhausted(
-                    "CONFIG_ERROR",
-                    f"Provider endpoint '{ep.name}' misconfigured ({code}).",
+                    "CONFIG_ERROR" if code == "AUTH_FAILED" else code,
+                    f"Upstream '{ep.name}' misconfigured ({code}).",
                     attempts + [{"endpoint": ep.name, "code": code}],
                 )
             if code in NOT_FOUND_CODES:
@@ -235,11 +297,11 @@ async def execute(
             if code == "RATE_LIMITED":
                 retry_after = getattr(exc, "retry_after", None)
                 wait = retry_after if isinstance(retry_after, (int, float)) and retry_after > 0 else RATE_LIMIT_COOLDOWN_SECONDS
-                _record_failure(ep.name, rate_limited=True, retry_after=wait)
+                _record_failure(ep.name, code=code, rate_limited=True, retry_after=wait)
                 _limited_pools[(ep.host, ep.api_key)] = time.monotonic() + min(wait, 600.0)
                 attempts.append({"endpoint": ep.name, "code": code})
                 logger.warning(
-                    "provider=%s host=%s status=429 rate_limited; independent hosts only",
+                    "upstream=%s host=%s status=429 rate_limited; independent pools only",
                     ep.name, ep.host,
                 )
                 continue
@@ -247,19 +309,19 @@ async def execute(
                 attempts.append({"endpoint": ep.name, "code": code})
                 continue
             # Failoverable: timeout / network / 5xx / invalid / temporary.
-            _record_failure(ep.name)
+            _record_failure(ep.name, code=code, http_status=http_status)
             attempts.append({"endpoint": ep.name, "code": code})
             logger.warning(
-                "provider=%s host=%s status=%s failover_to=next",
+                "upstream=%s host=%s status=%s failover_to=next",
                 ep.name, ep.host, code,
             )
             continue
         _record_success(ep.name)
         if ep.name != endpoints[0].name:
-            logger.info("provider=%s host=%s recovered via failover", ep.name, ep.host)
+            logger.info("upstream=%s host=%s recovered via failover", ep.name, ep.host)
         return result, ep.name
     raise PoolExhausted(
         "ALL_PROVIDERS_FAILED",
-        f"All provider endpoints failed for '{provider_name}'.",
+        f"All upstream endpoints failed for '{provider_name}'.",
         attempts,
     )
