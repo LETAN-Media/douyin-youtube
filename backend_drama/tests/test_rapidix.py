@@ -78,9 +78,14 @@ def test_episodes_pagination_cursor_shapes():
 
     calls: list = []
 
+    import json as _json
+
     def handler(req: httpx.Request) -> httpx.Response:
-        calls.append(dict(req.url.params))
-        if "cursor" not in req.url.params:
+        body = _json.loads(req.content.decode())
+        assert req.method == "POST"
+        assert body.get("id") == "b1"
+        calls.append(body)
+        if len(calls) == 1:
             return httpx.Response(200, json={
                 "episodes": [{"id": "e1", "episode_number": 1}],
                 "has_more": True, "max_cursor": "abc123",

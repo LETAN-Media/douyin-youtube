@@ -28,6 +28,7 @@ def test_ready_without_rapidix_key(db, monkeypatch):
     from app.main import create_app
 
     monkeypatch.setattr(settings, "RAPIDIX_KEY", "")
+    monkeypatch.setattr(settings, "RAPIDAPI_KEY", "")
     r = TestClient(create_app()).get("/ready")
     assert r.status_code == 200
     assert r.json()["rapidix"] == "missing"

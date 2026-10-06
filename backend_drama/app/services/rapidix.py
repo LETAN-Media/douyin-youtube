@@ -93,7 +93,7 @@ class RapidixClient:
         return cls(
             base_url=settings.RAPIDAPI_BASE_URL or "",
             host=settings.RAPIDAPI_HOST or "",
-            api_key=settings.RAPIDIX_KEY or "",
+            api_key=settings.rapidix_key(),
             search_path=settings.RAPIDIX_SEARCH_PATH,
             episodes_path=settings.RAPIDIX_EPISODES_PATH,
             episode_path=settings.RAPIDIX_EPISODE_PATH,
@@ -178,7 +178,9 @@ class RapidixClient:
         raise RapidixError("INVALID_RESPONSE", "RapidIX response has no recognizable list.")
 
     async def search_series(self, query: str, *, limit: int = 20) -> list[NormalizedSeries]:
-        data = await self._request("GET", self.search_path, params={"q": query, "limit": limit})
+        data = await self._request(
+            "POST", self.search_path, json_body={"keyword": query}
+        )
         out: list[NormalizedSeries] = []
         for item in self._payload_list(data):
             try:
@@ -190,10 +192,8 @@ class RapidixClient:
     async def list_episodes(
         self, external_series_id: str, *, cursor: str | None = None, limit: int = 100
     ) -> EpisodePage:
-        params: dict[str, Any] = {"series_id": external_series_id, "limit": limit}
-        if cursor:
-            params["cursor"] = cursor
-        data = await self._request("GET", self.episodes_path, params=params)
+        body: dict[str, Any] = {"id": external_series_id}
+        data = await self._request("POST", self.episodes_path, json_body=body)
         items = self._payload_list(data)
         episodes: list[NormalizedEpisode] = []
         for i, item in enumerate(items):
@@ -214,7 +214,7 @@ class RapidixClient:
 
     async def episode_details(self, external_episode_id: str) -> NormalizedEpisode:
         data = await self._request(
-            "GET", self.episode_path, params={"episode_id": external_episode_id}
+            "POST", self.episode_path, json_body={"episode_id": external_episode_id}
         )
         payload = data.get("episode", data) if isinstance(data, dict) else data
         try:

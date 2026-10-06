@@ -20,7 +20,9 @@ class Settings(BaseSettings):
 
     # RapidIX (RapidAPI marketplace, ReelShort unofficial provider).
     # Key lives only in env — never log it, never return it, never commit it.
+    # RAPIDAPI_KEY is accepted as an alias (same RapidAPI account key).
     RAPIDIX_KEY: str | None = None
+    RAPIDAPI_KEY: str | None = None
     RAPIDAPI_HOST: str | None = None
     RAPIDAPI_BASE_URL: str | None = None
     # Exact endpoint paths are NOT guessed: they must be copied from the
@@ -31,9 +33,12 @@ class Settings(BaseSettings):
     RAPIDIX_EPISODE_PATH: str | None = None
     RAPIDIX_TIMEOUT_SECONDS: float = 30.0
 
+    def rapidix_key(self) -> str:
+        return ((self.RAPIDIX_KEY or "") or (self.RAPIDAPI_KEY or "")).strip()
+
     def rapidix_configured(self) -> bool:
         return bool(
-            (self.RAPIDIX_KEY or "").strip()
+            self.rapidix_key()
             and (self.RAPIDAPI_HOST or "").strip()
             and (self.RAPIDAPI_BASE_URL or "").strip().rstrip("/")
         )
