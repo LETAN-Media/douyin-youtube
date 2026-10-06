@@ -257,6 +257,20 @@ export async function listFacebookSources(pipelineId: string): Promise<FacebookS
   );
 }
 
+export async function createFacebookSource(
+  pipelineId: string,
+  payload: { url: string; page_name?: string },
+): Promise<FacebookSourceDto> {
+  return fbFetch<FacebookSourceDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/sources`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 export async function listFacebookInventory(
   pipelineId: string,
   opts: { limit?: number; offset?: number; status?: string } = {},

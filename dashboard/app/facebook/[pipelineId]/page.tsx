@@ -194,7 +194,7 @@ export default async function FacebookPipelinePage({
           ) : null}
           {activeTab === "sources" ? (
             sourcesRes.ok ? (
-              <FacebookSources sources={sourcesRes.v} />
+              <FacebookSources sources={sourcesRes.v} pipelineId={pipelineId} />
             ) : (
               <TabError message={sourcesRes.e} />
             )
