@@ -709,3 +709,43 @@ export async function deleteManualDestination(
     { method: "DELETE" },
   );
 }
+
+export async function deleteManualPublication(
+  id: string,
+): Promise<{ ok: boolean; id: string; deleted: boolean }> {
+  return fbFetch<{ ok: boolean; id: string; deleted: boolean }>(
+    `/api/facebook/manual/publications/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function bulkDeleteManualPublications(
+  ids: string[],
+): Promise<{ deleted: number; skipped_busy: number; not_found: number }> {
+  return fbFetch<{ deleted: number; skipped_busy: number; not_found: number }>(
+    `/api/facebook/manual/publications/bulk-delete`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids.slice(0, 100) }),
+    },
+  );
+}
+
+export async function clearManualHistory(params?: {
+  destination_id?: string;
+  only_failed?: boolean;
+}): Promise<{ deleted: number; skipped_busy: number; not_found: number }> {
+  return fbFetch<{ deleted: number; skipped_busy: number; not_found: number }>(
+    `/api/facebook/manual/publications/clear`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        destination_id: params?.destination_id,
+        only_failed: params?.only_failed ?? false,
+        confirm: true,
+      }),
+    },
+  );
+}

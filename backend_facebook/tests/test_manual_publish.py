@@ -423,3 +423,119 @@ def test_manual_claimed_before_auto_and_failures_terminal() -> None:
         return qid
 
     asyncio.run(_go())
+
+
+# ---------- history deletion ----------
+
+
+def _manual_row(pipe_id: str, did: str, source: str, status: str = "failed") -> str:
+    async def _go():
+        row = await manual_repo.create_manual_publication(
+            destination_id=did, pipeline_id=pipe_id, source_url=source,
+            caption=None, thumbnail_url=None, duration=None,
+            title="T", description="D", hashtags=[], visibility="public",
+            publish_at=None,
+        )
+        if status == "published":
+            await manual_repo.mark_published(row["id"], "yt_x")
+        elif status == "queued":
+            pass
+        elif status == "processing":
+            await manual_repo.claim_next_manual_job()
+        else:
+            await manual_repo.mark_failed(row["id"], "X", "boom")
+        return row["id"]
+
+    return asyncio.run(_go())
+
+
+def test_delete_failed_history() -> None:
+    pipe_id, did = seed_channel("pl_del1", "ytd_del1", "Channel Del1")
+    mid = _manual_row(pipe_id, did, "https://www.facebook.com/reel/11/")
+    client = TestClient(create_app())
+    r = client.delete(f"/api/facebook/manual/publications/{mid}", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+    # Refresh proves it stays gone.
+    assert asyncio.run(manual_repo.get_manual_publication(mid)) is None
+
+
+def test_delete_published_history_keeps_youtube() -> None:
+    pipe_id, did = seed_channel("pl_del2", "ytd_del2", "Channel Del2")
+    mid = _manual_row(pipe_id, did, "https://www.facebook.com/reel/22/", status="published")
+    client = TestClient(create_app())
+    r = client.delete(f"/api/facebook/manual/publications/{mid}", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    # Only the local history row is gone; nothing else is touched
+    # (no YouTube API is ever called by this endpoint).
+    assert asyncio.run(manual_repo.get_manual_publication(mid)) is None
+    dest = asyncio.run(destinations.get_destination(did))
+    assert dest is not None and dest["connected"] is True
+
+
+def test_delete_live_rows_returns_409() -> None:
+    from app.db.repositories import manual_publications as mp
+
+    pipe_id, did = seed_channel("pl_del3", "ytd_del3", "Channel Del3")
+    qid = _manual_row(pipe_id, did, "https://www.facebook.com/reel/33/", status="queued")
+    pid = _manual_row(pipe_id, did, "https://www.facebook.com/reel/34/", status="processing")
+    client = TestClient(create_app())
+    for target in (qid, pid):
+        r = client.delete(f"/api/facebook/manual/publications/{target}", headers=AUTH_HEADERS)
+        assert r.status_code == 409, (target, r.text)
+        assert r.json()["error"] == "MANUAL_PUBLICATION_BUSY"
+    assert asyncio.run(mp.get_manual_publication(qid)) is not None
+    assert asyncio.run(mp.get_manual_publication(pid)) is not None
+
+
+def test_bulk_delete_completed_rows() -> None:
+    pipe_id, did = seed_channel("pl_del4", "ytd_del4", "Channel Del4")
+    ids = [
+        _manual_row(pipe_id, did, f"https://www.facebook.com/reel/4{i}/", status="published")
+        for i in range(5)
+    ]
+    # One live row must be skipped, not deleted.
+    live = _manual_row(pipe_id, did, "https://www.facebook.com/reel/49/", status="queued")
+    client = TestClient(create_app())
+    r = client.post(
+        "/api/facebook/manual/publications/bulk-delete",
+        headers=AUTH_HEADERS, json={"ids": ids + [live, "mpub_nope"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"deleted": 5, "skipped_busy": 1, "not_found": 1}, body
+    items, _ = asyncio.run(manual_repo.list_manual_publications(destination_id=did))
+    remaining = {x["id"] for x in items}
+    assert live in remaining
+    assert not (set(ids) & remaining)
+
+
+def test_auto_history_untouched_by_manual_clear() -> None:
+    from app.db.repositories import publications as auto_pubs
+
+    pipe_id, did = seed_channel("pl_del5", "ytd_del5", "Channel Del5")
+    _manual_row(pipe_id, did, "https://www.facebook.com/reel/55/")
+
+    async def _seed_auto():
+        await auto_pubs.get_or_create(
+            publication_id="pub_auto_keep", reel_db_id="pl_del5_r1",
+            destination_id=did,
+        )
+
+    asyncio.run(_seed_auto())
+    client = TestClient(create_app())
+    r = client.post(
+        "/api/facebook/manual/publications/clear",
+        headers=AUTH_HEADERS, json={"confirm": True},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] == 1
+
+    async def _check():
+        client_db = __import__("app.db.client", fromlist=["get_client"]).get_client()
+        rows = await client_db.execute(
+            "SELECT id FROM publications WHERE id = 'pub_auto_keep'"
+        )
+        return rows.rows
+
+    assert asyncio.run(_check())

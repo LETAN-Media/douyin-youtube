@@ -320,3 +320,61 @@ async def count_active_for_destination(destination_id: str) -> int:
         {"id": destination_id},
     )
     return rows.rows[0][0] if rows.rows else 0
+
+
+async def delete_manual_publication(publication_id: str) -> str:
+    """Delete one history row. Returns 'deleted' | 'busy' | 'not_found'.
+
+    Only terminal rows (published/scheduled/failed) can be deleted.
+    Live queued/processing rows are protected. Never touches YouTube,
+    destinations, credentials, inventory, or auto tables.
+    """
+    client = get_client()
+    rows = await client.execute(
+        "SELECT status FROM facebook_manual_publications WHERE id = :id",
+        {"id": publication_id},
+    )
+    if not rows.rows:
+        return "not_found"
+    if rows.rows[0][0] in ("queued", "processing"):
+        return "busy"
+    await client.execute(
+        "DELETE FROM facebook_manual_publications WHERE id = :id",
+        {"id": publication_id},
+    )
+    return "deleted"
+
+
+async def bulk_delete_manual_publications(ids: list[str]) -> dict[str, int]:
+    """Delete up to 100 history rows. Live rows are skipped, never deleted."""
+    result = {"deleted": 0, "skipped_busy": 0, "not_found": 0}
+    for publication_id in (ids or [])[:100]:
+        if not isinstance(publication_id, str) or not publication_id:
+            continue
+        outcome = await delete_manual_publication(publication_id)
+        if outcome == "deleted":
+            result["deleted"] += 1
+        elif outcome == "busy":
+            result["skipped_busy"] += 1
+        else:
+            result["not_found"] += 1
+    return result
+
+
+async def delete_manual_history(
+    *, destination_id: str | None = None, only_failed: bool = False
+) -> dict[str, int]:
+    """Clear history (terminal rows only). Live rows are never touched."""
+    client = get_client()
+    where = "status IN ('published', 'scheduled', 'failed')"
+    params: dict[str, object] = {}
+    if only_failed:
+        where = "status = 'failed'"
+    if destination_id:
+        where += " AND destination_id = :destination_id"
+        params["destination_id"] = destination_id
+    rows = await client.execute(
+        f"SELECT id FROM facebook_manual_publications WHERE {where}", params
+    )
+    ids = [r[0] for r in (rows.rows or [])]
+    return await bulk_delete_manual_publications(ids)

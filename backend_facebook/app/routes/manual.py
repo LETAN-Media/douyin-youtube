@@ -210,7 +210,37 @@ async def publish_manual_video(body: ManualPublishBody, _: None = Depends(requir
     return {"id": created["id"], "status": created["status"], **manual_repo.to_safe_dict(created)}
 
 
-# ---------- Status / history / retry ----------
+# ---------- Status / history / retry / delete ----------
+
+
+class ManualBulkDeleteBody(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class ManualClearHistoryBody(BaseModel):
+    destination_id: str | None = Field(default=None, max_length=100)
+    only_failed: bool = False
+    confirm: bool = False
+
+
+@router.post("/manual/publications/bulk-delete")
+async def bulk_delete_manual_publications_route(
+    body: ManualBulkDeleteBody, _: None = Depends(require_admin)
+) -> dict:
+    result = await manual_repo.bulk_delete_manual_publications(body.ids)
+    return result
+
+
+@router.post("/manual/publications/clear")
+async def clear_manual_history_route(
+    body: ManualClearHistoryBody, _: None = Depends(require_admin)
+) -> dict:
+    if not body.confirm:
+        raise _err(400, "CONFIRM_REQUIRED", "Xác nhận xoá lịch sử (confirm=true).")
+    result = await manual_repo.delete_manual_history(
+        destination_id=body.destination_id, only_failed=body.only_failed
+    )
+    return result
 
 
 @router.get("/manual/publications")
@@ -234,6 +264,23 @@ async def get_manual_publication_status(
     if row is None:
         raise _err(404, "MANUAL_NOT_FOUND", "Không tìm thấy bản đăng.")
     return manual_repo.to_safe_dict(row)
+
+
+@router.delete("/manual/publications/{manual_id}")
+async def delete_manual_publication_route(
+    manual_id: str, _: None = Depends(require_admin)
+) -> dict:
+    """Delete one history row. Never touches the YouTube video, the
+    destination, credentials, inventory, or auto tables."""
+    outcome = await manual_repo.delete_manual_publication(manual_id)
+    if outcome == "not_found":
+        raise _err(404, "MANUAL_NOT_FOUND", "Không tìm thấy bản đăng.")
+    if outcome == "busy":
+        raise _err(
+            409, "MANUAL_PUBLICATION_BUSY",
+            "Bản đăng đang chờ/đang xử lý. Hãy đợi hoàn tất rồi xoá.",
+        )
+    return {"ok": True, "id": manual_id, "deleted": True}
 
 
 @router.post("/manual/publications/{manual_id}/retry")

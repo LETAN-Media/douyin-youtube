@@ -191,6 +191,117 @@ export function FacebookManualPublish({
   const [active, setActive] = useState<Pub | null>(null);
   const [history, setHistory] = useState<Pub[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
+
+  // History deletion state.
+  const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
+  const [rowMenuId, setRowMenuId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Pub | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [clearConfirm, setClearConfirm] = useState<"failed" | "all" | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  function toggleChecked(id: string) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function refreshHistory() {
+    await loadHistory(selected?.id);
+  }
+
+  async function handleDeleteHistory(id: string) {
+    if (deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await fetch(
+        `/api/facebook/manual/publications/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const e = await readError(res);
+        if (res.status === 409) {
+          throw new Error("Bản đăng đang chờ/đang xử lý. Hãy đợi hoàn tất rồi xoá.");
+        }
+        throw new Error(e.message || "Không xoá được.");
+      }
+      setHistory((prev) => prev.filter((h) => h.id !== id));
+      setHistoryTotal((t) => Math.max(0, t - 1));
+      setChecked((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      if (active?.id === id) setActive(null);
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Không xoá được.");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function handleBulkDelete() {
+    const ids = [...checked];
+    if (ids.length === 0 || bulkDeleting) return;
+    setBulkDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await fetch("/api/facebook/manual/publications/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (!res.ok) {
+        const e = await readError(res);
+        throw new Error(e.message || "Không xoá được.");
+      }
+      const data = (await res.json()) as { deleted: number };
+      void data;
+      await refreshHistory();
+      setChecked(new Set());
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Không xoá được.");
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
+  async function handleClearHistory(onlyFailed: boolean) {
+    if (clearing) return;
+    setClearing(true);
+    setDeleteError(null);
+    try {
+      const res = await fetch("/api/facebook/manual/publications/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          destination_id: selected?.id,
+          only_failed: onlyFailed,
+          confirm: true,
+        }),
+      });
+      if (!res.ok) {
+        const e = await readError(res);
+        throw new Error(e.message || "Không xoá được lịch sử.");
+      }
+      await refreshHistory();
+      setChecked(new Set());
+      setClearConfirm(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Không xoá được lịch sử.");
+    } finally {
+      setClearing(false);
+    }
+  }
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadChannels = useCallback(async () => {
@@ -948,11 +1059,69 @@ export function FacebookManualPublish({
       ) : null}
 
       <Card>
-        <CardHeader
-          title="Lịch sử đăng thủ công"
-          subtitle={historyTotal ? `${historyTotal} bản đăng` : undefined}
-        />
+        <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 sm:px-5">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-extrabold text-slate-900">Lịch sử đăng thủ công</p>
+            {historyTotal ? (
+              <p className="text-xs text-slate-500">{historyTotal} bản đăng</p>
+            ) : null}
+          </div>
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              title="Tùy chọn lịch sử"
+              onClick={() => setHistoryMenuOpen((v) => !v)}
+              className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+            >
+              ⋯
+            </button>
+            {historyMenuOpen ? (
+              <div className="absolute right-0 z-20 mt-1 w-52 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHistoryMenuOpen(false);
+                    setDeleteError(null);
+                    setClearConfirm("failed");
+                  }}
+                  className="flex min-h-[44px] w-full items-center px-4 py-2.5 text-left text-xs font-bold text-slate-700 transition hover:bg-slate-50"
+                >
+                  Xoá các bản Failed
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHistoryMenuOpen(false);
+                    setDeleteError(null);
+                    setClearConfirm("all");
+                  }}
+                  className="flex min-h-[44px] w-full items-center px-4 py-2.5 text-left text-xs font-bold text-rose-600 transition hover:bg-rose-50"
+                >
+                  Xoá toàn bộ lịch sử
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
         <div className="space-y-2 p-4 sm:px-5">
+          {checked.size > 0 ? (
+            <div className="flex items-center justify-between gap-2 rounded-2xl border border-indigo-200 bg-indigo-50 px-3 py-2">
+              <span className="text-xs font-bold text-indigo-800">
+                Đã chọn {checked.size}
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleBulkDelete()}
+                disabled={bulkDeleting}
+                className="inline-flex min-h-[44px] items-center rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-extrabold text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-70"
+              >
+                {bulkDeleting ? "Đang xoá…" : "Xoá đã chọn"}
+              </button>
+            </div>
+          ) : null}
+          {deleteError ? (
+            <p className="text-xs text-rose-600">{deleteError}</p>
+          ) : null}
           {history.length === 0 ? (
             <p className="py-4 text-center text-xs text-slate-500">Chưa có bản đăng thủ công nào.</p>
           ) : (
@@ -961,6 +1130,13 @@ export function FacebookManualPublish({
                 key={h.id}
                 className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200/90 bg-white p-3"
               >
+                <input
+                  type="checkbox"
+                  checked={checked.has(h.id)}
+                  onChange={() => toggleChecked(h.id)}
+                  title="Chọn để xoá nhiều"
+                  className="h-5 w-5 shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-bold text-slate-900">
                     {h.youtube_title || "(chưa có tiêu đề)"}
@@ -993,12 +1169,121 @@ export function FacebookManualPublish({
                       Retry
                     </button>
                   ) : null}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      title="Tùy chọn"
+                      onClick={() => setRowMenuId(rowMenuId === h.id ? null : h.id)}
+                      className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+                    >
+                      ⋯
+                    </button>
+                    {rowMenuId === h.id ? (
+                      <div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRowMenuId(null);
+                            setDeleteError(null);
+                            setDeleteTarget(h);
+                          }}
+                          className="flex min-h-[44px] w-full items-center gap-2 px-4 py-2.5 text-left text-xs font-bold text-rose-600 transition hover:bg-rose-50"
+                        >
+                          🗑 Xoá khỏi lịch sử
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             ))
           )}
         </div>
       </Card>
+
+      {deleteTarget ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-4 backdrop-blur-[2px] sm:items-center">
+          <div className="fade-up w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-base font-extrabold tracking-tight text-slate-900">
+              Xoá bản ghi này khỏi lịch sử?
+            </h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+              Chỉ xoá lịch sử trong hệ thống. Video đã đăng trên YouTube sẽ{" "}
+              <b>KHÔNG</b> bị xoá.
+            </p>
+            <p className="mt-2 truncate text-xs font-bold text-slate-700">
+              {deleteTarget.youtube_title || deleteTarget.id}
+            </p>
+            {deleteError ? (
+              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-600">
+                {deleteError}
+              </div>
+            ) : null}
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (deleting) return;
+                  setDeleteTarget(null);
+                }}
+                className="min-h-[44px] flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600"
+              >
+                Huỷ
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteHistory(deleteTarget.id)}
+                disabled={deleting}
+                className="min-h-[44px] flex-1 rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-sm transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-70"
+              >
+                {deleting ? "Đang xoá…" : "Xoá"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {clearConfirm ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-4 backdrop-blur-[2px] sm:items-center">
+          <div className="fade-up w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-base font-extrabold tracking-tight text-slate-900">
+              {clearConfirm === "failed"
+                ? "Xoá các bản Failed khỏi lịch sử?"
+                : "Xoá toàn bộ lịch sử Manual Publish?"}
+            </h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+              {clearConfirm === "failed"
+                ? "Chỉ xoá các bản failed. Video YouTube sẽ không bị ảnh hưởng."
+                : "Chỉ xoá các bản published/scheduled/failed. Bản đang chờ/xử lý được giữ lại. Video YouTube sẽ không bị ảnh hưởng."}
+            </p>
+            {deleteError ? (
+              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-600">
+                {deleteError}
+              </div>
+            ) : null}
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (clearing) return;
+                  setClearConfirm(null);
+                }}
+                className="min-h-[44px] flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600"
+              >
+                Huỷ
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleClearHistory(clearConfirm === "failed")}
+                disabled={clearing}
+                className="min-h-[44px] flex-1 rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-sm transition hover:bg-rose-500 disabled:cursor-wait disabled:opacity-70"
+              >
+                {clearing ? "Đang xoá…" : "Xoá"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
