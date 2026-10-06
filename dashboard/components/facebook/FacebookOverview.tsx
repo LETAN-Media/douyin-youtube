@@ -5,10 +5,33 @@ import { Card } from "@/components/ui";
 import type { FacebookPipelineDto } from "@/lib/facebook-api";
 import type { FacebookFlowState } from "@/lib/facebook-api";
 import { FacebookFlowLive } from "./FacebookFlowLive";
+import { PipelineOrbitalView, type OrbitalNodeDatum } from "./PipelineOrbitalView";
 import {
   FACEBOOK_PIPELINE_UPDATED_EVENT,
   type FacebookPipelineFlags,
 } from "./FacebookPipelineToggles";
+
+const ORBITAL_STEPS: Array<{
+  key: keyof FacebookFlowState["steps"];
+  title: string;
+  detailKey: keyof NonNullable<FacebookFlowState["details"]>;
+}> = [
+  { key: "source", title: "Facebook Source", detailKey: "source" },
+  { key: "inventory", title: "Inventory", detailKey: "inventory" },
+  { key: "ai_metadata", title: "AI Metadata", detailKey: "ai_metadata" },
+  { key: "scheduler", title: "Scheduler", detailKey: "scheduler" },
+  { key: "publisher", title: "Publisher", detailKey: "publisher" },
+  { key: "youtube_destination", title: "YouTube Destination", detailKey: "youtube_destination" },
+];
+
+function toOrbitalNodes(state: FacebookFlowState): OrbitalNodeDatum[] {
+  return ORBITAL_STEPS.map((d) => ({
+    key: d.key,
+    title: d.title,
+    subtitle: state.details?.[d.detailKey] ?? "—",
+    status: state.steps[d.key],
+  }));
+}
 
 export function FacebookOverview({
   pipeline,
@@ -23,6 +46,7 @@ export function FacebookOverview({
 }) {
   const [enabled, setEnabled] = useState(pipeline.enabled);
   const [autoPublish, setAutoPublish] = useState(pipeline.auto_publish);
+  const [flowState, setFlowState] = useState<FacebookFlowState | null>(initialFlow);
 
   // Sync instantly when the header toggle updates the pipeline,
   // without waiting for a full page reload.
@@ -44,7 +68,19 @@ export function FacebookOverview({
 
   return (
     <div className="space-y-3">
-      <FacebookFlowLive pipelineId={pipelineId} initial={initialFlow} initialError={flowError} />
+      {flowState ? (
+        <PipelineOrbitalView
+          pipelineName={pipeline.name}
+          nodes={toOrbitalNodes(flowState)}
+          activeEdges={flowState.active_edges || []}
+        />
+      ) : null}
+      <FacebookFlowLive
+        pipelineId={pipelineId}
+        initial={initialFlow}
+        initialError={flowError}
+        onUpdate={setFlowState}
+      />
 
       <Card className="p-0">
         <div className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500 sm:px-5">

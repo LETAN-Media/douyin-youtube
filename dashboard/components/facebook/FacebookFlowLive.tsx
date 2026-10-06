@@ -51,14 +51,23 @@ export function FacebookFlowLive({
   pipelineId,
   initial,
   initialError,
+  onUpdate,
 }: {
   pipelineId: string;
   initial: FacebookFlowState | null;
   initialError: string | null;
+  onUpdate?: (state: FacebookFlowState | null) => void;
 }) {
   const [state, setState] = useState<FacebookFlowState | null>(initial);
   const [error, setError] = useState<string | null>(initialError);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const onUpdateRef = useRef(onUpdate);
+  onUpdateRef.current = onUpdate;
+
+  useEffect(() => {
+    onUpdateRef.current?.(initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pipelineId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +82,7 @@ export function FacebookFlowLive({
         if (!cancelled) {
           setState(data);
           setError(null);
+          onUpdateRef.current?.(data);
         }
       } catch {
         if (!cancelled) setError("Không cập nhật được trạng thái realtime.");
