@@ -391,3 +391,178 @@ def test_sample_endpoint(db) -> None:
     assert sample is not None
     assert sample["reel_db_id"] == f"{pid}_r1"
     assert sample["metadata"]["title"] == "Mẫu đã tạo"
+
+
+# ---------- per-pipeline model selection ----------
+
+
+def _enable_model_env(monkey_model: str = "model-a", extra: str | None = None) -> dict:
+    from app.db.repositories import ai_settings as ai_settings_repo
+
+    prev = {
+        "model": settings.TOOLNET_MODEL,
+        "models": settings.TOOLNET_MODELS,
+        "ai": settings.TOOLNET_AI_ENABLED,
+        "base": settings.TOOLNET_BASE_URL,
+        "key": settings.TOOLNET_API_KEY,
+    }
+    settings.TOOLNET_MODEL = monkey_model
+    settings.TOOLNET_MODELS = extra
+    settings.TOOLNET_AI_ENABLED = True
+    settings.TOOLNET_BASE_URL = "https://toolnet.example.com/v1"
+    settings.TOOLNET_API_KEY = "test_toolnet_key"
+    assert ai_settings_repo is not None
+    return prev
+
+
+def _restore_model_env(prev: dict) -> None:
+    settings.TOOLNET_MODEL = prev["model"]
+    settings.TOOLNET_MODELS = prev["models"]
+    settings.TOOLNET_AI_ENABLED = prev["ai"]
+    settings.TOOLNET_BASE_URL = prev["base"]
+    settings.TOOLNET_API_KEY = prev["key"]
+
+
+def test_ai_models_endpoint_lists_default_and_extras(db) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    prev = _enable_model_env("model-a", "model-a,model-b")
+    try:
+        client = TestClient(create_app())
+        r = client.get("/api/facebook/ai-models", headers=AUTH_HEADERS)
+        assert r.status_code == 200, r.text
+        models = r.json()["models"]
+        assert [m["id"] for m in models] == ["model-a", "model-b"]
+        assert models[0]["is_default"] is True
+        assert models[1]["is_default"] is False
+    finally:
+        _restore_model_env(prev)
+
+
+def test_upsert_stores_model_and_hash_uses_it(db) -> None:
+    from app.db.repositories import ai_settings as ai_settings_repo
+
+    prev = _enable_model_env("model-a", "model-a,model-b")
+    try:
+
+        async def _go():
+            saved = await ai_settings_repo.upsert_settings(
+                pipeline_id="pl_mdl", enabled=True, system_prompt="",
+                title_template="{title}",
+                description_template="{description}\n\n{hashtags}",
+                locked_hashtags=[], language="vi", model="model-b",
+            )
+            assert saved.get("model") == "model-b"
+            data, canonical = await ai_settings_repo.current_config_hash("pl_mdl")
+            assert data.get("model") == "model-b"
+            expected = ai_settings_repo.compute_config_hash(
+                enabled=True, system_prompt="", title_template="{title}",
+                description_template="{description}\n\n{hashtags}",
+                locked_hashtags=[], language="vi", model="model-b",
+            )
+            assert canonical == expected
+
+        asyncio.run(_go())
+    finally:
+        _restore_model_env(prev)
+
+
+def test_put_settings_model_validation(db) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.db.repositories import pipelines
+
+    prev = _enable_model_env("model-a", "model-a,model-b")
+    try:
+        asyncio.run(
+            pipelines.create_pipeline(pipeline_id="pl_mdl2", name="M", slug="pl_mdl2")
+        )
+        client = TestClient(create_app())
+        base = {
+            "enabled": True, "system_prompt": "", "title_template": "{title}",
+            "description_template": "{description}\n\n{hashtags}",
+            "locked_hashtags": [], "language": "vi",
+        }
+        bad = client.put(
+            "/api/facebook/pipelines/pl_mdl2/ai-settings",
+            headers=AUTH_HEADERS, json={**base, "model": "nope-unknown"},
+        )
+        assert bad.status_code == 400, bad.text
+        assert bad.json()["error"] == "INVALID_MODEL"
+        ok = client.put(
+            "/api/facebook/pipelines/pl_mdl2/ai-settings",
+            headers=AUTH_HEADERS, json={**base, "model": "model-b"},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["model"] == "model-b"
+        # Saving again without model keeps the stored choice.
+        keep = client.put(
+            "/api/facebook/pipelines/pl_mdl2/ai-settings",
+            headers=AUTH_HEADERS, json=base,
+        )
+        assert keep.status_code == 200, keep.text
+        assert keep.json()["model"] == "model-b"
+    finally:
+        _restore_model_env(prev)
+
+
+def test_ensure_uses_stored_model_for_toolnet_call(db) -> None:
+    import httpx
+
+    from app.db.repositories import ai_settings as ai_settings_repo
+    from app.db.repositories import reels, sources
+    from app.db.repositories import pipelines as pipes_repo
+    from app.services.facebook_ai_metadata import ensure_ai_metadata
+
+    prev = _enable_model_env("model-a", "model-a,model-b")
+    seen: dict = {}
+    try:
+
+        async def _go():
+            await pipes_repo.create_pipeline(pipeline_id="pl_mdl3", name="M", slug="pl_mdl3")
+            await sources.create_source(
+                source_id="pl_mdl3_src", pipeline_id="pl_mdl3", page_id="1",
+                reels_url="https://www.facebook.com/1/reels/",
+            )
+            await reels.insert_reel_if_new(
+                reel_db_id="pl_mdl3_r1", source_id="pl_mdl3_src", reel_id="r1",
+                reel_url="https://www.facebook.com/reel/r1/",
+                caption="Một chú mèo con chơi bóng len rất vui",
+            )
+            await ai_settings_repo.upsert_settings(
+                pipeline_id="pl_mdl3", enabled=True, system_prompt="",
+                title_template="{title}",
+                description_template="{description}\n\n{hashtags}",
+                locked_hashtags=[], language="vi", model="model-b",
+            )
+
+        asyncio.run(_go())
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content.decode())
+            seen["model"] = body.get("model")
+            return httpx.Response(200, json={
+                "id": "x",
+                "choices": [{"message": {"role": "assistant", "content": json.dumps({
+                    "title": "Tieu de model moi cho kiem thu",
+                    "description": "Mo ta.",
+                    "hashtags": ["#a", "#b", "#c"],
+                })}}],
+                "usage": {},
+            })
+
+        async def _ensure():
+            reel = await reels.get_reel("pl_mdl3_r1")
+            assert reel is not None
+            return await ensure_ai_metadata(
+                reel, transport=httpx.MockTransport(handler)
+            )
+
+        result = asyncio.run(_ensure())
+        assert seen.get("model") == "model-b", seen
+        assert result.model == "model-b"
+    finally:
+        _restore_model_env(prev)

@@ -240,17 +240,20 @@ class FacebookMetadataGenerator:
 
     @classmethod
     def from_settings(
-        cls, transport: httpx.AsyncBaseTransport | None = None
+        cls,
+        transport: httpx.AsyncBaseTransport | None = None,
+        model: str | None = None,
     ) -> "FacebookMetadataGenerator":
         from ..config import settings
 
         try:
-            base_url, api_key, model = settings.require_toolnet()
+            base_url, api_key, global_model = settings.require_toolnet()
         except RuntimeError as exc:
             raise MetadataError(CONFIG_MISSING, str(exc))
+        chosen = (model or "").strip() or global_model
         return cls(
             ToolNetConfig(
-                base_url=base_url, api_key=api_key, model=model,
+                base_url=base_url, api_key=api_key, model=chosen,
                 timeout=settings.TOOLNET_TIMEOUT,
             ),
             transport=transport,
@@ -388,15 +391,15 @@ async def ensure_ai_metadata(
     if not target_pipeline_id and reel.get("source_id"):
         target_pipeline_id = await reels.get_reel_pipeline_id(reel_db_id)
 
-    generator = FacebookMetadataGenerator.from_settings(transport=transport)
-    model = generator.config.model
+    from ..config import settings as app_settings
 
     if target_pipeline_id:
+        # No forced model: the pipeline's stored choice wins, else global.
         pipeline_settings, config_hash = await ai_settings.current_config_hash(
-            target_pipeline_id, model=model
+            target_pipeline_id
         )
     else:
-        pipeline_settings = ai_settings.default_settings("default", model=model)
+        pipeline_settings = ai_settings.default_settings("default")
         config_hash = ai_settings.compute_config_hash(
             enabled=pipeline_settings["enabled"],
             system_prompt=pipeline_settings.get("system_prompt"),
@@ -404,8 +407,12 @@ async def ensure_ai_metadata(
             description_template=pipeline_settings.get("description_template"),
             locked_hashtags=pipeline_settings.get("locked_hashtags"),
             language=pipeline_settings.get("language"),
-            model=model,
+            model=None,
         )
+    model = (
+        pipeline_settings.get("model") or app_settings.TOOLNET_MODEL or ""
+    ).strip()
+    generator = FacebookMetadataGenerator.from_settings(transport=transport, model=model or None)
 
     if not pipeline_settings.get("enabled", True):
         raise MetadataError(

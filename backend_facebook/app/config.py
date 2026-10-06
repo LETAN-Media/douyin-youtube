@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     TOOLNET_BASE_URL: str | None = None
     TOOLNET_API_KEY: str | None = None
     TOOLNET_MODEL: str | None = None
+    # Extra models offered in the per-pipeline picker, comma-separated.
+    # First entry (or TOOLNET_MODEL when empty) is the default.
+    TOOLNET_MODELS: str | None = None
     TOOLNET_AI_ENABLED: bool = False
     TOOLNET_TIMEOUT: float = 60.0
     TOOLNET_MAX_REQUESTS_PER_MINUTE: int = 30

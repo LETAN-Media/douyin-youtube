@@ -83,7 +83,9 @@ async def generate_manual_metadata(
             "AI_DISABLED_FOR_PIPELINE",
             "AI is disabled for this pipeline. Enable it or type metadata manually.",
         )
-    generator = FacebookMetadataGenerator.from_settings(transport=transport)
+    generator = FacebookMetadataGenerator.from_settings(
+        transport=transport, model=pipeline_settings.get("model")
+    )
     generator.custom_system_prompt = pipeline_settings.get("system_prompt") or ""
     generator.language = pipeline_settings.get("language") or "vi"
     generated = await generator.generate(

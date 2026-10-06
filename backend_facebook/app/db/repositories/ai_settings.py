@@ -62,6 +62,28 @@ def compute_config_hash(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def list_available_models() -> list[dict[str, Any]]:
+    """Models offered in the per-pipeline picker.
+
+    Source: TOOLNET_MODELS (comma-separated) or the single TOOLNET_MODEL.
+    Adding a model later is env-only — no code or frontend change needed.
+    """
+    from ...config import settings as app_settings
+
+    raw = (app_settings.TOOLNET_MODELS or "").strip()
+    ids = [m.strip() for m in raw.split(",") if m.strip()]
+    if not ids and (app_settings.TOOLNET_MODEL or "").strip():
+        ids = [(app_settings.TOOLNET_MODEL or "").strip()]
+    seen: list[str] = []
+    for model_id in ids:
+        if model_id not in seen:
+            seen.append(model_id)
+    return [
+        {"id": model_id, "label": model_id, "is_default": i == 0}
+        for i, model_id in enumerate(seen)
+    ]
+
+
 def default_settings(pipeline_id: str, model: str | None = None) -> dict[str, Any]:
     return {
         "pipeline_id": pipeline_id,
@@ -71,6 +93,7 @@ def default_settings(pipeline_id: str, model: str | None = None) -> dict[str, An
         "description_template": DEFAULT_DESCRIPTION_TEMPLATE,
         "locked_hashtags": list(DEFAULT_LOCKED_HASHTAGS),
         "language": DEFAULT_LANGUAGE,
+        "model": model,
         "config_hash": compute_config_hash(
             enabled=DEFAULT_ENABLED,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
@@ -102,6 +125,7 @@ def _row_to_dict(r: Any) -> dict[str, Any]:
         "description_template": r[4] or DEFAULT_DESCRIPTION_TEMPLATE,
         "locked_hashtags": locked_hashtags,
         "language": r[6] or DEFAULT_LANGUAGE,
+        "model": r[10] if len(r) > 10 else None,
         "config_hash": r[7],
         "created_at": r[8],
         "updated_at": r[9],
@@ -110,19 +134,36 @@ def _row_to_dict(r: Any) -> dict[str, Any]:
 
 async def get_settings(pipeline_id: str, model: str | None = None) -> dict[str, Any]:
     client = get_client()
-    rows = await client.execute(
-        """
-        SELECT pipeline_id, enabled, system_prompt, title_template,
-               description_template, locked_hashtags_json, language,
-               config_hash, created_at, updated_at
-        FROM facebook_ai_settings
-        WHERE pipeline_id = :id
-        """,
-        {"id": pipeline_id},
-    )
+    try:
+        rows = await client.execute(
+            """
+            SELECT pipeline_id, enabled, system_prompt, title_template,
+                   description_template, locked_hashtags_json, language,
+                   config_hash, created_at, updated_at, model
+            FROM facebook_ai_settings
+            WHERE pipeline_id = :id
+            """,
+            {"id": pipeline_id},
+        )
+    except Exception:
+        # Older DBs without the model column (migration pending).
+        rows = await client.execute(
+            """
+            SELECT pipeline_id, enabled, system_prompt, title_template,
+                   description_template, locked_hashtags_json, language,
+                   config_hash, created_at, updated_at
+            FROM facebook_ai_settings
+            WHERE pipeline_id = :id
+            """,
+            {"id": pipeline_id},
+        )
     if not rows.rows:
         return default_settings(pipeline_id, model=model)
     data = _row_to_dict(rows.rows[0])
+    # Effective model: stored per-pipeline choice wins, else the passed
+    # global default.
+    if not data.get("model") and model:
+        data["model"] = model
     if not data.get("config_hash"):
         data["config_hash"] = compute_config_hash(
             enabled=data["enabled"],
@@ -150,8 +191,14 @@ async def current_config_hash(
     """
     from ...config import settings as app_settings
 
-    live_model = (model if model is not None else (app_settings.TOOLNET_MODEL or "")).strip()
+    stored_first = await get_settings(pipeline_id)
+    live_model = (
+        model
+        if model is not None
+        else (stored_first.get("model") or app_settings.TOOLNET_MODEL or "")
+    ).strip()
     data = await get_settings(pipeline_id, model=live_model or None)
+    data["model"] = live_model or None
     canonical = compute_config_hash(
         enabled=data.get("enabled", True),
         system_prompt=data.get("system_prompt"),
@@ -186,35 +233,72 @@ async def upsert_settings(
         language=language,
         model=model,
     )
-    await client.execute(
-        """
-        INSERT INTO facebook_ai_settings
-            (pipeline_id, enabled, system_prompt, title_template,
-             description_template, locked_hashtags_json, language,
-             config_hash, created_at, updated_at)
-        VALUES
-            (:pipeline_id, :enabled, :system_prompt, :title_template,
-             :description_template, :locked_hashtags_json, :language,
-             :config_hash, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        ON CONFLICT(pipeline_id) DO UPDATE SET
-            enabled = excluded.enabled,
-            system_prompt = excluded.system_prompt,
-            title_template = excluded.title_template,
-            description_template = excluded.description_template,
-            locked_hashtags_json = excluded.locked_hashtags_json,
-            language = excluded.language,
-            config_hash = excluded.config_hash,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-        """,
-        {
-            "pipeline_id": pipeline_id,
-            "enabled": 1 if enabled else 0,
-            "system_prompt": system_prompt,
-            "title_template": title_template,
-            "description_template": description_template,
-            "locked_hashtags_json": json.dumps(clean_tags, ensure_ascii=False),
-            "language": language,
-            "config_hash": config_hash,
-        },
-    )
+    model_value = (model or "").strip() or None
+    try:
+        await client.execute(
+            """
+            INSERT INTO facebook_ai_settings
+                (pipeline_id, enabled, system_prompt, title_template,
+                 description_template, locked_hashtags_json, language, model,
+                 config_hash, created_at, updated_at)
+            VALUES
+                (:pipeline_id, :enabled, :system_prompt, :title_template,
+                 :description_template, :locked_hashtags_json, :language, :model,
+                 :config_hash, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            ON CONFLICT(pipeline_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                system_prompt = excluded.system_prompt,
+                title_template = excluded.title_template,
+                description_template = excluded.description_template,
+                locked_hashtags_json = excluded.locked_hashtags_json,
+                language = excluded.language,
+                model = excluded.model,
+                config_hash = excluded.config_hash,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            """,
+            {
+                "pipeline_id": pipeline_id,
+                "enabled": 1 if enabled else 0,
+                "system_prompt": system_prompt,
+                "title_template": title_template,
+                "description_template": description_template,
+                "locked_hashtags_json": json.dumps(clean_tags, ensure_ascii=False),
+                "language": language,
+                "model": model_value,
+                "config_hash": config_hash,
+            },
+        )
+    except Exception:
+        # Older DBs without the model column (migration pending).
+        await client.execute(
+            """
+            INSERT INTO facebook_ai_settings
+                (pipeline_id, enabled, system_prompt, title_template,
+                 description_template, locked_hashtags_json, language,
+                 config_hash, created_at, updated_at)
+            VALUES
+                (:pipeline_id, :enabled, :system_prompt, :title_template,
+                 :description_template, :locked_hashtags_json, :language,
+                 :config_hash, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            ON CONFLICT(pipeline_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                system_prompt = excluded.system_prompt,
+                title_template = excluded.title_template,
+                description_template = excluded.description_template,
+                locked_hashtags_json = excluded.locked_hashtags_json,
+                language = excluded.language,
+                config_hash = excluded.config_hash,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            """,
+            {
+                "pipeline_id": pipeline_id,
+                "enabled": 1 if enabled else 0,
+                "system_prompt": system_prompt,
+                "title_template": title_template,
+                "description_template": description_template,
+                "locked_hashtags_json": json.dumps(clean_tags, ensure_ascii=False),
+                "language": language,
+                "config_hash": config_hash,
+            },
+        )
     return await get_settings(pipeline_id, model=model)

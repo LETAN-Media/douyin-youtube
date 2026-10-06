@@ -53,6 +53,7 @@ class AiSettingsUpdate(BaseModel):
     description_template: str = "{description}\n\n{hashtags}"
     locked_hashtags: list[str] = Field(default_factory=list)
     language: str = "vi"
+    model: str | None = None
 
 
 class AiSettingsPreviewRequest(BaseModel):
@@ -207,9 +208,21 @@ async def update_ai_settings(
     validate_ai_settings_input(body)
     from ..config import settings as app_settings
 
-    # Store config_hash with the real ToolNet model so it matches the
-    # hash the scheduler/publisher/worker recompute. A model-less hash
-    # would never match and silently stall scheduling.
+    # Effective model: explicit choice wins, else the pipeline's stored
+    # model, else global. Must be a known model — a typo would silently
+    # break every ToolNet call for this pipeline.
+    requested = (body.model or "").strip() or None
+    if requested is not None:
+        allowed = {m["id"] for m in ai_settings_repo.list_available_models()}
+        if allowed and requested not in allowed:
+            raise _err(
+                400, "INVALID_MODEL",
+                f"Unknown AI model '{requested[:80]}'.",
+            )
+        model = requested
+    else:
+        existing = await ai_settings_repo.get_settings(pipeline_id)
+        model = existing.get("model") or (app_settings.TOOLNET_MODEL or "").strip() or None
     return await ai_settings_repo.upsert_settings(
         pipeline_id=pipeline_id,
         enabled=body.enabled,
@@ -218,8 +231,15 @@ async def update_ai_settings(
         description_template=body.description_template.strip(),
         locked_hashtags=body.locked_hashtags,
         language=body.language.strip(),
-        model=(app_settings.TOOLNET_MODEL or "").strip() or None,
+        model=model,
     )
+
+
+@router.get("/ai-models")
+async def list_ai_models(_: None = Depends(require_admin)) -> dict:
+    """Models offered in the per-pipeline picker. Extend by setting
+    TOOLNET_MODELS (comma-separated); no frontend change needed."""
+    return {"models": ai_settings_repo.list_available_models()}
 
 
 @router.post("/pipelines/{pipeline_id}/ai-settings/preview")

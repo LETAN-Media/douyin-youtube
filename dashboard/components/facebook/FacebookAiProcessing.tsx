@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge, Card, CardHeader, btnPrimary, btnSecondary, btnSmall } from "@/components/ui";
 import { IconCheck, IconRefresh, IconSettings, IconSparkles, IconX } from "@/components/icons";
 import type {
+  AiModelOption,
   FacebookAiMetadataDto,
   FacebookAiSettingsDto,
   FacebookAiStatsDto,
@@ -26,11 +27,21 @@ const DEFAULTS = {
 };
 
 const LANGUAGES = [
-  { value: "vi", label: "Tiếng Việt (vi)" },
-  { value: "en", label: "English (en)" },
-  { value: "zh", label: "Tiếng Trung (zh)" },
-  { value: "ja", label: "Tiếng Nhật (ja)" },
+  { value: "vi", label: "Tiếng Việt" },
+  { value: "en", label: "English" },
+  { value: "zh", label: "中文" },
+  { value: "ja", label: "日本語" },
 ];
+
+const fieldLabel = "block text-[11px] font-bold uppercase tracking-wider text-slate-500";
+const fieldInput =
+  "mt-1.5 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
+const hint = "mt-1 text-[11px] text-slate-400";
+
+function shortModel(id: string): string {
+  const parts = id.split("/");
+  return parts[parts.length - 1] || id;
+}
 
 export function FacebookAiProcessing({
   pipelineId,
@@ -54,20 +65,49 @@ export function FacebookAiProcessing({
   const [language, setLanguage] = useState<string>(
     initialSettings?.language ?? DEFAULTS.language,
   );
+  const [model, setModel] = useState<string>(initialSettings?.model ?? "");
+  const [savedModel, setSavedModel] = useState<string | null>(initialSettings?.model ?? null);
+  const [models, setModels] = useState<AiModelOption[] | null>(null);
 
   const [tagInput, setTagInput] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Add a tag to lockedHashtags
+  const defaultModelId = models?.find((m) => m.is_default)?.id ?? models?.[0]?.id ?? "";
+  const effectiveModel = model || initialSettings?.model || defaultModelId;
+  const baselineModel = savedModel ?? initialSettings?.model ?? defaultModelId;
+  const modelChanged = !!effectiveModel && !!baselineModel && effectiveModel !== baselineModel;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/facebook/ai-models", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as { models?: AiModelOption[] };
+        if (!cancelled && Array.isArray(data.models) && data.models.length > 0) {
+          setModels(data.models);
+        }
+      } catch {
+        // Fallback to the stored/default model below.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!model && defaultModelId) setModel(defaultModelId);
+  }, [defaultModelId, model]);
+
   const handleAddTag = () => {
     let raw = tagInput.trim();
     if (!raw) return;
     if (!raw.startsWith("#")) raw = `#${raw.replace(/^#+/, "")}`;
     const cleanTag = `#${raw.slice(1).replace(/\s+/g, "")}`;
     if (cleanTag === "#") return;
-
     if (!lockedHashtags.some((t) => t.toLowerCase() === cleanTag.toLowerCase())) {
       setLockedHashtags([...lockedHashtags, cleanTag]);
     }
@@ -85,6 +125,7 @@ export function FacebookAiProcessing({
     setDescriptionTemplate(DEFAULTS.description_template);
     setLockedHashtags([...DEFAULTS.locked_hashtags]);
     setLanguage(DEFAULTS.language);
+    if (defaultModelId) setModel(defaultModelId);
     setSaveError(null);
   };
 
@@ -93,11 +134,13 @@ export function FacebookAiProcessing({
       setSaveError("Tiêu đề mẫu bắt buộc phải chứa {title}.");
       return;
     }
-
+    if (!effectiveModel) {
+      setSaveError("Chưa chọn AI model.");
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     setSaveSuccess(false);
-
     try {
       const res = await fetch(`/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/ai-settings`, {
         method: "PUT",
@@ -109,14 +152,15 @@ export function FacebookAiProcessing({
           description_template: descriptionTemplate,
           locked_hashtags: lockedHashtags,
           language,
+          model: effectiveModel,
         }),
       });
-
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.message ?? data.error ?? `Lỗi HTTP ${res.status}`);
       }
-
+      setModel(data.model ?? effectiveModel);
+      setSavedModel(data.model ?? effectiveModel);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 4000);
     } catch (err) {
@@ -126,14 +170,12 @@ export function FacebookAiProcessing({
     }
   };
 
-  // Preview calculations
   const sampleData = useMemo(() => {
     if (sample) {
       return {
         title: sample.metadata.title || "Tiêu đề video thực tế từ Facebook Reel",
         description:
-          sample.metadata.description ||
-          "Đoạn mô tả tự nhiên tóm tắt nội dung video từ Reel gốc.",
+          sample.metadata.description || "Đoạn mô tả tự nhiên tóm tắt nội dung video từ Reel gốc.",
         hashtags: sample.metadata.hashtags.length > 0 ? sample.metadata.hashtags : ["#shorts", "#reels"],
         sourceUrl: "https://facebook.com/reel/1422636890013099",
         isReal: true,
@@ -141,8 +183,7 @@ export function FacebookAiProcessing({
     }
     return {
       title: "Khám phá bí ẩn đảo hoang và những câu chuyện chưa từng kể",
-      description:
-        "Một chuyến hành trình khám phá thiên nhiên hoang dã đầy bất ngờ và lôi cuốn.",
+      description: "Một chuyến hành trình khám phá thiên nhiên hoang dã đầy bất ngờ và lôi cuốn.",
       hashtags: ["#khampha", "#thiennhien", "#shorts"],
       sourceUrl: "https://facebook.com/reel/demo123456",
       isReal: false,
@@ -150,147 +191,171 @@ export function FacebookAiProcessing({
   }, [sample]);
 
   const preview = useMemo(() => {
-    const rawTitle = sampleData.title;
-    const rawDesc = sampleData.description;
-
-    // Merge hashtags: AI sample hashtags + locked hashtags (deduped)
     const seen = new Set<string>();
     const mergedTags: string[] = [];
-
-    for (const tag of sampleData.hashtags) {
+    for (const tag of [...sampleData.hashtags, ...lockedHashtags]) {
       const lower = tag.toLowerCase();
       if (!seen.has(lower)) {
         seen.add(lower);
         mergedTags.push(tag);
       }
     }
-    for (const tag of lockedHashtags) {
-      const lower = tag.toLowerCase();
-      if (!seen.has(lower)) {
-        seen.add(lower);
-        mergedTags.push(tag);
-      }
-    }
-
     const tplTitle = titleTemplate.trim() || "{title}";
-    const finalTitle = (tplTitle.includes("{title}") ? tplTitle.replace("{title}", rawTitle) : rawTitle)
+    const finalTitle = (tplTitle.includes("{title}") ? tplTitle.replace("{title}", sampleData.title) : sampleData.title)
       .trim()
       .slice(0, 100);
-
     const tplDesc = descriptionTemplate || "{description}\n\n{hashtags}";
-    const tagsString = mergedTags.join(" ");
     const finalDesc = tplDesc
-      .replace("{description}", rawDesc)
-      .replace("{hashtags}", tagsString)
+      .replace("{description}", sampleData.description)
+      .replace("{hashtags}", mergedTags.join(" "))
       .replace("{source_url}", sampleData.sourceUrl)
       .trim()
       .slice(0, 5000);
-
-    return {
-      rawTitle,
-      rawDesc,
-      mergedTags,
-      finalTitle,
-      finalDesc,
-    };
+    return { finalTitle, finalDesc, mergedTags };
   }, [sampleData, titleTemplate, descriptionTemplate, lockedHashtags]);
 
+  const modelOptions: AiModelOption[] =
+    models ??
+    (effectiveModel
+      ? [{ id: effectiveModel, label: effectiveModel, is_default: true }]
+      : []);
+
   return (
-    <div className="space-y-6">
-      {/* PHẦN 1: AI STATISTICS */}
+    <div className="space-y-4">
+      {/* Stats */}
       <Card>
         <CardHeader
-          title="AI Statistics"
-          subtitle="Tình trạng xử lý metadata YouTube qua ToolNet AI"
+          title="AI Processing"
+          subtitle="ToolNet AI viết metadata YouTube"
           icon={<IconSparkles size={16} />}
         />
-        <div className="grid gap-4 p-4 sm:px-5">
-          <div className="grid grid-cols-3 gap-2 text-center">
-            {[
-              { l: "Generated", v: stats.generated, color: "text-emerald-700 bg-emerald-50/70" },
-              { l: "Pending", v: stats.pending, color: "text-amber-700 bg-amber-50/70" },
-              { l: "Failed", v: stats.failed, color: "text-rose-700 bg-rose-50/70" },
-            ].map((s) => (
-              <div key={s.l} className={`rounded-xl px-2 py-3 border border-slate-100 ${s.color}`}>
-                <dt className="text-[11px] font-bold uppercase tracking-wider text-slate-500">{s.l}</dt>
-                <dd className="tnum mt-1 text-2xl font-black">{s.v}</dd>
-              </div>
-            ))}
-          </div>
-
+        <div className="flex items-center gap-2 px-4 pt-1 sm:px-5">
+          {[
+            { l: "Generated", v: stats.generated, cls: "bg-emerald-50 text-emerald-700 ring-emerald-100" },
+            { l: "Pending", v: stats.pending, cls: "bg-amber-50 text-amber-700 ring-amber-100" },
+            { l: "Failed", v: stats.failed, cls: "bg-rose-50 text-rose-700 ring-rose-100" },
+          ].map((s) => (
+            <div
+              key={s.l}
+              className={`flex-1 rounded-2xl px-3 py-2.5 text-center ring-1 ring-inset ${s.cls}`}
+            >
+              <div className="tnum text-xl font-black leading-none">{s.v}</div>
+              <div className="mt-1 text-[10px] font-bold uppercase tracking-wider opacity-80">{s.l}</div>
+            </div>
+          ))}
+        </div>
+        <div className="px-4 pb-4 pt-3 sm:px-5">
           {sample ? (
-            <div className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-3.5">
+            <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-inset ring-slate-100">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-bold text-slate-700">Mẫu metadata thực tế đã generate</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Mẫu thực tế
+                </span>
                 <Badge tone="indigo">{sample.model ?? "ToolNet AI"}</Badge>
               </div>
-              <p className="mt-2 text-sm font-bold text-slate-900 break-words">{sample.metadata.title}</p>
+              <p className="mt-1.5 break-words text-sm font-bold text-slate-900">{sample.metadata.title}</p>
               {sample.metadata.description ? (
-                <p className="mt-1 line-clamp-2 text-xs text-slate-600 break-words">{sample.metadata.description}</p>
+                <p className="mt-1 line-clamp-2 break-words text-xs text-slate-600">{sample.metadata.description}</p>
               ) : null}
               {sample.metadata.hashtags.length > 0 ? (
-                <p className="mt-1.5 text-xs font-semibold text-indigo-600 break-words">
+                <p className="mt-1.5 break-words text-xs font-semibold text-indigo-600">
                   {sample.metadata.hashtags.join(" ")}
                 </p>
               ) : null}
             </div>
           ) : stats.generated > 0 ? (
-            <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3 text-xs text-indigo-900">
-              Đã có <strong>{stats.generated}</strong> reel được tạo metadata AI trong database.
-            </div>
+            <p className="rounded-2xl bg-indigo-50/70 p-3 text-xs text-indigo-900 ring-1 ring-inset ring-indigo-100">
+              Đã có <strong>{stats.generated}</strong> reel được tạo metadata AI.
+            </p>
           ) : (
             <p className="text-xs text-slate-500">
-              Chưa có metadata nào được generate cho pipeline này. Khi kích hoạt và chạy tự động hoặc thủ công, ToolNet AI sẽ tạo metadata.
+              Chưa có metadata nào. Bật AI và chạy scan/worker để ToolNet bắt đầu viết.
             </p>
           )}
         </div>
       </Card>
 
-      {/* PHẦN 2: AI SETTINGS */}
+      {/* Model */}
       <Card>
         <CardHeader
-          title="Cấu hình AI riêng cho Pipeline"
-          subtitle="Tùy biến phong cách viết, template tiêu đề, mô tả và hashtag cố định"
-          icon={<IconSettings size={16} />}
+          title="AI Model"
+          subtitle="Model viết metadata cho pipeline này"
+          icon={<IconSparkles size={16} />}
         />
-        <div className="space-y-5 p-4 sm:px-5">
-          {/* Toggle AI Enabled */}
-          <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
-            <div className="min-w-0 pr-3">
-              <p className="text-sm font-extrabold text-slate-900">Kích hoạt AI Processing</p>
-              <p className="text-xs text-slate-500">
-                {enabled
-                  ? "Đang bật: Video sẽ được ToolNet AI viết lại tiêu đề, mô tả trước khi đăng."
-                  : "Đang tắt: Dừng xử lý AI cho pipeline này (hệ thống sẽ từ chối tải và upload video nếu chưa có AI)."}
-              </p>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={enabled}
-              onClick={() => setEnabled(!enabled)}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 ${
-                enabled ? "bg-indigo-600" : "bg-slate-300"
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                  enabled ? "translate-x-5" : "translate-x-0"
-                }`}
-              />
-            </button>
-          </div>
+        <div className="space-y-2 px-4 pb-4 sm:px-5">
+          {modelOptions.length === 0 ? (
+            <p className="text-xs text-slate-500">Đang tải danh sách model…</p>
+          ) : (
+            modelOptions.map((m) => {
+              const active = m.id === effectiveModel;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setModel(m.id)}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-2xl border bg-white px-4 py-2.5 text-left shadow-sm transition ${
+                    active
+                      ? "border-indigo-400 ring-2 ring-indigo-100"
+                      : "border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/40"
+                  }`}
+                >
+                  <span
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-sm font-black ${
+                      active ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500"
+                    }`}
+                  >
+                    ✦
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-mono text-xs font-bold text-slate-900">
+                      {shortModel(m.id)}
+                    </span>
+                    <span className="block truncate text-[11px] text-slate-400">{m.id}</span>
+                  </span>
+                  {m.is_default ? (
+                    <Badge tone="slate">Mặc định</Badge>
+                  ) : null}
+                  {active ? <IconCheck size={16} className="shrink-0 text-indigo-600" /> : null}
+                </button>
+              );
+            })
+          )}
+          {modelChanged ? (
+            <p className="rounded-xl bg-amber-50 p-2.5 text-[11px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-100">
+              Đổi model sẽ khiến toàn bộ metadata regenerate lại theo model mới. Nhấn Lưu để áp dụng.
+            </p>
+          ) : null}
+        </div>
+      </Card>
 
-          {/* Language Selector */}
+      {/* General */}
+      <Card>
+        <CardHeader title="Chung" subtitle="Bật/tắt AI và ngôn ngữ đầu ra" icon={<IconSettings size={16} />} />
+        <div className="space-y-3 px-4 pb-4 sm:px-5">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            onClick={() => setEnabled(!enabled)}
+            className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3.5 text-left shadow-sm"
+          >
+            <span className="min-w-0">
+              <span className="block text-sm font-extrabold text-slate-900">
+                Kích hoạt AI {enabled ? "· ON" : "· OFF"}
+              </span>
+              <span className="mt-0.5 block text-xs text-slate-500">
+                {enabled
+                  ? "ToolNet viết lại tiêu đề, mô tả trước khi đăng."
+                  : "Tắt: video chưa có AI sẽ không được đăng."}
+              </span>
+            </span>
+            <span className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors ${enabled ? "bg-indigo-600" : "bg-slate-300"}`}>
+              <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${enabled ? "translate-x-5" : "translate-x-0"} mt-0.5 ${enabled ? "ml-0.5" : "ml-0.5"}`} />
+            </span>
+          </button>
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-              Ngôn ngữ đầu ra (Language)
-            </label>
-            <select
-              value={language}
-              onChange={(e) => setLanguage(e.target.value)}
-              className="mt-1.5 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            >
+            <label className={fieldLabel}>Ngôn ngữ</label>
+            <select value={language} onChange={(e) => setLanguage(e.target.value)} className={fieldInput}>
               {LANGUAGES.map((l) => (
                 <option key={l.value} value={l.value}>
                   {l.label}
@@ -298,95 +363,67 @@ export function FacebookAiProcessing({
               ))}
             </select>
           </div>
+        </div>
+      </Card>
 
-          {/* Title Template */}
+      {/* Templates */}
+      <Card>
+        <CardHeader title="Mẫu tiêu đề & mô tả" subtitle="Biến: {title} {description} {hashtags} {source_url}" />
+        <div className="space-y-4 px-4 pb-4 sm:px-5">
           <div>
-            <div className="flex items-center justify-between">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                Title Template <span className="text-rose-500">*</span>
-              </label>
-              <span className="text-[11px] font-semibold text-slate-400">
-                Placeholder bắt buộc: <code className="text-indigo-600 font-bold">&#123;title&#125;</code>
-              </span>
-            </div>
+            <label className={fieldLabel}>
+              Title template <span className="text-rose-500">*</span>
+            </label>
             <input
               type="text"
               value={titleTemplate}
               onChange={(e) => setTitleTemplate(e.target.value)}
-              placeholder="{title} | Shy Khám Phá"
-              className="mt-1.5 block w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder="{title} | Tên kênh"
+              className={fieldInput}
             />
-            <p className="mt-1 text-[11px] text-slate-500">
-              Ví dụ: <code className="text-slate-700">&#123;title&#125; | Shy Khám Phá</code> (Tối đa 100 ký tự YouTube)
-            </p>
           </div>
-
-          {/* Description Template */}
           <div>
             <div className="flex flex-wrap items-center justify-between gap-1">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                Description Template
-              </label>
-              <div className="flex flex-wrap gap-1 text-[11px]">
-                <button
-                  type="button"
-                  onClick={() => setDescriptionTemplate((prev) => `${prev} {description}`)}
-                  className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700 hover:bg-slate-200"
-                >
-                  &#123;description&#125;
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDescriptionTemplate((prev) => `${prev} {hashtags}`)}
-                  className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700 hover:bg-slate-200"
-                >
-                  &#123;hashtags&#125;
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDescriptionTemplate((prev) => `${prev} {source_url}`)}
-                  className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700 hover:bg-slate-200"
-                >
-                  &#123;source_url&#125;
-                </button>
+              <label className={fieldLabel}>Description template</label>
+              <div className="flex gap-1">
+                {["{description}", "{hashtags}", "{source_url}"].map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setDescriptionTemplate((prev) => `${prev} ${v}`)}
+                    className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-[11px] font-bold text-slate-600 hover:bg-slate-200"
+                  >
+                    {v}
+                  </button>
+                ))}
               </div>
             </div>
             <textarea
-              rows={4}
+              rows={3}
               value={descriptionTemplate}
               onChange={(e) => setDescriptionTemplate(e.target.value)}
-              placeholder="{description}&#10;&#10;Nguồn: {source_url}&#10;&#10;{hashtags}"
-              className="mt-1.5 block w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 font-mono shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className={`${fieldInput} font-mono`}
             />
-            <p className="mt-1 text-[11px] text-slate-500">
-              Hỗ trợ các biến: <code className="text-slate-700">&#123;description&#125;</code>,{" "}
-              <code className="text-slate-700">&#123;hashtags&#125;</code>,{" "}
-              <code className="text-slate-700">&#123;source_url&#125;</code>
-            </p>
           </div>
+        </div>
+      </Card>
 
-          {/* Custom System Prompt */}
+      {/* Style + tags */}
+      <Card>
+        <CardHeader title="Phong cách & hashtag" subtitle="System prompt bổ sung + hashtag cố định" />
+        <div className="space-y-4 px-4 pb-4 sm:px-5">
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-              Custom System Prompt (Bổ sung cho Kênh)
-            </label>
+            <label className={fieldLabel}>System prompt bổ sung</label>
             <textarea
-              rows={3}
+              rows={2}
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
-              placeholder="Ví dụ: Viết theo phong cách kịch tính, hấp dẫn, tạo sự tò mò mạnh mẽ..."
-              className="mt-1.5 block w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder="VD: Viết kịch tính, gây tò mò mạnh…"
+              className={fieldInput}
             />
-            <p className="mt-1 text-[11px] text-slate-500">
-              Prompt này sẽ được nối thêm vào Base System Prompt của hệ thống. Hệ thống luôn đảm bảo cấu trúc JSON an toàn tuyệt đối.
-            </p>
           </div>
-
-          {/* Locked Hashtags */}
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-              Locked Hashtags (Hashtag cố định)
-            </label>
+            <label className={fieldLabel}>Hashtag cố định</label>
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5 rounded-xl border border-slate-200 bg-white p-2">
               {lockedHashtags.map((tag) => (
                 <span
@@ -404,7 +441,7 @@ export function FacebookAiProcessing({
                   </button>
                 </span>
               ))}
-              <div className="flex flex-1 items-center gap-1 min-w-[140px]">
+              <div className="flex min-w-[140px] flex-1 items-center gap-1">
                 <input
                   type="text"
                   value={tagInput}
@@ -415,7 +452,7 @@ export function FacebookAiProcessing({
                       handleAddTag();
                     }
                   }}
-                  placeholder="Thêm hashtag (#shorts, #shykhampha)..."
+                  placeholder="#shorts…"
                   className="w-full border-none p-1 text-xs text-slate-900 focus:outline-none focus:ring-0"
                 />
                 <button
@@ -428,32 +465,24 @@ export function FacebookAiProcessing({
                 </button>
               </div>
             </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Các hashtag này luôn được tự động append vào cuối danh sách hashtag AI và tự động loại bỏ trùng lặp.
-            </p>
           </div>
-
-          {/* Feedback messages */}
           {saveSuccess ? (
             <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs font-bold text-emerald-800">
-              <IconCheck size={16} className="text-emerald-600 shrink-0" />
-              <span>Đã lưu cài đặt AI vào cơ sở dữ liệu Turso thành công!</span>
+              <IconCheck size={16} className="shrink-0 text-emerald-600" />
+              <span>Đã lưu cài đặt AI.</span>
             </div>
           ) : null}
-
           {saveError ? (
             <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-bold text-rose-800">
               {saveError}
             </div>
           ) : null}
-
-          {/* Action Buttons */}
-          <div className="flex flex-wrap items-center gap-3 pt-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               disabled={saving}
               onClick={handleSave}
-              className={`${btnPrimary} min-h-[44px] sm:min-h-[38px]`}
+              className={`${btnPrimary} min-h-[44px]`}
             >
               {saving ? "Đang lưu…" : "Lưu cài đặt"}
             </button>
@@ -461,88 +490,61 @@ export function FacebookAiProcessing({
               type="button"
               disabled={saving}
               onClick={handleResetDefault}
-              className={`${btnSecondary} min-h-[44px] sm:min-h-[38px] inline-flex items-center gap-1.5`}
+              className={`${btnSecondary} inline-flex min-h-[44px] items-center gap-1.5`}
             >
               <IconRefresh size={14} />
-              Khôi phục mặc định
+              Mặc định
             </button>
           </div>
         </div>
       </Card>
 
-      {/* PHẦN 3: PREVIEW */}
+      {/* Preview */}
       <Card>
         <CardHeader
-          title="Xem trước kết quả (Template Preview)"
-          subtitle={
-            sampleData.isReal
-              ? "Dựa trên video Reel thực tế đã được AI tạo trong pipeline"
-              : "Dựa trên dữ liệu mô phỏng (sẽ cập nhật tự động khi có video đầu tiên)"
-          }
+          title="Xem trước"
+          subtitle={sampleData.isReal ? "Từ video thực tế trong pipeline" : "Dữ liệu mô phỏng"}
           icon={<IconSparkles size={16} />}
         />
-        <div className="space-y-4 p-4 sm:px-5">
-          {/* Title preview */}
-          <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
-            <div className="flex items-center justify-between text-xs text-slate-500">
-              <span className="font-bold uppercase tracking-wider text-slate-400">Tiêu đề gốc từ AI</span>
-            </div>
-            <p className="mt-1 text-xs text-slate-600 break-words">{preview.rawTitle}</p>
-
-            <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
-              <span className="font-extrabold uppercase tracking-wider text-indigo-700">
-                Final Title after template
-              </span>
-              <span
-                className={`text-[11px] font-bold ${
-                  preview.finalTitle.length > 90 ? "text-amber-600" : "text-slate-400"
-                }`}
-              >
-                {preview.finalTitle.length}/100 ký tự
+        <div className="space-y-3 px-4 pb-4 sm:px-5">
+          <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-inset ring-slate-100">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Title</span>
+              <span className={`text-[11px] font-bold ${preview.finalTitle.length > 90 ? "text-amber-600" : "text-slate-400"}`}>
+                {preview.finalTitle.length}/100
               </span>
             </div>
-            <p className="mt-1 text-sm font-extrabold text-slate-900 break-words">{preview.finalTitle}</p>
+            <p className="mt-1 break-words text-sm font-extrabold text-slate-900">{preview.finalTitle}</p>
           </div>
-
-          {/* Description preview */}
-          <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-extrabold uppercase tracking-wider text-indigo-700">
-                Final Description after template
-              </span>
-              <span className="text-[11px] font-bold text-slate-400">
-                {preview.finalDesc.length}/5000 ký tự
-              </span>
+          <div className="rounded-2xl bg-slate-50 p-3 ring-1 ring-inset ring-slate-100">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Description</span>
+              <span className="text-[11px] font-bold text-slate-400">{preview.finalDesc.length}/5000</span>
             </div>
-            <div className="mt-2 max-h-52 overflow-y-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-2.5 font-sans text-xs text-slate-700 break-words">
+            <div className="mt-1.5 max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs text-slate-700">
               {preview.finalDesc}
             </div>
           </div>
-
-          {/* Hashtags preview */}
-          <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-extrabold uppercase tracking-wider text-indigo-700">
-                Final Hashtags ({preview.mergedTags.length})
-              </span>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {preview.mergedTags.map((tag) => {
-                const isLocked = lockedHashtags.some((t) => t.toLowerCase() === tag.toLowerCase());
-                return (
-                  <span
-                    key={tag}
-                    className={`inline-block rounded-lg px-2 py-0.5 text-xs font-bold break-all ${
-                      isLocked ? "bg-indigo-100 text-indigo-800" : "bg-slate-100 text-slate-700"
-                    }`}
-                  >
-                    {tag}
-                    {isLocked ? " (locked)" : ""}
-                  </span>
-                );
-              })}
-            </div>
+          <div className="flex flex-wrap gap-1.5">
+            {preview.mergedTags.map((tag) => {
+              const isLocked = lockedHashtags.some((t) => t.toLowerCase() === tag.toLowerCase());
+              return (
+                <span
+                  key={tag}
+                  className={`inline-block break-all rounded-lg px-2 py-0.5 text-xs font-bold ${
+                    isLocked ? "bg-indigo-100 text-indigo-800" : "bg-slate-100 text-slate-700"
+                  }`}
+                >
+                  {tag}
+                </span>
+              );
+            })}
           </div>
+          {!sampleData.isReal ? (
+            <button type="button" onClick={handleSave} disabled={saving} className={`${btnSmall}`}>
+              Lưu để áp dụng cho video thật
+            </button>
+          ) : null}
         </div>
       </Card>
     </div>

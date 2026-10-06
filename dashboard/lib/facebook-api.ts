@@ -370,6 +370,7 @@ export interface FacebookAiSettingsDto {
   description_template: string;
   locked_hashtags: string[];
   language: string;
+  model?: string | null;
   config_hash?: string;
   created_at?: string | null;
   updated_at?: string | null;
@@ -762,4 +763,14 @@ export async function clearManualHistory(params?: {
       }),
     },
   );
+}
+
+export interface AiModelOption {
+  id: string;
+  label: string;
+  is_default: boolean;
+}
+
+export async function listAiModels(): Promise<{ models: AiModelOption[] }> {
+  return fbFetch<{ models: AiModelOption[] }>(`/api/facebook/ai-models`);
 }
