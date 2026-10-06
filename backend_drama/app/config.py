@@ -40,6 +40,29 @@ class Settings(BaseSettings):
     DRAMA_API_KEY: str | None = None
     DRAMA_API_BASE_URL: str = "https://short-drama-pro.p.rapidapi.com"
     DRAMA_API_TIMEOUT_SECONDS: float = 30.0
+    # Provider failover pool: 1 primary + up to 4 fallbacks. Each slot needs
+    # HOST + KEY (BASE_URL defaults to https://{HOST}). Optional _PROVIDERS
+    # limits the slot to content providers (comma-separated, empty = all).
+    DRAMA_API_PRIMARY_HOST: str | None = None
+    DRAMA_API_PRIMARY_BASE_URL: str | None = None
+    DRAMA_API_PRIMARY_KEY: str | None = None
+    DRAMA_API_PRIMARY_PROVIDERS: str | None = None
+    DRAMA_API_FALLBACK_1_HOST: str | None = None
+    DRAMA_API_FALLBACK_1_BASE_URL: str | None = None
+    DRAMA_API_FALLBACK_1_KEY: str | None = None
+    DRAMA_API_FALLBACK_1_PROVIDERS: str | None = None
+    DRAMA_API_FALLBACK_2_HOST: str | None = None
+    DRAMA_API_FALLBACK_2_BASE_URL: str | None = None
+    DRAMA_API_FALLBACK_2_KEY: str | None = None
+    DRAMA_API_FALLBACK_2_PROVIDERS: str | None = None
+    DRAMA_API_FALLBACK_3_HOST: str | None = None
+    DRAMA_API_FALLBACK_3_BASE_URL: str | None = None
+    DRAMA_API_FALLBACK_3_KEY: str | None = None
+    DRAMA_API_FALLBACK_3_PROVIDERS: str | None = None
+    DRAMA_API_FALLBACK_4_HOST: str | None = None
+    DRAMA_API_FALLBACK_4_BASE_URL: str | None = None
+    DRAMA_API_FALLBACK_4_KEY: str | None = None
+    DRAMA_API_FALLBACK_4_PROVIDERS: str | None = None
 
     def rapidix_key(self) -> str:
         return ((self.RAPIDIX_KEY or "") or (self.RAPIDAPI_KEY or "")).strip()

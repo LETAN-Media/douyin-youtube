@@ -23,9 +23,10 @@ MAX_ATTEMPTS = len(RETRY_BACKOFF_SECONDS) + 1
 class ProviderError(Exception):
     """Typed provider error. Never carries API keys or signed URLs."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.retry_after = retry_after
 
 
 def _redact(obj: Any) -> Any:
@@ -37,6 +38,28 @@ def _redact(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_redact(v) for v in obj]
     return obj
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Retry-After seconds (delta or HTTP date). None when absent/unparseable."""
+    if not value:
+        return None
+    try:
+        seconds = float(str(value).strip())
+        if seconds >= 0:
+            return seconds
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(str(value).strip())
+        import datetime as _dt
+
+        delta = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+        return max(0.0, delta)
+    except Exception:
+        return None
 
 
 def mask_url(url: str) -> str:
@@ -165,6 +188,7 @@ class RapidApiProvider:
     async def _get(self, path: str, params: dict | None = None) -> Any:
         last_error = "unknown"
         code = "TEMPORARY"
+        retry_after: float | None = None
         for attempt in range(MAX_ATTEMPTS):
             try:
                 async with httpx.AsyncClient(
@@ -181,6 +205,9 @@ class RapidApiProvider:
             else:
                 if resp.status_code == 429:
                     last_error, code = "rate limited (429)", "RATE_LIMITED"
+                    retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                elif resp.status_code == 404:
+                    raise ProviderError("NOT_FOUND", "Provider has no such resource.")
                 elif resp.status_code == 403:
                     raise ProviderError(
                         "AUTH_FAILED",
@@ -203,7 +230,8 @@ class RapidApiProvider:
                 logger.info("provider %s, retry %d (%s)", last_error, attempt + 1, _redact(params))
                 await asyncio.sleep(RETRY_BACKOFF_SECONDS[attempt])
                 continue
-            raise ProviderError(code, f"Provider request failed: {last_error}.")
+            raise ProviderError(code, f"Provider request failed: {last_error}.",
+                                retry_after=retry_after)
         raise ProviderError("TEMPORARY", "Provider request failed.")
 
     @staticmethod
@@ -257,7 +285,8 @@ def register_provider(cls: type[DramaProvider]) -> type[DramaProvider]:
     return cls
 
 
-def get_provider(name: str, transport: httpx.AsyncBaseTransport | None = None) -> DramaProvider:
+def get_provider(name: str, transport: httpx.AsyncBaseTransport | None = None,
+                 endpoint=None) -> DramaProvider:
     key = (name or "").strip().lower() or "rapidix"
     cls = PROVIDERS.get(key)
     if cls is None:
@@ -266,4 +295,6 @@ def get_provider(name: str, transport: httpx.AsyncBaseTransport | None = None) -
             "UNSUPPORTED_PROVIDER",
             f"Unknown provider '{name}'. Supported: {supported}.",
         )
-    return cls(transport=transport)
+    if endpoint is None:
+        return cls(transport=transport)
+    return cls(transport=transport, endpoint=endpoint)

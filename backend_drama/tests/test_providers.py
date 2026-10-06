@@ -236,23 +236,31 @@ def test_scanner_uses_registry_provider(db):
         ]})
 
     import app.services.scanner as scanner_mod
+    from app.services.providers import pool as pool_mod
+    from app.models.drama import EpisodePage, NormalizedEpisode
 
-    orig_get_provider = scanner_mod.get_provider
+    seen: dict = {}
 
-    def fake_get_provider(name, transport=None):
-        assert name == "starshort"
-        from app.services.providers.starshort import StarShortProvider
+    async def fake_execute(provider_name, operation, transport=None, **kwargs):
+        seen["provider"] = provider_name
+        seen["operation"] = operation
+        if operation == "get_series":
+            return None, "primary"
+        return EpisodePage(episodes=[
+            NormalizedEpisode(provider="starshort", external_episode_id="e9",
+                              episode_number=9, title="Ep 9"),
+        ], next_cursor=None, has_more=False), "primary"
 
-        return StarShortProvider(transport=httpx.MockTransport(handler))
-
-    scanner_mod.get_provider = fake_get_provider
+    orig_execute = pool_mod.execute
+    pool_mod.execute = fake_execute
     try:
         out = asyncio_run(scan_source(src["id"]))
     finally:
-        scanner_mod.get_provider = orig_get_provider
+        pool_mod.execute = orig_execute
     assert out["inserted"] == 1 and out["episodes_found"] == 1
+    assert seen == {"provider": "starshort", "operation": "list_episodes"}
     items, total = repo.list_episodes(out["series_id"])
-    assert total == 1 and items[0]["episode_number"] == 1
+    assert total == 1 and items[0]["episode_number"] == 9
 
 
 def asyncio_run(coro):

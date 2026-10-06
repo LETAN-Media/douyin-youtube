@@ -31,13 +31,22 @@ logger = logging.getLogger("backend-drama-starshort")
 class StarShortProvider(RapidApiProvider, DramaProvider):
     name = "starshort"
 
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None,
+                 endpoint=None) -> None:
         from ...config import settings
 
+        if endpoint is not None:
+            base_url, host, api_key = endpoint.base_url, endpoint.host, endpoint.api_key
+        else:
+            base_url, host, api_key = (
+                settings.DRAMA_API_BASE_URL or "",
+                settings.DRAMA_API_HOST or "",
+                settings.drama_api_key(),
+            )
         super().__init__(
-            base_url=settings.DRAMA_API_BASE_URL or "",
-            host=settings.DRAMA_API_HOST or "",
-            api_key=settings.drama_api_key(),
+            base_url=base_url,
+            host=host,
+            api_key=api_key,
             timeout_seconds=settings.DRAMA_API_TIMEOUT_SECONDS,
             transport=transport,
         )

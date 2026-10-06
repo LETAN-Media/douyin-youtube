@@ -19,13 +19,29 @@ logger = logging.getLogger("backend-drama-rapidix-provider")
 class RapidixProvider(DramaProvider):
     name = "rapidix"
 
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None,
+                 endpoint=None) -> None:
         super().__init__(transport=transport)
+        self._endpoint = endpoint
         self._client: RapidixClient | None = None
 
     def _get_client(self) -> RapidixClient:
         if self._client is None:
-            self._client = RapidixClient.from_settings(transport=self._transport)
+            if self._endpoint is not None:
+                from ...config import settings
+
+                self._client = RapidixClient(
+                    base_url=self._endpoint.base_url,
+                    host=self._endpoint.host,
+                    api_key=self._endpoint.api_key,
+                    search_path=settings.RAPIDIX_SEARCH_PATH,
+                    episodes_path=settings.RAPIDIX_EPISODES_PATH,
+                    episode_path=settings.RAPIDIX_EPISODE_PATH,
+                    timeout_seconds=settings.RAPIDIX_TIMEOUT_SECONDS,
+                    transport=self._transport,
+                )
+            else:
+                self._client = RapidixClient.from_settings(transport=self._transport)
         return self._client
 
     async def search_series(self, query: str, *, limit: int = 20) -> list[NormalizedSeries]:

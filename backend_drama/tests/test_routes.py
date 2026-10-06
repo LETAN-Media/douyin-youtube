@@ -53,7 +53,9 @@ def test_source_and_scan_flow(db):
     settings.RAPIDIX_EPISODE_PATH = None
     r = c.post(f"/api/drama/sources/{sid}/scan", headers=ADMIN)
     assert r.status_code == 502, r.text
-    assert r.json()["detail"]["error"] in ("NOT_CONFIGURED", "PROVIDER_ERROR")
+    assert r.json()["detail"]["error"] in (
+        "NOT_CONFIGURED", "PROVIDER_ERROR", "ALL_PROVIDERS_FAILED",
+    )
     assert c.post("/api/drama/sources/dsrc_nope/scan", headers=ADMIN).status_code == 404
 
 
