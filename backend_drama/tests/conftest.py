@@ -20,6 +20,9 @@ def db(tmp_path, monkeypatch):
     settings.RAPIDIX_SEARCH_PATH = "/search"
     settings.RAPIDIX_EPISODES_PATH = "/episodes"
     settings.RAPIDIX_EPISODE_PATH = "/episode"
+    settings.DRAMA_API_HOST = "https://test-host.p.rapidapi.com"
+    settings.DRAMA_API_KEY = "test_drama_key"
+    settings.DRAMA_API_BASE_URL = "https://test-host.p.rapidapi.com"
     dbc.reset_client()
     dbc.migrate()
     yield db_file

@@ -33,8 +33,28 @@ class Settings(BaseSettings):
     RAPIDIX_EPISODE_PATH: str | None = None
     RAPIDIX_TIMEOUT_SECONDS: float = 30.0
 
+    # Short Drama Pro hub (multi-provider, RapidAPI marketplace).
+    # Canonical config for new provider adapters; RAPIDIX_* stay for
+    # backward compatibility with existing rapidix data.
+    DRAMA_API_HOST: str = "short-drama-pro.p.rapidapi.com"
+    DRAMA_API_KEY: str | None = None
+    DRAMA_API_BASE_URL: str = "https://short-drama-pro.p.rapidapi.com"
+    DRAMA_API_TIMEOUT_SECONDS: float = 30.0
+
     def rapidix_key(self) -> str:
         return ((self.RAPIDIX_KEY or "") or (self.RAPIDAPI_KEY or "")).strip()
+
+    def drama_api_key(self) -> str:
+        return (
+            (self.DRAMA_API_KEY or "") or self.rapidix_key()
+        ).strip()
+
+    def drama_api_configured(self) -> bool:
+        return bool(
+            self.drama_api_key()
+            and (self.DRAMA_API_HOST or "").strip()
+            and (self.DRAMA_API_BASE_URL or "").strip().rstrip("/")
+        )
 
     def rapidix_configured(self) -> bool:
         return bool(

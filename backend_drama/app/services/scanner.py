@@ -11,15 +11,23 @@ import httpx
 
 from ..db.repositories import drama as repo
 from ..models.drama import EpisodePage
-from .rapidix import PROVIDER, RapidixClient, RapidixError
+from .providers import get_provider
+from .providers.base import ProviderError
+from .rapidix import RapidixError
 
 logger = logging.getLogger("backend-drama-scanner")
+
+
+def client_has_detail(client: Any) -> bool:
+    """Providers without a series-detail endpoint (or test fakes) are
+    skipped: the shell row is enough to enumerate episodes."""
+    return callable(getattr(client, "get_series", None))
 
 
 async def scan_source(
     source_id: str,
     *,
-    client: RapidixClient | None = None,
+    client=None,
     transport: httpx.AsyncBaseTransport | None = None,
     max_pages: int = 20,
 ) -> dict[str, Any]:
@@ -31,11 +39,12 @@ async def scan_source(
             "source_id": source_id, "series_found": 0, "episodes_found": 0,
             "inserted": 0, "existing": 0, "updated": 0, "skipped": True,
         }
-    owned = False
+    provider_name = (source.get("provider") or "rapidix").strip().lower()
     if client is None:
-        client = RapidixClient.from_settings(transport=transport)
-        owned = True
-    _ = owned
+        try:
+            client = get_provider(provider_name, transport=transport)
+        except ProviderError as exc:
+            raise RapidixError("UNSUPPORTED_PROVIDER", str(exc))
 
     external_series_id = source.get("external_series_id")
     if not external_series_id:
@@ -44,12 +53,25 @@ async def scan_source(
             "Source has no external_series_id yet (search-to-source flow lands in Phase 2).",
         )
 
-    # Resolve the series shell first (single episode_details call doubles
-    # as a series probe when the provider lacks a dedicated endpoint).
-    series_row, created_series = repo.upsert_series(
-        source_id=source_id, provider=PROVIDER,
+    # Series shell first (detail filled when the provider has an endpoint).
+    series_row, _ = repo.upsert_series(
+        source_id=source_id, provider=provider_name,
         external_series_id=external_series_id,
     )
+    if client_has_detail(client):
+        try:
+            detail = await client.get_series(external_series_id)
+        except Exception:
+            detail = None
+        if detail is not None:
+            series_row, _ = repo.upsert_series(
+                source_id=source_id, provider=provider_name,
+                external_series_id=external_series_id,
+                title=detail.title, description=detail.description,
+                thumbnail_url=detail.thumbnail_url,
+                total_episodes=detail.total_episodes,
+                metadata={"raw": detail.raw},
+            )
 
     inserted = existing = updated = 0
     found = 0
@@ -60,7 +82,7 @@ async def scan_source(
             page: EpisodePage = await client.list_episodes(
                 external_series_id, cursor=cursor
             )
-        except RapidixError:
+        except (RapidixError, ProviderError):
             raise
         if not page.episodes:
             break

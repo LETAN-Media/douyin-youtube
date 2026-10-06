@@ -68,7 +68,7 @@ def _as_float(value: Any) -> float | None:
 def normalize_series(provider: str, payload: dict[str, Any]) -> NormalizedSeries:
     if not isinstance(payload, dict):
         raise ValueError("Series payload is not an object.")
-    external_id = _first(payload, "id", "book_id", "series_id", "external_id", "sid")
+    external_id = _first(payload, "id", "book_id", "bookId", "series_id", "seriesId", "external_id", "sid", "drama_id", "dramaId")
     if external_id is None or str(external_id).strip() == "":
         raise ValueError("Series payload has no stable id.")
     return NormalizedSeries(
@@ -76,7 +76,7 @@ def normalize_series(provider: str, payload: dict[str, Any]) -> NormalizedSeries
         external_series_id=str(external_id),
         title=_first(payload, "title", "name", "book_title"),
         description=_first(payload, "description", "synopsis", "desc", "summary"),
-        thumbnail_url=_first(payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "image"),
+        thumbnail_url=_first(payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "coverUrl", "image"),
         total_episodes=_as_int(
             _first(payload, "total_episodes", "episode_count", "total", "episodes_total")
         ),
@@ -90,10 +90,11 @@ def normalize_episode(
     if not isinstance(payload, dict):
         raise ValueError("Episode payload is not an object.")
     external_id = _first(
-        payload, "id", "episode_id", "external_id", "chapter_id", "eid"
+        payload, "id", "episode_id", "episodeId", "external_id",
+        "chapter_id", "chapterId", "eid",
     )
     number = _as_int(
-        _first(payload, "episode_number", "episode_num", "number", "ep", "chapter_number", "order")
+        _first(payload, "episode_number", "episodeNumber", "episode_num", "number", "ep", "chapter_number", "chapterNumber", "order")
     )
     if number is None:
         number = fallback_number
@@ -105,7 +106,7 @@ def normalize_episode(
         episode_number=number,
         title=_first(payload, "title", "name", "chapter_title"),
         source_url=_first(payload, "source_url", "url", "link", "share_url"),
-        thumbnail_url=_first(payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "image"),
+        thumbnail_url=_first(payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "coverUrl", "image"),
         duration=_as_float(_first(payload, "duration", "duration_seconds", "length")),
         raw=payload,
     )
