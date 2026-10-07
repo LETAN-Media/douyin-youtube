@@ -23,6 +23,8 @@ _POOL_ERROR_CODES = frozenset({
     "ALL_PROVIDERS_FAILED", "CONFIG_ERROR", "NOT_FOUND", "NOT_CONFIGURED",
     "UNSUPPORTED", "UNSUPPORTED_PROVIDER", "TEMPORARY", "TIMEOUT",
     "RATE_LIMITED", "INVALID_RESPONSE", "AUTH_FAILED",
+    "RAPIDIX_EPISODES_INVALID_REQUEST", "RAPIDIX_SERIES_NOT_FOUND",
+    "RAPIDIX_UPSTREAM_ERROR", "RAPIDIX_RATE_LIMITED",
 })
 
 
@@ -101,13 +103,15 @@ async def scan_source(
     series_row, _ = repo.upsert_series(
         source_id=source_id, provider=provider_name,
         external_series_id=external_series_id,
+        title=source.get("name"),
     )
     detail = await _detail(external_series_id)
     if detail is not None:
         series_row, _ = repo.upsert_series(
             source_id=source_id, provider=provider_name,
             external_series_id=external_series_id,
-            title=detail.title, description=detail.description,
+            title=detail.title or source.get("name"),
+            description=detail.description,
             thumbnail_url=detail.thumbnail_url,
             total_episodes=detail.total_episodes,
             metadata={"raw": detail.raw},
@@ -121,12 +125,14 @@ async def scan_source(
         page = await _page(external_series_id, cursor)
         if not page.episodes:
             break
-        for ep in page.episodes:
+        # Sort numerically
+        for ep in sorted(page.episodes, key=lambda e: int(e.episode_number)):
             found += 1
+            ep_title = ep.title or f"Tập {ep.episode_number}"
             _, outcome = repo.upsert_episode(
                 series_id=series_row["id"], provider=ep.provider,
-                external_episode_id=ep.external_episode_id,
-                episode_number=ep.episode_number, title=ep.title,
+                external_episode_id=ep.external_episode_id or f"{external_series_id}:{ep.episode_number}",
+                episode_number=int(ep.episode_number), title=ep_title,
                 source_url=ep.source_url, thumbnail_url=ep.thumbnail_url,
                 duration=ep.duration,
             )
@@ -140,6 +146,13 @@ async def scan_source(
         if not page.has_more or not cursor:
             cursor = None
             break
+
+    if found > 0:
+        repo.upsert_series(
+            source_id=source_id, provider=provider_name,
+            external_series_id=external_series_id,
+            total_episodes=max(found, (detail.total_episodes or 0) if detail else 0),
+        )
 
     repo.touch_source(source_id, scan_cursor=cursor)
     logger.info(

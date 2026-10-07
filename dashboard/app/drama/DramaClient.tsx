@@ -309,7 +309,17 @@ function ImportDiscoveryModal({
       );
       if (!scanRes.ok) {
         const d = await scanRes.json().catch(() => ({}));
-        throw new Error(d.error || d.message || "Quét nội dung tập phim thất bại.");
+        // Backend nests errors under `detail`: {detail: {error, message}}.
+        const detail = (d as { detail?: { error?: unknown; message?: unknown } }).detail;
+        const code =
+          (typeof detail?.error === "string" && detail.error) ||
+          (typeof d.error === "string" && d.error) ||
+          null;
+        const message =
+          (typeof detail?.message === "string" && detail.message) ||
+          (typeof d.message === "string" && d.message) ||
+          "Quét nội dung tập phim thất bại.";
+        throw new Error(code ? `${message} [${code}]` : message);
       }
 
       onSuccess(targetPipelineId);

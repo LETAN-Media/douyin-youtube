@@ -124,6 +124,21 @@ def create_source(*, pipeline_id: str, provider: str = "rapidix",
                   enabled: bool = True) -> dict[str, Any]:
     if get_pipeline(pipeline_id) is None:
         raise ValueError(f"Pipeline not found: {pipeline_id}")
+    if external_series_id:
+        existing = get_client().execute(
+            "SELECT * FROM drama_sources WHERE pipeline_id = ? AND provider = ? AND external_series_id = ?",
+            (pipeline_id, provider, external_series_id),
+        ).fetchone()
+        if existing:
+            row_id = existing[0] if isinstance(existing, tuple) else existing["id"]
+            if name is not None or enabled is not None:
+                get_client().execute(
+                    "UPDATE drama_sources SET name = COALESCE(?, name), enabled = ? WHERE id = ?",
+                    (name, 1 if enabled else 0, row_id),
+                )
+                get_client().commit()
+            updated = get_client().execute("SELECT * FROM drama_sources WHERE id = ?", (row_id,)).fetchone()
+            return _row_to_source(updated or existing)
     sid = _new_id("dsrc")
     get_client().execute(
         "INSERT INTO drama_sources (id, pipeline_id, provider, source_url, "

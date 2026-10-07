@@ -52,10 +52,7 @@ class RapidixProvider(DramaProvider):
         return await self._get_client().search_series(query, limit=limit)
 
     async def get_series(self, series_id: str) -> NormalizedSeries | None:
-        # Legacy provider has no detail endpoint; the scanner upserts a
-        # shell series row and fills metadata from episode payloads.
-        _ = series_id
-        return None
+        return await self._get_client().get_series(series_id)
 
     async def list_episodes(
         self, series_id: str, *, cursor: str | None = None

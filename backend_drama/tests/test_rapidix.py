@@ -167,3 +167,120 @@ def test_redact_strips_key_material():
     assert red == {"x-rapidapi-key": "<redacted>", "q": "love"}
     red2 = _redact("https://h/p?api-key=SECRETVALUE12345678901234567890")
     assert "SECRETVALUE" not in red2
+
+
+# ---------- import-scan contract (mocked, offline) ----------
+
+HEX_ID = "6a86d7f75eaf4433d8020a8e"
+
+
+def test_search_id_is_upstream_series_id_not_title_or_slug():
+    import asyncio
+    import json as _json
+
+    seen: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        body = _json.loads(req.content.decode())
+        seen.update(body)
+        return httpx.Response(200, json={
+            "data": [{
+                "id": HEX_ID,
+                "title": "Gelombang Sentuhan Terlarang",
+                "slug": "gelombang-sentuhan-terlarang",
+                "image": "https://cdn.example.com/cover.jpg",
+            }]
+        })
+
+    async def _go():
+        client = make_client(transport=httpx.MockTransport(handler))
+        return await client.search_series("Gelombang")
+
+    out = asyncio.run(_go())
+    assert len(out) == 1
+    # The ID used for all-episodes must be the upstream series/book id,
+    # never the title, slug, or a DB id.
+    assert out[0].external_series_id == HEX_ID
+    assert out[0].external_series_id != "Gelombang Sentuhan Terlarang"
+    assert out[0].external_series_id != "gelombang-sentuhan-terlarang"
+
+
+def test_all_episodes_body_and_cursor_roundtrip():
+    import asyncio
+    import json as _json
+
+    bodies: list = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(_json.loads(req.content.decode()))
+        if len(bodies) == 1:
+            return httpx.Response(200, json={
+                "data": [
+                    {"chapter_id": "c1", "serial_number": 2, "video_pic": "https://cdn.example.com/2.jpg"},
+                    {"chapter_id": "c2", "serial_number": 1, "video_pic": "https://cdn.example.com/1.jpg"},
+                ],
+                "next_cursor": "cur_9",
+                "has_more": True,
+            })
+        return httpx.Response(200, json={
+            "data": [{"chapter_id": "c3", "serial_number": 3}],
+            "has_more": False,
+        })
+
+    async def _go():
+        from app.services.providers.rapidix_provider import RapidixProvider
+
+        client = make_client(transport=httpx.MockTransport(handler))
+        p1 = await client.list_episodes(HEX_ID)
+        assert [e.episode_number for e in p1.episodes] == [1, 2]
+        assert p1.next_cursor == "cur_9" and p1.has_more is True
+        p2 = await client.list_episodes(HEX_ID, cursor=p1.next_cursor)
+        assert [e.episode_number for e in p2.episodes] == [3]
+        return p1, p2
+
+    asyncio.run(_go())
+    assert bodies[0] == {"id": HEX_ID}
+    assert bodies[1] == {"id": HEX_ID, "cursor": "cur_9"}
+    assert bodies[1] != bodies[0]
+
+
+def test_nested_online_base_envelope():
+    import asyncio
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "data": {
+                "online_base": [
+                    {"chapter_id": "c1", "serial_number": 1},
+                    {"chapter_id": "c2", "serial_number": 2},
+                ]
+            }
+        })
+
+    async def _go():
+        client = make_client(transport=httpx.MockTransport(handler))
+        return await client.list_episodes(HEX_ID)
+
+    page = asyncio.run(_go())
+    assert [e.external_episode_id for e in page.episodes] == ["c1", "c2"]
+    assert [e.episode_number for e in page.episodes] == [1, 2]
+
+
+def test_episode_numbers_sort_numerically():
+    import asyncio
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "data": [
+                {"chapter_id": "c10", "serial_number": 10},
+                {"chapter_id": "c2", "serial_number": 2},
+                {"chapter_id": "c1", "serial_number": 1},
+            ]
+        })
+
+    async def _go():
+        client = make_client(transport=httpx.MockTransport(handler))
+        return await client.list_episodes(HEX_ID)
+
+    page = asyncio.run(_go())
+    assert [e.episode_number for e in page.episodes] == [1, 2, 10]

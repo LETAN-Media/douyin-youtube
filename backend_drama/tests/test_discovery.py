@@ -173,7 +173,11 @@ def test_discover_one_provider_failure_does_not_break_all(monkeypatch):
     assert any(err["provider"] == "shortmax" and err["status"] == "rate_limited" for err in res["errors"])
 
 
-def test_discover_all_providers_failing_with_no_cache_returns_clean_response(monkeypatch):
+def test_discover_all_providers_failing_with_no_cache_returns_clean_response(db, monkeypatch):
+    from app.services.discovery import clear_discovery_cache
+
+    clear_discovery_cache()
+
     async def fake_execute(provider_name, op, **kwargs):
         raise ProviderError("AUTH_FAILED", "Bad key")
 

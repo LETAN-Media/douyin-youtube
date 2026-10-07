@@ -7,6 +7,7 @@ while /health stays green.
 """
 
 import logging
+import re
 import sqlite3
 import threading
 import concurrent.futures
@@ -15,6 +16,24 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+
+
+def _to_positional(sql: str, parameters: Any) -> tuple[str, list]:
+    """Rewrite :named params to positional ? for the hrana client.
+
+    The repo layer was written against sqlite3 named style; the remote
+    client only binds positionally. Dicts convert in first-appearance
+    order; tuples/lists pass through unchanged.
+    """
+    if isinstance(parameters, dict):
+        names = re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", sql)
+        try:
+            args = [parameters[name] for name in names]
+        except KeyError as exc:
+            raise RuntimeError(f"Missing SQL parameter: {exc}") from exc
+        query = re.sub(r":[A-Za-z_][A-Za-z0-9_]*", "?", sql)
+        return query, args
+    return sql, list(parameters or [])
 
 try:
     import libsql_client
@@ -87,9 +106,10 @@ class RemoteTursoDatabase(BaseDatabase):
         # token is passed securely to auth_token and not logged.
         self._client = libsql_client.create_client_sync(self.url, auth_token=self.token)
 
-    def execute(self, sql: str, parameters: tuple | list = ()) -> Any:
+    def execute(self, sql: str, parameters: tuple | list | dict = ()) -> Any:
         try:
-            rs = self._client.execute(sql, list(parameters))
+            query, args = _to_positional(sql, parameters)
+            rs = self._client.execute(query, args)
             return CursorWrapper(rs)
         except libsql_client.LibsqlError as e:
             logger.error("Turso LibSQL error: %s", type(e).__name__)

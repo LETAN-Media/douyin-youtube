@@ -97,7 +97,7 @@ def normalize_episode(
         "chapter_id", "chapterId", "eid",
     )
     number = _as_int(
-        _first(payload, "episode_number", "episodeNumber", "episode_num", "number", "ep", "chapter_number", "chapterNumber", "order")
+        _first(payload, "episode_number", "episodeNumber", "episode_num", "number", "ep", "chapter_number", "chapterNumber", "serial_number", "serialNumber", "chapter_index", "order", "index")
     )
     if number is None:
         number = fallback_number
@@ -109,7 +109,7 @@ def normalize_episode(
         episode_number=number,
         title=_first(payload, "title", "name", "chapter_title"),
         source_url=_first(payload, "source_url", "url", "link", "share_url"),
-        thumbnail_url=_first(payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "coverUrl", "image"),
+        thumbnail_url=_first(payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "coverUrl", "image", "video_pic", "videoPic"),
         duration=_as_float(_first(payload, "duration", "duration_seconds", "length")),
         raw=payload,
     )

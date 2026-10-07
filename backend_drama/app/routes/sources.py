@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import require_admin
 from ..db.repositories import drama as repo
+from ..services.providers.pool import PoolExhausted
 from ..services.rapidix import RapidixError
 from ..services.scanner import scan_source
 from ._common import _err
@@ -52,5 +53,10 @@ async def scan_one_source(
         return await scan_source(source_id)
     except ValueError as exc:
         raise _err(404, "SOURCE_NOT_FOUND", str(exc))
+    except PoolExhausted as exc:
+        code = exc.code or "PROVIDER_ERROR"
+        if code == "NOT_FOUND":
+            raise _err(404, "PROVIDER_SERIES_NOT_FOUND", str(exc) or "Series not found.")
+        raise _err(502, code, str(exc) or "Provider failed.")
     except RapidixError as exc:
         raise _err(502, exc.code or "PROVIDER_ERROR", str(exc) or "Provider failed.")
