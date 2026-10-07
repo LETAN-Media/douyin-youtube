@@ -296,6 +296,25 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_discovery_cache_provider ON drama_discovery_cache(provider)",
         ],
     ),
+    (
+        "drama_003",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS drama_discovery_snapshots (
+                cache_key TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                query TEXT NOT NULL DEFAULT '',
+                limit_value INTEGER NOT NULL,
+                items_json TEXT NOT NULL,
+                provider_status_json TEXT,
+                fetched_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_discovery_snapshots_provider ON drama_discovery_snapshots(provider)",
+            "CREATE INDEX IF NOT EXISTS idx_discovery_snapshots_updated ON drama_discovery_snapshots(updated_at)",
+        ],
+    ),
 ]
 
 

@@ -22,6 +22,12 @@ async def lifespan(app: FastAPI):
             applied = migrate()
             if applied:
                 logger.info("drama migrations applied: %s", applied)
+            try:
+                import asyncio
+                from .services.discovery import maybe_warmup_discovery
+                asyncio.create_task(maybe_warmup_discovery())
+            except Exception as exc:
+                logger.warning("failed to schedule discovery warmup: %s", exc)
         except Exception as exc:
             logger.exception("drama migration failed: %s", exc)
     else:

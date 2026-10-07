@@ -541,7 +541,6 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
       setProviderErrors(data.errors || []);
     } catch (err: any) {
       setError(err.message || "Lỗi khi kết nối hệ thống khám phá phim");
-      setItems([]);
     } finally {
       setLoading(false);
     }
@@ -647,13 +646,13 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
       )}
 
       {/* Movie Grid */}
-      {loading ? (
+      {loading && items.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-slate-400">
           <Spinner size={36} />
-          <p className="mt-3 text-xs font-medium">Đang tải danh sách phim trực tiếp từ nhà cung cấp...</p>
+          <p className="mt-3 text-xs font-medium">Đang tải danh sách phim...</p>
         </div>
       ) : items.length > 0 ? (
-        <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+        <div className={`grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 ${loading ? "opacity-75 transition-opacity" : ""}`}>
           {items.map((series, idx) => (
             <div
               key={`${series.provider}-${series.external_series_id}-${idx}`}

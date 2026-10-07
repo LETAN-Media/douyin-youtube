@@ -363,3 +363,326 @@ def test_discovery_route_returns_typed_public_diagnostics(monkeypatch):
     assert err["status"] == "temporarily_unavailable"
     assert err["retryable"] is True
     assert err["message"] == "Nguồn phim tạm thời không khả dụng."
+
+
+def test_first_request_live_and_snapshot_saved(db, monkeypatch):
+    from app.services.discovery import clear_discovery_cache, discover_movies
+
+    clear_discovery_cache()
+    calls = {"netshort": 0, "shortmax": 0}
+
+    async def fake_execute(provider_name, op, **kwargs):
+        calls[provider_name] = calls.get(provider_name, 0) + 1
+        from app.models.drama import NormalizedSeries
+
+        if provider_name == "netshort":
+            return [
+                NormalizedSeries(provider="netshort", external_series_id="ns1", title="Live NS 1", total_episodes=10)
+            ], "netshort_hub"
+        elif provider_name == "shortmax":
+            return [
+                NormalizedSeries(provider="shortmax", external_series_id="sm1", title="Live SM 1", total_episodes=20)
+            ], "shortmax_hub"
+        return [], "hub"
+
+    import asyncio
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    res = asyncio.run(discover_movies(provider="all", query="", limit=10))
+    assert res["source"] == "live"
+    assert res["stale"] is False
+    assert len(res["items"]) == 2
+    assert calls["netshort"] == 1
+    assert calls["shortmax"] == 1
+
+    # Verify snapshot was saved in Turso
+    snap = repo.get_discovery_snapshot("all::10")
+    assert snap is not None
+    assert snap["provider"] == "all"
+    assert len(snap["items"]) == 2
+    assert snap["items"][0]["title"] == "Live NS 1"
+
+
+def test_second_request_serves_from_turso_zero_upstream_calls(db, monkeypatch):
+    import asyncio
+    from app.services.discovery import clear_discovery_cache, discover_movies
+
+    # Seed Turso snapshot
+    repo.upsert_discovery_snapshot(
+        cache_key="all::10",
+        provider="all",
+        query="",
+        limit_value=10,
+        items=[
+            {"provider": "netshort", "external_series_id": "seed1", "title": "Cached Turso Movie"}
+        ],
+        provider_status={"netshort": {"status": "ok", "count": 1}},
+    )
+
+    # Clear RAM cache
+    clear_discovery_cache()
+
+    # Upstream should NEVER be called
+    upstream_called = False
+
+    async def fake_execute(*args, **kwargs):
+        nonlocal upstream_called
+        upstream_called = True
+        return [], "hub"
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    res = asyncio.run(discover_movies(provider="all", query="", limit=10))
+    assert upstream_called is False
+    assert res["source"] == "cache"
+    assert res["stale"] is False
+    assert res["refreshing"] is False
+    assert len(res["items"]) == 1
+    assert res["items"][0]["title"] == "Cached Turso Movie"
+
+
+def test_stale_cache_returns_turso_immediately_and_schedules_background_refresh(db, monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from app.services.discovery import clear_discovery_cache, discover_movies, wait_for_refresh
+
+    # 30 minutes old snapshot (stale: > 15m but < 7d)
+    stale_time = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    repo.upsert_discovery_snapshot(
+        cache_key="all::10",
+        provider="all",
+        query="",
+        limit_value=10,
+        items=[
+            {"provider": "netshort", "external_series_id": "old1", "title": "Old Movie"}
+        ],
+        fetched_at=stale_time,
+    )
+    clear_discovery_cache()
+
+    refreshed = False
+
+    async def fake_execute(provider_name, op, **kwargs):
+        nonlocal refreshed
+        refreshed = True
+        from app.models.drama import NormalizedSeries
+
+        if provider_name == "netshort":
+            return [
+                NormalizedSeries(provider="netshort", external_series_id="new1", title="Refreshed Movie")
+            ], "hub"
+        return [], "hub"
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    async def _test():
+        res = await discover_movies(provider="all", query="", limit=10)
+        # Should return cached data immediately
+        assert res["source"] == "cache"
+        assert res["stale"] is True
+        assert res["refreshing"] is True
+        assert res["items"][0]["title"] == "Old Movie"
+
+        # Now await background refresh
+        await wait_for_refresh("all::10")
+
+        # Snapshot should now be updated in Turso
+        updated_snap = repo.get_discovery_snapshot("all::10")
+        assert updated_snap is not None
+        assert updated_snap["items"][0]["title"] == "Refreshed Movie"
+
+    asyncio.run(_test())
+    assert refreshed is True
+
+
+def test_background_refresh_failure_preserves_old_turso_cache(db, monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from app.services.discovery import clear_discovery_cache, discover_movies, wait_for_refresh
+
+    stale_time = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    repo.upsert_discovery_snapshot(
+        cache_key="all::10",
+        provider="all",
+        query="",
+        limit_value=10,
+        items=[
+            {"provider": "netshort", "external_series_id": "good1", "title": "Good Movie"}
+        ],
+        fetched_at=stale_time,
+    )
+    clear_discovery_cache()
+
+    async def fake_execute(*args, **kwargs):
+        raise ProviderError("ALL_PROVIDERS_FAILED", "502 Bad Gateway")
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    async def _test():
+        res = await discover_movies(provider="all", query="", limit=10)
+        assert res["items"][0]["title"] == "Good Movie"
+        await wait_for_refresh("all::10")
+
+        # Preserved!
+        preserved_snap = repo.get_discovery_snapshot("all::10")
+        assert preserved_snap is not None
+        assert len(preserved_snap["items"]) == 1
+        assert preserved_snap["items"][0]["title"] == "Good Movie"
+
+    asyncio.run(_test())
+
+
+def test_concurrent_requests_only_one_background_refresh(db, monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from app.services.discovery import clear_discovery_cache, discover_movies, wait_for_refresh
+
+    stale_time = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    repo.upsert_discovery_snapshot(
+        cache_key="all::10",
+        provider="all",
+        query="",
+        limit_value=10,
+        items=[
+            {"provider": "netshort", "external_series_id": "c1", "title": "Concurrent Movie"}
+        ],
+        fetched_at=stale_time,
+    )
+    clear_discovery_cache()
+
+    refresh_call_count = 0
+
+    async def fake_execute(provider_name, op, **kwargs):
+        nonlocal refresh_call_count
+        refresh_call_count += 1
+        await asyncio.sleep(0.05)
+        from app.models.drama import NormalizedSeries
+
+        return [
+            NormalizedSeries(provider="netshort", external_series_id="c2", title="Fresh Movie")
+        ], "hub"
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    async def _test():
+        results = await asyncio.gather(*[
+            discover_movies(provider="all", query="", limit=10)
+            for _ in range(5)
+        ])
+        assert len(results) == 5
+        for r in results:
+            assert r["items"][0]["title"] == "Concurrent Movie"
+        await wait_for_refresh("all::10")
+
+    asyncio.run(_test())
+    # Upstream executed for the target providers only once per refresh cycle (2 providers: netshort + shortmax)
+    assert refresh_call_count == 2
+
+
+def test_keyword_search_cached_per_exact_query(db, monkeypatch):
+    import asyncio
+    from app.services.discovery import clear_discovery_cache, discover_movies
+
+    search_calls = 0
+
+    async def fake_execute(provider_name, op, **kwargs):
+        nonlocal search_calls
+        search_calls += 1
+        q = kwargs.get("query", "")
+        from app.models.drama import NormalizedSeries
+
+        return [
+            NormalizedSeries(provider=provider_name, external_series_id=f"id_{q}", title=f"Title for {q}")
+        ], "hub"
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    # 1. Search "boss" -> calls live
+    res1 = asyncio.run(discover_movies(provider="rapidix", query="boss", limit=10))
+    assert res1["items"][0]["title"] == "Title for boss"
+    call_count_after_first = search_calls
+    assert call_count_after_first > 0
+
+    # 2. Clear RAM cache -> second search for "boss" loads from Turso snapshot without upstream call
+    clear_discovery_cache()
+    res2 = asyncio.run(discover_movies(provider="rapidix", query="boss", limit=10))
+    assert res2["items"][0]["title"] == "Title for boss"
+    assert search_calls == call_count_after_first
+
+    # 3. Search for "hero" -> different cache_key, must call upstream
+    clear_discovery_cache()
+    res3 = asyncio.run(discover_movies(provider="rapidix", query="hero", limit=10))
+    assert res3["items"][0]["title"] == "Title for hero"
+    assert search_calls > call_count_after_first
+
+
+def test_provider_filters_maintain_independent_snapshots(db, monkeypatch):
+    import asyncio
+    from app.services.discovery import clear_discovery_cache, discover_movies
+
+    repo.upsert_discovery_snapshot(
+        cache_key="rapidix::10",
+        provider="rapidix",
+        query="",
+        limit_value=10,
+        items=[{"provider": "rapidix", "external_series_id": "rx1", "title": "Rapid Movie"}],
+    )
+    repo.upsert_discovery_snapshot(
+        cache_key="netshort::10",
+        provider="netshort",
+        query="",
+        limit_value=10,
+        items=[{"provider": "netshort", "external_series_id": "ns1", "title": "NetShort Movie"}],
+    )
+    clear_discovery_cache()
+
+    upstream_called = False
+
+    async def fake_execute(*args, **kwargs):
+        nonlocal upstream_called
+        upstream_called = True
+        return [], "hub"
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    res_rx = asyncio.run(discover_movies(provider="rapidix", query="", limit=10))
+    assert res_rx["items"][0]["title"] == "Rapid Movie"
+    assert res_rx["items"][0]["provider"] == "rapidix"
+
+    res_ns = asyncio.run(discover_movies(provider="netshort", query="", limit=10))
+    assert res_ns["items"][0]["title"] == "NetShort Movie"
+    assert res_ns["items"][0]["provider"] == "netshort"
+
+    assert upstream_called is False
+
+
+def test_restart_simulation_clear_ram_uses_turso_snapshot_without_upstream(db, monkeypatch):
+    import asyncio
+    from app.services.discovery import clear_discovery_cache, discover_movies
+
+    repo.upsert_discovery_snapshot(
+        cache_key="all::20",
+        provider="all",
+        query="",
+        limit_value=20,
+        items=[{"provider": "netshort", "external_series_id": "restart1", "title": "Post Restart Movie"}],
+    )
+
+    clear_discovery_cache()
+
+    calls = 0
+
+    async def fake_execute(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return [], "hub"
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    res = asyncio.run(discover_movies(provider="all", query="", limit=20))
+    assert calls == 0
+    assert res["source"] == "cache"
+    assert res["stale"] is False
+    assert res["items"][0]["title"] == "Post Restart Movie"
+

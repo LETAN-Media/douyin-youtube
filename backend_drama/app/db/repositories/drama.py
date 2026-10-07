@@ -442,3 +442,90 @@ def get_discovery_cache_items(
             "total_episodes": r["total_episodes"],
         })
     return out
+
+
+def upsert_discovery_snapshot(
+    *,
+    cache_key: str,
+    provider: str,
+    query: str = "",
+    limit_value: int,
+    items: list[dict[str, Any]],
+    provider_status: dict[str, Any] | None = None,
+    fetched_at: str | None = None,
+) -> None:
+    """Persist or update an entire discovery result set snapshot."""
+    client = get_client()
+    now_str = _now()
+    fetch_str = fetched_at or now_str
+    items_json = json.dumps(items)
+    status_json = json.dumps(provider_status) if provider_status is not None else None
+
+    client.execute(
+        """
+        INSERT INTO drama_discovery_snapshots
+            (cache_key, provider, query, limit_value, items_json, provider_status_json, fetched_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(cache_key) DO UPDATE SET
+            provider = excluded.provider,
+            query = excluded.query,
+            limit_value = excluded.limit_value,
+            items_json = excluded.items_json,
+            provider_status_json = excluded.provider_status_json,
+            fetched_at = excluded.fetched_at,
+            updated_at = excluded.updated_at
+        """,
+        (
+            cache_key,
+            provider,
+            query,
+            limit_value,
+            items_json,
+            status_json,
+            fetch_str,
+            now_str,
+        ),
+    )
+    client.commit()
+
+
+def get_discovery_snapshot(cache_key: str) -> dict[str, Any] | None:
+    """Retrieve discovery snapshot by cache_key."""
+    client = get_client()
+    cursor = client.execute(
+        "SELECT cache_key, provider, query, limit_value, items_json, provider_status_json, fetched_at, updated_at "
+        "FROM drama_discovery_snapshots WHERE cache_key = ?",
+        (cache_key,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+
+    def _get(key: str, idx: int):
+        try:
+            return row[key]
+        except Exception:
+            return row[idx]
+
+    raw_items = _get("items_json", 4)
+    raw_status = _get("provider_status_json", 5)
+    try:
+        items = json.loads(raw_items) if raw_items else []
+    except Exception:
+        items = []
+    try:
+        provider_status = json.loads(raw_status) if raw_status else {}
+    except Exception:
+        provider_status = {}
+
+    return {
+        "cache_key": _get("cache_key", 0),
+        "provider": _get("provider", 1),
+        "query": _get("query", 2),
+        "limit_value": _get("limit_value", 3),
+        "items": items,
+        "provider_status": provider_status,
+        "fetched_at": _get("fetched_at", 6),
+        "updated_at": _get("updated_at", 7),
+    }
+

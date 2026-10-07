@@ -88,6 +88,8 @@ export interface DramaDiscoveryResponseDto {
   errors: DramaProviderErrorDto[];
   source?: "live" | "cache" | "mixed" | string;
   stale?: boolean;
+  refreshing?: boolean;
+  fetched_at?: string;
 }
 
 export interface DramaEpisodeDto {
