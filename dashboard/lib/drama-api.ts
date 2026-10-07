@@ -64,11 +64,29 @@ export interface DramaDiscoverySeriesDto {
   total_episodes: number | null;
 }
 
+export interface DramaProviderErrorDto {
+  provider: string;
+  status: "temporarily_unavailable" | "rate_limited" | "not_supported" | "upstream_error" | string;
+  code?: string;
+  message: string;
+  retryable?: boolean;
+}
+
+export interface DramaProviderStatusDto {
+  status: "ok" | "temporarily_unavailable" | "rate_limited" | "not_supported" | "upstream_error" | "unsupported" | string;
+  count?: number;
+  reason?: string;
+  code?: string;
+  message?: string;
+  retryable?: boolean;
+  upstream?: string;
+}
+
 export interface DramaDiscoveryResponseDto {
   items: DramaDiscoverySeriesDto[];
-  providers: Record<string, { status: string; count?: number; reason?: string; code?: string }>;
-  errors: Array<{ provider: string; code?: string; message?: string }>;
-  source?: "live" | "cache" | "mixed";
+  providers: Record<string, DramaProviderStatusDto>;
+  errors: DramaProviderErrorDto[];
+  source?: "live" | "cache" | "mixed" | string;
   stale?: boolean;
 }
 

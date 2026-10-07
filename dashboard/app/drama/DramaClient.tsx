@@ -28,6 +28,8 @@ import type {
   DramaSummaryDto,
   DramaDiscoverySeriesDto,
   DramaDiscoveryResponseDto,
+  DramaProviderErrorDto,
+  DramaProviderStatusDto,
 } from "@/lib/drama-api";
 
 function CreatePipelineModal({ onClose }: { onClose: () => void }) {
@@ -465,13 +467,39 @@ const DISCOVERY_PROVIDERS = [
   { id: "flickshort", label: "FlickShort" },
 ];
 
+const PROVIDER_LABELS: Record<string, string> = {
+  shortmax: "ShortMax",
+  netshort: "NetShort",
+  starshort: "StarShort",
+  dramabox: "DramaBox",
+  flickshort: "FlickShort",
+  rapidix: "RapidIX",
+  reelshort_sdp: "ReelShort",
+};
+
+export function getProviderDisplayName(id: string): string {
+  const norm = (id || "").toLowerCase();
+  return PROVIDER_LABELS[norm] || (id ? id.charAt(0).toUpperCase() + id.slice(1) : "Không xác định");
+}
+
+export function getProviderWarningTitle(errs: DramaProviderErrorDto[]): string {
+  if (!errs || errs.length === 0) return "";
+  if (errs.length === 1) {
+    const name = getProviderDisplayName(errs[0].provider);
+    return `${name} tạm thời không khả dụng.`;
+  }
+  const names = errs.map((e) => getProviderDisplayName(e.provider)).join(", ");
+  return `Một số nguồn phim đang tạm thời không khả dụng: ${names}.`;
+}
+
 export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[] }) {
   const router = useRouter();
   const [selectedProvider, setSelectedProvider] = useState("all");
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<DramaDiscoverySeriesDto[]>([]);
-  const [providerStatuses, setProviderStatuses] = useState<Record<string, any>>({});
-  const [providerErrors, setProviderErrors] = useState<any[]>([]);
+  const [providerStatuses, setProviderStatuses] = useState<Record<string, DramaProviderStatusDto>>({});
+  const [providerErrors, setProviderErrors] = useState<DramaProviderErrorDto[]>([]);
+  const [showTechDetails, setShowTechDetails] = useState(false);
   const [isStale, setIsStale] = useState(false);
   const [discoverySource, setDiscoverySource] = useState<string>("live");
   const [loading, setLoading] = useState(false);
@@ -583,16 +611,33 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
 
       {/* Provider Warning / Notice Banner */}
       {providerErrors.length > 0 && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-800 flex items-start gap-2">
-          <IconAlert size={16} className="text-amber-600 shrink-0 mt-0.5" />
-          <div className="min-w-0">
-            <span className="font-bold">Lưu ý kết nối nhà cung cấp: </span>
-            {providerErrors.map((e, idx) => (
-              <span key={idx} className="mr-2">
-                {e.provider}: {e.code || "Lỗi tạm thời"}
-              </span>
-            ))}
+        <div className="rounded-xl border border-amber-200/90 bg-amber-50/80 p-3.5 text-xs text-amber-800 shadow-sm transition">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <IconAlert size={16} className="text-amber-600 shrink-0" />
+              <span className="font-semibold truncate">{getProviderWarningTitle(providerErrors)}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowTechDetails((prev) => !prev)}
+              className="text-[11px] font-medium text-amber-700 hover:text-amber-900 underline underline-offset-2 shrink-0 transition"
+            >
+              {showTechDetails ? "Ẩn chi tiết kỹ thuật ▴" : "Chi tiết kỹ thuật ▾"}
+            </button>
           </div>
+          {showTechDetails && (
+            <div className="mt-2.5 pt-2 border-t border-amber-200/70 space-y-1 text-[11px] text-amber-900/80 font-mono">
+              {providerErrors.map((e, idx) => (
+                <div key={idx} className="flex items-center justify-between gap-2">
+                  <span>
+                    <strong className="font-semibold text-amber-950">{getProviderDisplayName(e.provider)}:</strong>{" "}
+                    {e.status} {e.code ? `(${e.code})` : ""}
+                  </span>
+                  <span className="text-[10px] text-amber-700 truncate">{e.message}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -670,16 +715,35 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
         </div>
       ) : hasSearched && !error ? (
         providerErrors.length > 0 ? (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-8 text-center shadow-sm sm:p-12">
+          <div className="rounded-2xl border border-amber-200/90 bg-amber-50/80 p-8 text-center shadow-sm sm:p-12">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-100 text-amber-600">
               <IconAlert size={28} />
             </div>
             <h3 className="mt-4 text-base font-extrabold text-amber-900">
-              Nhà cung cấp phim tạm thời không khả dụng
+              Hiện chưa thể tải danh sách phim từ nhà cung cấp. Vui lòng thử lại sau.
             </h3>
             <p className="mx-auto mt-1.5 max-w-md text-xs text-amber-700">
-              Các nhà cung cấp thượng nguồn đang bảo trì hoặc gặp sự cố kết nối. Vui lòng thử lại sau ít phút hoặc tìm kiếm với từ khóa khác (ví dụ: RapidIX).
+              Các nhà cung cấp thượng nguồn đang bảo trì hoặc gặp sự cố kết nối. Bạn có thể thử lại sau ít phút hoặc tìm kiếm với nhà cung cấp khác.
             </p>
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => setShowTechDetails((prev) => !prev)}
+                className="text-xs font-semibold text-amber-800 hover:text-amber-950 underline underline-offset-2"
+              >
+                {showTechDetails ? "Ẩn chi tiết kỹ thuật ▴" : "Chi tiết kỹ thuật ▾"}
+              </button>
+              {showTechDetails && (
+                <div className="mt-3 mx-auto max-w-md rounded-xl bg-amber-100/70 p-3 text-left font-mono text-[11px] text-amber-900 space-y-1">
+                  {providerErrors.map((e, idx) => (
+                    <div key={idx} className="flex items-center justify-between gap-2">
+                      <strong>{getProviderDisplayName(e.provider)}:</strong>
+                      <span>{e.status} {e.code ? `(${e.code})` : ""}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <EmptyState

@@ -57,6 +57,11 @@ class ProviderEndpoint:
     enabled: bool = True
     providers: tuple[str, ...] = ()  # empty = serves all content providers
 
+    @property
+    def vendor_group(self) -> str:
+        """Normalized vendor group host to detect same-vendor slots."""
+        return self.host.lower().strip()
+
     def serves(self, provider_name: str) -> bool:
         if not self.enabled:
             return False
@@ -185,7 +190,9 @@ def pool_health(endpoints: list[ProviderEndpoint] | None = None) -> dict[str, di
         out[ep.name] = {
             "status": endpoint_status(ep.name),
             "host": ep.host,
+            "vendor_group": ep.vendor_group,
             "last_http": state.last_http,
+            "last_error_code": state.last_code,
         }
     return out
 
@@ -195,7 +202,6 @@ def _record_success(name: str, http_status: int | None = None) -> None:
     state.consecutive_failures = 0
     state.unhealthy_until = 0.0
     state.probing = False
-    state.opened = False
     state.opened = False
     state.rate_limited_until = 0.0
     state.last_http = http_status
@@ -288,7 +294,21 @@ async def execute(
             [],
         )
     attempts: list[dict[str, str]] = []
+    failed_vendor_groups: set[str] = set()
+
     for ep in endpoints:
+        if ep.vendor_group in failed_vendor_groups:
+            logger.info(
+                "upstream=%s host=%s skipped (vendor_group=%s down with vendor-wide outage)",
+                ep.name, ep.host, ep.vendor_group,
+            )
+            attempts.append({
+                "endpoint": ep.name,
+                "vendor_group": ep.vendor_group,
+                "code": "VENDOR_DOWN",
+            })
+            continue
+
         usable, _reason = _is_usable(ep, time.monotonic())
         if not usable:
             continue
@@ -298,6 +318,11 @@ async def execute(
         except Exception as exc:
             code = getattr(exc, "code", "TEMPORARY") or "TEMPORARY"
             http_status = getattr(exc, "http_status", None)
+
+            # Vendor-wide outage (502, 503, 504): short-circuit remaining slots in this vendor group
+            if http_status in (502, 503, 504):
+                failed_vendor_groups.add(ep.vendor_group)
+
             if code in CONFIG_ERROR_CODES:
                 _record_failure(ep.name, code=code, http_status=http_status)
                 logger.warning(

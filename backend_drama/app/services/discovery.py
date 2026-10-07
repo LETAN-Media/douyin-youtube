@@ -37,6 +37,43 @@ def clear_discovery_cache() -> None:
     _cache.clear()
 
 
+def normalize_provider_error(
+    provider: str,
+    code: str | None = None,
+    raw_message: str = "",
+) -> dict[str, Any]:
+    """Map internal error codes into a typed, public diagnostic dictionary."""
+    c = (code or "").strip().upper()
+    if c == "RATE_LIMITED":
+        status = "rate_limited"
+        msg = "Nguồn phim đang bị giới hạn tần suất yêu cầu. Vui lòng thử lại sau."
+        retryable = True
+    elif c in ("UNSUPPORTED", "UNSUPPORTED_PROVIDER", "NOT_SUPPORTED"):
+        status = "not_supported"
+        msg = "Nguồn phim không hỗ trợ tính năng này."
+        retryable = False
+    elif c in ("CONFIG_ERROR", "AUTH_FAILED", "NOT_CONFIGURED", "SUBSCRIPTION_ERROR"):
+        status = "upstream_error"
+        msg = "Cấu hình nguồn phim chưa hoàn tất hoặc gặp lỗi kết nối."
+        retryable = False
+    elif c in ("ALL_PROVIDERS_FAILED", "VENDOR_DOWN", "TEMPORARY", "TIMEOUT", "UNAVAILABLE", "NETWORK", "HOST_UNREACHABLE", "ERROR"):
+        status = "temporarily_unavailable"
+        msg = "Nguồn phim tạm thời không khả dụng."
+        retryable = True
+    else:
+        status = "upstream_error"
+        msg = "Nguồn phim tạm thời không khả dụng."
+        retryable = True
+
+    return {
+        "provider": provider,
+        "status": status,
+        "code": c or "ERROR",
+        "message": msg,
+        "retryable": retryable,
+    }
+
+
 async def discover_movies(
     *,
     provider: str = "all",
@@ -106,45 +143,33 @@ async def discover_movies(
             }
         except pool_mod.PoolExhausted as exc:
             code = getattr(exc, "code", "UNAVAILABLE")
-            if code == "UNSUPPORTED":
-                providers_status[p_name] = {
-                    "status": "unsupported",
-                    "reason": "Provider does not support this operation",
-                }
-            else:
-                providers_status[p_name] = {"status": "error", "code": code}
-                errors.append(
-                    {
-                        "provider": p_name,
-                        "code": code,
-                        "message": str(exc),
-                    }
-                )
+            norm_err = normalize_provider_error(p_name, code=code, raw_message=str(exc))
+            providers_status[p_name] = {
+                "status": norm_err["status"],
+                "code": norm_err["code"],
+                "message": norm_err["message"],
+                "retryable": norm_err["retryable"],
+            }
+            errors.append(norm_err)
         except ProviderError as exc:
-            if exc.code == "UNSUPPORTED":
-                providers_status[p_name] = {
-                    "status": "unsupported",
-                    "reason": "Provider does not support this operation",
-                }
-            else:
-                providers_status[p_name] = {"status": "error", "code": exc.code}
-                errors.append(
-                    {
-                        "provider": p_name,
-                        "code": exc.code,
-                        "message": str(exc),
-                    }
-                )
+            norm_err = normalize_provider_error(p_name, code=exc.code, raw_message=str(exc))
+            providers_status[p_name] = {
+                "status": norm_err["status"],
+                "code": norm_err["code"],
+                "message": norm_err["message"],
+                "retryable": norm_err["retryable"],
+            }
+            errors.append(norm_err)
         except Exception as exc:
             logger.warning("discovery error on provider=%s: %s", p_name, exc)
-            providers_status[p_name] = {"status": "error", "code": "ERROR"}
-            errors.append(
-                {
-                    "provider": p_name,
-                    "code": "ERROR",
-                    "message": str(exc),
-                }
-            )
+            norm_err = normalize_provider_error(p_name, code="ERROR", raw_message=str(exc))
+            providers_status[p_name] = {
+                "status": norm_err["status"],
+                "code": norm_err["code"],
+                "message": norm_err["message"],
+                "retryable": norm_err["retryable"],
+            }
+            errors.append(norm_err)
 
     # Fetch providers concurrently
     await asyncio.gather(*[_fetch_one(p) for p in target_providers])

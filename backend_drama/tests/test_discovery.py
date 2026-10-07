@@ -169,8 +169,8 @@ def test_discover_one_provider_failure_does_not_break_all(monkeypatch):
     assert res["source"] == "live"
     assert res["stale"] is False
     assert res["providers"]["netshort"]["status"] == "ok"
-    assert res["providers"]["shortmax"]["status"] == "error"
-    assert any(err["provider"] == "shortmax" for err in res["errors"])
+    assert res["providers"]["shortmax"]["status"] == "rate_limited"
+    assert any(err["provider"] == "shortmax" and err["status"] == "rate_limited" for err in res["errors"])
 
 
 def test_discover_all_providers_failing_with_no_cache_returns_clean_response(monkeypatch):
@@ -303,3 +303,59 @@ def test_import_flow_persists_only_after_scan(db, monkeypatch):
     inv = c.get(f"/api/drama/pipelines/{p['id']}/inventory", headers=ADMIN).json()
     assert inv["total"] == 2
     assert [e["episode_number"] for e in inv["items"]] == [1, 2]
+
+
+def test_normalize_provider_error_mapping():
+    from app.services.discovery import normalize_provider_error
+
+    err_rate = normalize_provider_error("shortmax", "RATE_LIMITED")
+    assert err_rate["status"] == "rate_limited"
+    assert err_rate["retryable"] is True
+    assert "giới hạn tần suất" in err_rate["message"]
+
+    err_outage = normalize_provider_error("netshort", "ALL_PROVIDERS_FAILED")
+    assert err_outage["status"] == "temporarily_unavailable"
+    assert err_outage["retryable"] is True
+    assert "tạm thời không khả dụng" in err_outage["message"]
+
+    err_vendor = normalize_provider_error("starshort", "VENDOR_DOWN")
+    assert err_vendor["status"] == "temporarily_unavailable"
+    assert err_vendor["retryable"] is True
+
+    err_unsupported = normalize_provider_error("rapidix", "UNSUPPORTED")
+    assert err_unsupported["status"] == "not_supported"
+    assert err_unsupported["retryable"] is False
+
+    err_auth = normalize_provider_error("dramabox", "AUTH_FAILED")
+    assert err_auth["status"] == "upstream_error"
+    assert err_auth["retryable"] is False
+
+
+def test_discovery_route_returns_typed_public_diagnostics(monkeypatch):
+    c = _client()
+
+    async def fake_execute(provider_name, op, **kwargs):
+        from app.models.drama import NormalizedSeries
+        if provider_name == "shortmax":
+            raise ProviderError("TEMPORARY", "502 Bad Gateway", http_status=502)
+        elif provider_name == "netshort":
+            return [
+                NormalizedSeries(provider="netshort", external_series_id="ns_live", title="Live NetShort", total_episodes=50)
+            ], "netshort_hub"
+        return [], "hub"
+
+    monkeypatch.setattr(pool_mod, "execute", fake_execute)
+
+    r = c.get("/api/drama/discover?provider=all&limit=20", headers=ADMIN)
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["items"]) == 1
+    assert data["items"][0]["title"] == "Live NetShort"
+
+    # errors list must contain normalized typed structure
+    assert len(data["errors"]) == 1
+    err = data["errors"][0]
+    assert err["provider"] == "shortmax"
+    assert err["status"] == "temporarily_unavailable"
+    assert err["retryable"] is True
+    assert err["message"] == "Nguồn phim tạm thời không khả dụng."

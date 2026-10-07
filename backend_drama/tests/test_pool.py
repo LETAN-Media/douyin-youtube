@@ -373,3 +373,83 @@ def test_providers_health_endpoint_has_no_secrets(db):
     blob = r.text.lower()
     assert "rapidapi-key" not in blob and "api_key" not in blob
     assert isinstance(body, dict)
+    providers = r.json()["providers"]
+    assert isinstance(providers, list)
+    assert any(p["provider"] == "shortmax" for p in providers)
+    assert all("vendor_group" in p and "status" in p for p in providers)
+
+
+def test_same_vendor_502_skips_redundant_slots(monkeypatch):
+    import app.services.providers.base as base_mod
+
+    calls: list = []
+
+    class FakeOutageAdapter:
+        def __init__(self, transport=None, endpoint=None):
+            self._endpoint = endpoint
+
+        async def search_series(self, *args, **kwargs):
+            calls.append(self._endpoint.name)
+            if self._endpoint.name == "primary":
+                raise ProviderError("TEMPORARY", "502 Bad Gateway", http_status=502)
+            elif self._endpoint.name == "fallback_1":
+                raise AssertionError("fallback_1 should have been skipped due to same-vendor outage!")
+            return ["ok_fallback_2"]
+
+    orig = base_mod.PROVIDERS.copy()
+    base_mod.PROVIDERS["starshort"] = FakeOutageAdapter
+    pool_mod.reset_pool_state()
+    monkeypatch.setattr(
+        pool_mod,
+        "load_pool_from_settings",
+        lambda: [
+            pool_mod.ProviderEndpoint("primary", "vendor-a.com", "https://vendor-a.com", "k1", 0, True, ()),
+            pool_mod.ProviderEndpoint("fallback_1", "vendor-a.com", "https://vendor-a.com", "k2", 1, True, ()),
+            pool_mod.ProviderEndpoint("fallback_2", "vendor-b.com", "https://vendor-b.com", "k3", 2, True, ()),
+        ],
+    )
+    try:
+        result, ep = run(pool_mod.execute("starshort", "search_series", query="love"))
+        assert result == ["ok_fallback_2"]
+        assert ep == "fallback_2"
+        assert calls == ["primary", "fallback_2"]
+        assert "fallback_1" not in calls
+    finally:
+        base_mod.PROVIDERS.clear()
+        base_mod.PROVIDERS.update(orig)
+
+
+def test_same_vendor_429_tries_independent_secondary_key(monkeypatch):
+    import app.services.providers.base as base_mod
+
+    calls: list = []
+
+    class FakeRateLimitAdapter:
+        def __init__(self, transport=None, endpoint=None):
+            self._endpoint = endpoint
+
+        async def search_series(self, *args, **kwargs):
+            calls.append(self._endpoint.name)
+            if self._endpoint.name == "primary":
+                raise ProviderError("RATE_LIMITED", "429 Too Many Requests", http_status=429, retry_after=60.0)
+            return ["ok_secondary_key"]
+
+    orig = base_mod.PROVIDERS.copy()
+    base_mod.PROVIDERS["starshort"] = FakeRateLimitAdapter
+    pool_mod.reset_pool_state()
+    monkeypatch.setattr(
+        pool_mod,
+        "load_pool_from_settings",
+        lambda: [
+            pool_mod.ProviderEndpoint("primary", "vendor-a.com", "https://vendor-a.com", "k1", 0, True, ()),
+            pool_mod.ProviderEndpoint("fallback_1", "vendor-a.com", "https://vendor-a.com", "k2", 1, True, ()),
+        ],
+    )
+    try:
+        result, ep = run(pool_mod.execute("starshort", "search_series", query="love"))
+        assert result == ["ok_secondary_key"]
+        assert ep == "fallback_1"
+        assert calls == ["primary", "fallback_1"]  # independent key was tried!
+    finally:
+        base_mod.PROVIDERS.clear()
+        base_mod.PROVIDERS.update(orig)
