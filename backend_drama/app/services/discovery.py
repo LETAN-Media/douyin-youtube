@@ -1,7 +1,9 @@
-"""Live Drama Discovery Service (multi-provider aggregation & in-memory cache).
+"""Live Drama Discovery Service (multi-provider aggregation & last-known-good cache).
 
-Fetches live series directly from upstream Drama providers (Short Drama Pro hub, etc.)
-via the failover pool. Discovery results are never persisted automatically.
+Fetches live series directly from upstream Drama providers via the failover pool.
+When live upstreams succeed, series metadata is cached in persistent LKG storage
+(Turso drama_discovery_cache). If live upstreams temporarily fail, recent cached
+metadata is returned with stale=True so users can continue browsing.
 """
 
 import asyncio
@@ -9,6 +11,7 @@ import logging
 import time
 from typing import Any
 
+from ..db.repositories import drama as repo
 from .providers import pool as pool_mod
 from .providers.base import ProviderError
 
@@ -26,7 +29,7 @@ KEYWORD_SEARCH_PROVIDERS = (
     "rapidix",
 )
 
-CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
+CACHE_TTL_SECONDS = 15 * 60  # 15 minutes RAM cache
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
@@ -146,13 +149,42 @@ async def discover_movies(
     # Fetch providers concurrently
     await asyncio.gather(*[_fetch_one(p) for p in target_providers])
 
+    source = "live"
+    stale = False
+
+    # Persistent Last-Known-Good cache handling
+    if all_items:
+        # Live success: update persistent LKG cache
+        try:
+            repo.upsert_discovery_cache_items(all_items)
+        except Exception as exc:
+            logger.warning("failed to persist discovery cache: %s", exc)
+    else:
+        # Live upstreams returned no items (e.g. outage or temporary failure)
+        # Attempt fallback to persistent LKG cache
+        try:
+            lkg_items = repo.get_discovery_cache_items(
+                provider=norm_provider,
+                query=norm_query,
+                limit=limit,
+                max_age_hours=24,
+            )
+            if lkg_items:
+                all_items = lkg_items
+                source = "cache"
+                stale = True
+        except Exception as exc:
+            logger.warning("failed to retrieve LKG cache: %s", exc)
+
     response_data = {
         "items": all_items[: max(1, limit)],
         "providers": providers_status,
         "errors": errors,
+        "source": source,
+        "stale": stale,
     }
 
-    # Cache successful responses or partial results
+    # Cache successful responses or partial/LKG results in RAM
     if all_items or not errors:
         _cache[cache_key] = (now, response_data)
 

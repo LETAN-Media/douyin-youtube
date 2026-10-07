@@ -257,6 +257,25 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_series_source ON drama_series(source_id)",
         ],
     ),
+    (
+        "drama_002",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS drama_discovery_cache (
+                provider TEXT NOT NULL,
+                external_series_id TEXT NOT NULL,
+                title TEXT,
+                description TEXT,
+                thumbnail_url TEXT,
+                total_episodes INTEGER,
+                fetched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                PRIMARY KEY (provider, external_series_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_discovery_cache_fetched ON drama_discovery_cache(fetched_at)",
+            "CREATE INDEX IF NOT EXISTS idx_discovery_cache_provider ON drama_discovery_cache(provider)",
+        ],
+    ),
 ]
 
 

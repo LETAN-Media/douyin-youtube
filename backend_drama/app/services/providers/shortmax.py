@@ -63,7 +63,13 @@ class ShortMaxProvider(RapidApiProvider, DramaProvider):
         )
 
     async def discover_series(self, *, limit: int = 20) -> list[NormalizedSeries]:
-        data = await self._get("/shortmax/api/v1/feed/foryou", {"lang": "en"})
+        try:
+            data = await self._get("/shortmax/api/v1/feed/ranked", {"lang": "en"})
+        except ProviderError as exc:
+            if exc.code in ("NOT_FOUND", "TEMPORARY"):
+                data = await self._get("/shortmax/api/v1/home", {"lang": "en"})
+            else:
+                raise
         out: list[NormalizedSeries] = []
         for item in self._payload_list(data)[: max(1, limit)]:
             try:

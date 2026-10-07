@@ -27,7 +27,11 @@ class RapidixProvider(DramaProvider):
 
     def _get_client(self) -> RapidixClient:
         if self._client is None:
-            if self._endpoint is not None:
+            if self._endpoint is not None and (
+                "rapidix" in self._endpoint.providers
+                or "reelshort-unofficial" in self._endpoint.host
+                or self._endpoint.name.startswith("rapidix")
+            ):
                 from ...config import settings
 
                 self._client = RapidixClient(

@@ -249,15 +249,27 @@ class RapidApiProvider:
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
+            # 1. Direct top-level list keys
             for key in ("episodes", "data", "list", "items", "results", "dramas", "series",
                         "books", "videos", "chapters"):
                 value = data.get(key)
                 if isinstance(value, list):
                     return value
-                if isinstance(value, dict):
-                    for nested in ("episodes", "list", "items", "chapters"):
-                        if isinstance(value.get(nested), list):
-                            return value[nested]
+            # 2. Nested dictionary containers
+            for container_key in ("data", "result", "results", "response", "payload"):
+                container = data.get(container_key)
+                if isinstance(container, dict):
+                    for nested in ("episodes", "list", "items", "chapters", "books", "data", "dramas", "series"):
+                        value = container.get(nested)
+                        if isinstance(value, list):
+                            return value
+            # 3. Any dictionary whose child is a recognized list
+            for key, val in data.items():
+                if isinstance(val, dict):
+                    for nested in ("episodes", "list", "items", "chapters", "books", "dramas", "series"):
+                        nested_val = val.get(nested)
+                        if isinstance(nested_val, list):
+                            return nested_val
         raise ProviderError("INVALID_RESPONSE", "Provider response has no recognizable list.")
 
 

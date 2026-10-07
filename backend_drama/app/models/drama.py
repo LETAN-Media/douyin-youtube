@@ -76,9 +76,12 @@ def normalize_series(provider: str, payload: dict[str, Any]) -> NormalizedSeries
         external_series_id=str(external_id),
         title=_first(payload, "title", "name", "book_title"),
         description=_first(payload, "description", "synopsis", "desc", "summary"),
-        thumbnail_url=_first(payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "coverUrl", "image"),
+        thumbnail_url=_first(
+            payload, "thumbnail_url", "thumbnail", "cover", "cover_url", "coverUrl",
+            "image", "poster", "poster_url", "posterUrl", "banner", "pic", "thumb",
+        ),
         total_episodes=_as_int(
-            _first(payload, "total_episodes", "episode_count", "total", "episodes_total")
+            _first(payload, "total_episodes", "episode_count", "total", "episodes_total", "episodes")
         ),
         raw=payload,
     )

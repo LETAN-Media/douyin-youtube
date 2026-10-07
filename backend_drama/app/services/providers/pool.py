@@ -60,9 +60,15 @@ class ProviderEndpoint:
     def serves(self, provider_name: str) -> bool:
         if not self.enabled:
             return False
-        if not self.providers:
-            return True
-        return provider_name.strip().lower() in self.providers
+        p_name = provider_name.strip().lower()
+        if self.providers:
+            return p_name in self.providers
+        if "short-drama-pro" in self.host.lower():
+            return p_name in (
+                "starshort", "dramabox", "flickshort",
+                "netshort", "shortmax", "reelshort_sdp",
+            )
+        return True
 
 
 @dataclass
@@ -261,6 +267,20 @@ async def execute(
     endpoints = [
         ep for ep in load_pool_from_settings() if ep.serves(provider_name)
     ]
+    if not endpoints and provider_name == "rapidix":
+        from ...config import settings
+        if settings.rapidix_configured():
+            endpoints = [
+                ProviderEndpoint(
+                    name="rapidix",
+                    host=settings.RAPIDAPI_HOST or "",
+                    base_url=settings.RAPIDAPI_BASE_URL or f"https://{settings.RAPIDAPI_HOST}",
+                    api_key=settings.rapidix_key(),
+                    priority=99,
+                    enabled=True,
+                    providers=("rapidix",),
+                )
+            ]
     if not endpoints:
         raise PoolExhausted(
             "NOT_CONFIGURED",

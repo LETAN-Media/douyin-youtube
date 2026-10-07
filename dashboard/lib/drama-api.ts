@@ -68,6 +68,8 @@ export interface DramaDiscoveryResponseDto {
   items: DramaDiscoverySeriesDto[];
   providers: Record<string, { status: string; count?: number; reason?: string; code?: string }>;
   errors: Array<{ provider: string; code?: string; message?: string }>;
+  source?: "live" | "cache" | "mixed";
+  stale?: boolean;
 }
 
 export interface DramaEpisodeDto {

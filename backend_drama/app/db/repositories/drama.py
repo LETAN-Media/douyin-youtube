@@ -340,3 +340,85 @@ def count_episodes_by_status(series_id: str) -> dict[str, int]:
         (series_id,),
     ).fetchall()
     return {r[0]: r[1] for r in rows}
+
+
+def upsert_discovery_cache_items(items: list[dict[str, Any]]) -> None:
+    """Store live discovery series metadata into persistent LKG cache.
+    Never stores signed playback/video URLs.
+    """
+    if not items:
+        return
+    client = get_client()
+    now_str = _now()
+    for item in items:
+        provider = (item.get("provider") or "").strip()
+        ext_id = str(item.get("external_series_id") or "").strip()
+        if not provider or not ext_id:
+            continue
+        client.execute(
+            """
+            INSERT INTO drama_discovery_cache
+                (provider, external_series_id, title, description, thumbnail_url, total_episodes, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider, external_series_id) DO UPDATE SET
+                title = excluded.title,
+                description = excluded.description,
+                thumbnail_url = excluded.thumbnail_url,
+                total_episodes = excluded.total_episodes,
+                fetched_at = excluded.fetched_at
+            """,
+            (
+                provider,
+                ext_id,
+                item.get("title"),
+                item.get("description"),
+                item.get("thumbnail_url"),
+                item.get("total_episodes"),
+                now_str,
+            ),
+        )
+    client.commit()
+
+
+def get_discovery_cache_items(
+    *,
+    provider: str = "all",
+    query: str = "",
+    limit: int = 20,
+    max_age_hours: int = 24,
+) -> list[dict[str, Any]]:
+    """Retrieve items from persistent LKG cache within max_age_hours."""
+    from datetime import datetime, timezone, timedelta
+    client = get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    sql = "SELECT provider, external_series_id, title, description, thumbnail_url, total_episodes, fetched_at FROM drama_discovery_cache WHERE fetched_at >= ?"
+    params: list[Any] = [cutoff]
+
+    norm_provider = (provider or "all").strip().lower()
+    if norm_provider != "all":
+        sql += " AND provider = ?"
+        params.append(norm_provider)
+
+    norm_query = (query or "").strip()
+    if norm_query:
+        sql += " AND (title LIKE ? OR description LIKE ?)"
+        pattern = f"%{norm_query}%"
+        params.extend([pattern, pattern])
+
+    sql += " ORDER BY fetched_at DESC LIMIT ?"
+    params.append(max(1, limit))
+
+    cursor = client.execute(sql, params)
+    rows = cursor.fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "provider": r["provider"],
+            "external_series_id": r["external_series_id"],
+            "title": r["title"],
+            "description": r["description"],
+            "thumbnail_url": r["thumbnail_url"],
+            "total_episodes": r["total_episodes"],
+        })
+    return out
