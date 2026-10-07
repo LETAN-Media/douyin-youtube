@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useTransition } from "react";
+import { useState, useTransition, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { PageHeader, btnPrimary, btnSecondary, inputCls, labelCls } from "@/components/ui";
+import { PageHeader, btnPrimary, btnSecondary, inputCls, labelCls, Spinner } from "@/components/ui";
 import { IconChevronRight, IconFilm, IconPlus } from "@/components/icons";
-import type { DramaPipelineDto, DramaSummaryDto } from "@/lib/drama-api";
+import type { DramaPipelineDto, DramaSummaryDto, DramaSeriesDto } from "@/lib/drama-api";
 
 function CreatePipelineModal({ onClose }: { onClose: () => void }) {
   const router = useRouter();
