@@ -116,6 +116,12 @@ export function DramaProcessingSettings({
 
   async function handleCreateTemplate() {
     if (tplSaving || !newTplName.trim() || !newTplUrl.trim()) return;
+    const cleanUrl = newTplUrl.trim();
+    if (!/\.svg(\?[^\s]*)?(#[^\s]*)?$/i.test(cleanUrl.split("?")[0] ?? "")) {
+      // Backend accepts legacy raster presets, but this workflow is SVG-first.
+      setError("Template workflow này dùng file .svg (khuyến nghị).");
+      return;
+    }
     setTplSaving(true);
     setError(null);
     try {
@@ -384,7 +390,7 @@ export function DramaProcessingSettings({
                 <input
                   value={newTplUrl}
                   onChange={(e) => setNewTplUrl(e.target.value)}
-                  placeholder="https://…/frame.png"
+                  placeholder="https://…/frame.svg"
                   inputMode="url"
                   className="min-h-[44px] flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none focus:border-indigo-500"
                 />

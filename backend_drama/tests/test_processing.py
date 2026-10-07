@@ -485,3 +485,142 @@ def test_orchestrator_template_stage_end_to_end(db, tmp_path):
     assert out["status"] == "completed", out
     assert out["stages"]["template"]["state"] == "done"
     assert seen_final["path"].endswith("final.mp4")
+
+
+# ---------- SVG-first templates ----------
+
+VALID_SVG = """<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1280" viewBox="0 0 720 1280">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141428"/>
+      <stop offset="1" stop-color="#1e1e3f"/>
+    </linearGradient>
+    <clipPath id="c"><rect x="90" y="160" width="540" height="960"/></clipPath>
+  </defs>
+  <path d="M0,0 H720 V1280 H0 Z M90,160 h540 v960 h-540 Z" fill="url(#g)" fill-rule="evenodd"/>
+  <text x="360" y="1170" text-anchor="middle" font-size="20" fill="#fff">Hi</text>
+</svg>
+"""
+
+
+def _write_svg(tmp_path, name="t.svg", content=VALID_SVG):
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+def test_svg_validation_accepts_good(tmp_path):
+    from app.services.render.template_renderer import validate_svg
+
+    dims = validate_svg(VALID_SVG.encode())
+    assert dims["viewBox"] == "0 0 720 1280"
+
+
+def test_svg_validation_rejects_bad():
+    from app.services.render.template_renderer import TemplateError, validate_svg
+
+    cases = [
+        (b"not xml at all", "TEMPLATE_INVALID_SVG"),
+        (b"<html><body>hi</body></html>", "TEMPLATE_INVALID_SVG"),
+        (b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>', "TEMPLATE_INVALID_SVG"),
+        (b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>alert(1)</script></svg>', "TEMPLATE_UNSAFE_SVG"),
+        (b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><a href="javascript:alert(1)"><rect/></a></svg>', "TEMPLATE_UNSAFE_SVG"),
+        (b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="https://evil.example.com/x.png"/></svg>', "TEMPLATE_UNSAFE_SVG"),
+    ]
+    for bad, code in cases:
+        with pytest.raises(TemplateError) as exc:
+            validate_svg(bad)
+        assert exc.value.code == code, bad[:40]
+
+
+def test_svg_rasterize_exact_canvas(tmp_path):
+    from app.services.media.drama_media import probe_media
+    from app.services.render.template_renderer import rasterize_svg
+
+    src = _write_svg(tmp_path)
+    out = tmp_path / "frame.png"
+    rasterize_svg(src, out, width=720, height=1280)
+    assert out.exists() and out.stat().st_size > 0
+    probe = probe_media(out)
+    assert probe["width"] == 720 and probe["height"] == 1280
+
+
+def test_svg_transparency_preserved(tmp_path):
+    import subprocess
+
+    from app.services.render.template_renderer import rasterize_svg
+
+    src = _write_svg(tmp_path)
+    out = tmp_path / "frame.png"
+    rasterize_svg(src, out, width=720, height=1280)
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(out), "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
+        capture_output=True, check=True, timeout=60,
+    ).stdout
+    W, H = 720, 1280
+
+    def alpha(x, y):
+        return raw[(y * W + x) * 4 + 3]
+
+    import statistics
+
+    content = [alpha(x, y) for x in range(100, 620, 40) for y in range(170, 1110, 40)]
+    assert statistics.mean(content) < 30, "content window must stay transparent"
+
+
+def test_svg_vertical_and_landscape_sizes(tmp_path):
+    from app.services.render.template_renderer import rasterize_svg
+
+    src = _write_svg(tmp_path)
+    for w, h in [(720, 1280), (1080, 1920), (1920, 1080)]:
+        out = tmp_path / f"f_{w}x{h}.png"
+        rasterize_svg(src, out, width=w, height=h)
+        assert out.stat().st_size > 0
+
+
+def test_svg_fetch_preserves_extension(tmp_path):
+    from app.services.render.template_renderer import fetch_template_asset
+
+    src = _write_svg(tmp_path, "real.svg")
+    dest = fetch_template_asset(f"file://{src}", tmp_path / "tpl_dl")
+    assert dest.suffix == ".svg"
+    assert dest.read_bytes() == src.read_bytes()
+
+
+def test_svg_rasterize_missing_rsvg(tmp_path, monkeypatch):
+    import subprocess
+
+    from app.services.render import template_renderer as tr
+
+    src = _write_svg(tmp_path)
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("no rsvg")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    with pytest.raises(tr.TemplateError) as exc:
+        tr.rasterize_svg(src, tmp_path / "x.png", width=720, height=1280)
+    assert exc.value.code == "TEMPLATE_RENDER_FAILED"
+
+
+def test_svg_temp_files_cleaned(db, tmp_path):
+    from app.services.render.template_renderer import render_template
+
+    _p, series = _seed_series(db, n=1, prefix="svgclean")
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "merged.mp4").write_bytes(src.read_bytes())
+    svg = _write_svg(tmp_path, "frame.svg")
+    tpl = {
+        "id": "dtpl_svg", "asset_url": f"file://{svg}",
+        "canvas_width": 720, "canvas_height": 1280,
+        "content_x": 90, "content_y": 160,
+        "content_width": 540, "content_height": 960,
+    }
+    out = render_template(work / "merged.mp4", tpl, work / "final.mp4", workdir=work)
+    assert out.exists()
+    leftovers = [p.name for p in work.iterdir()
+                 if p.suffix == ".svg" or p.name in ("template_frame.png", "template_source.svg")]
+    assert leftovers == [], leftovers
