@@ -519,6 +519,7 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
     setLoading(true);
     setError(null);
     setHasSearched(true);
+    setShowTechDetails(false);
     try {
       const qParams = new URLSearchParams();
       qParams.set("provider", prov);
@@ -605,9 +606,9 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
 
       {/* Provider Warning / Notice Banner */}
       {providerErrors.length > 0 && (
-        <div className="rounded-xl border border-amber-200/90 bg-amber-50/80 p-3.5 text-xs text-amber-800 shadow-sm transition">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
+        <div className="rounded-xl border border-amber-200/90 bg-amber-50/80 p-3.5 text-xs text-amber-800 shadow-sm transition overflow-hidden">
+          <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
               <IconAlert size={16} className="text-amber-600 shrink-0" />
               <span className="font-semibold truncate">{getProviderWarningTitle(providerErrors)}</span>
             </div>
@@ -616,18 +617,22 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
               onClick={() => setShowTechDetails((prev) => !prev)}
               className="text-[11px] font-medium text-amber-700 hover:text-amber-900 underline underline-offset-2 shrink-0 transition"
             >
-              {showTechDetails ? "Ẩn chi tiết kỹ thuật ▴" : "Chi tiết kỹ thuật ▾"}
+              {showTechDetails ? "Ẩn chi tiết kỹ thuật" : "Hiện chi tiết kỹ thuật"}
             </button>
           </div>
           {showTechDetails && (
-            <div className="mt-2.5 pt-2 border-t border-amber-200/70 space-y-1 text-[11px] text-amber-900/80 font-mono">
+            <div className="mt-2.5 pt-2 border-t border-amber-200/70 space-y-1.5 text-[11px] text-amber-900/80 font-mono">
               {providerErrors.map((e, idx) => (
-                <div key={idx} className="flex items-center justify-between gap-2">
-                  <span>
-                    <strong className="font-semibold text-amber-950">{getProviderDisplayName(e.provider)}:</strong>{" "}
-                    {e.status} {e.code ? `(${e.code})` : ""}
-                  </span>
-                  <span className="text-[10px] text-amber-700 truncate">{e.message}</span>
+                <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-0.5 sm:gap-2 break-all sm:break-words">
+                  <div className="min-w-0">
+                    <strong className="font-semibold text-amber-950">{getProviderDisplayName(e.provider)}</strong>
+                    <span className="text-amber-800/80"> ({e.provider})</span>:{" "}
+                    <span>status: {e.status}</span>
+                    {e.code ? <span className="ml-1.5 font-bold text-amber-950">| code: {e.code}</span> : null}
+                  </div>
+                  {e.message && (
+                    <span className="text-[10px] text-amber-700 truncate max-w-full sm:max-w-xs">{e.message}</span>
+                  )}
                 </div>
               ))}
             </div>
@@ -709,7 +714,7 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
         </div>
       ) : hasSearched && !error ? (
         providerErrors.length > 0 ? (
-          <div className="rounded-2xl border border-amber-200/90 bg-amber-50/80 p-8 text-center shadow-sm sm:p-12">
+          <div className="rounded-2xl border border-amber-200/90 bg-amber-50/80 p-6 text-center shadow-sm sm:p-12 overflow-hidden">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-100 text-amber-600">
               <IconAlert size={28} />
             </div>
@@ -723,16 +728,23 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
               <button
                 type="button"
                 onClick={() => setShowTechDetails((prev) => !prev)}
-                className="text-xs font-semibold text-amber-800 hover:text-amber-950 underline underline-offset-2"
+                className="text-xs font-semibold text-amber-800 hover:text-amber-950 underline underline-offset-2 transition"
               >
-                {showTechDetails ? "Ẩn chi tiết kỹ thuật ▴" : "Chi tiết kỹ thuật ▾"}
+                {showTechDetails ? "Ẩn chi tiết kỹ thuật" : "Hiện chi tiết kỹ thuật"}
               </button>
               {showTechDetails && (
-                <div className="mt-3 mx-auto max-w-md rounded-xl bg-amber-100/70 p-3 text-left font-mono text-[11px] text-amber-900 space-y-1">
+                <div className="mt-3 mx-auto max-w-md rounded-xl bg-amber-100/70 p-3 text-left font-mono text-[11px] text-amber-900 space-y-1.5 overflow-hidden">
                   {providerErrors.map((e, idx) => (
-                    <div key={idx} className="flex items-center justify-between gap-2">
-                      <strong>{getProviderDisplayName(e.provider)}:</strong>
-                      <span>{e.status} {e.code ? `(${e.code})` : ""}</span>
+                    <div key={idx} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-0.5 sm:gap-2 break-all sm:break-words">
+                      <div className="min-w-0">
+                        <strong className="font-semibold text-amber-950">{getProviderDisplayName(e.provider)}</strong>
+                        <span className="text-amber-800/80"> ({e.provider})</span>:{" "}
+                        <span>status: {e.status}</span>
+                        {e.code ? <span className="ml-1.5 font-bold text-amber-950">| code: {e.code}</span> : null}
+                      </div>
+                      {e.message && (
+                        <span className="text-[10px] text-amber-700 truncate max-w-full sm:max-w-xs">{e.message}</span>
+                      )}
                     </div>
                   ))}
                 </div>
