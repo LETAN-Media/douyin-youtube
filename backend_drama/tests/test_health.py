@@ -18,7 +18,7 @@ def test_ready_reports_db_and_rapidix(db):
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "backend-drama"
-    assert body["db"] == "sqlite"
+    assert body["db"] == "ok"
     assert body["rapidix"] == "configured"
     assert body["ok"] is True
 
