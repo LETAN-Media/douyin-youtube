@@ -202,8 +202,8 @@ export function PipelineDetailClient({
       <div className="mt-12 rounded-3xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
         <PageHeader
           title="Sources"
-          subtitle="Danh sách các nguồn quét phim"
-          action={
+          description="Danh sách các nguồn quét phim"
+          actions={
             <button className={btnSmall} onClick={() => setCreateSourceOpen(true)}>
               <IconPlus size={14} className="mr-1" />
               Thêm Source
