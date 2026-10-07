@@ -193,6 +193,13 @@ export const IconLogout = (p: P) => (
   </Svg>
 );
 
+export const IconFilm = (p: P) => (
+  <Svg {...p}>
+    <rect x="2" y="2" width="20" height="20" rx="2.18" />
+    <path d="M7 2v20M17 2v20M2 7h20M2 17h20" />
+  </Svg>
+);
+
 export const IconBolt = (p: P) => (
   <Svg {...p}>
     <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" />
