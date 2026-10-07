@@ -275,49 +275,71 @@ export function DramaSearchClient() {
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
           {items.map((series) => {
-            const href = series.pipeline_id ? `/drama/${encodeURIComponent(series.pipeline_id)}` : "#";
-            return (
-            <Link
-              key={series.id}
-              href={href}
-              className="group flex flex-col overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 transition hover:shadow-md hover:ring-indigo-500"
-            >
-              <div className="relative aspect-[3/4] w-full overflow-hidden bg-slate-100">
-                {series.thumbnail_url ? (
-                  <img
-                    src={series.thumbnail_url}
-                    alt={series.title || "Poster"}
-                    className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center text-slate-300">
-                    No Image
-                  </div>
-                )}
-                {series.total_episodes != null && (
-                  <div className="absolute right-2 top-2">
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200">
-                      {series.total_episodes} Tập
+            const cardInner = (
+              <>
+                <div className="relative aspect-[3/4] w-full overflow-hidden bg-slate-100">
+                  {series.thumbnail_url ? (
+                    <img
+                      src={series.thumbnail_url}
+                      alt={series.title || "Poster"}
+                      className={`h-full w-full object-cover transition duration-300 ${
+                        series.pipeline_id ? "group-hover:scale-105" : ""
+                      }`}
+                    />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-slate-300">
+                      No Image
+                    </div>
+                  )}
+                  {series.total_episodes != null && (
+                    <div className="absolute right-2 top-2">
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200">
+                        {series.total_episodes} Tập
+                      </span>
+                    </div>
+                  )}
+                  <div className="absolute left-2 top-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
+                      Hot
                     </span>
                   </div>
-                )}
-                <div className="absolute left-2 top-2">
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
-                    Hot
-                  </span>
                 </div>
+                <div className="flex flex-1 flex-col p-3">
+                  <h3
+                    className={`line-clamp-2 text-sm font-bold text-slate-900 ${
+                      series.pipeline_id ? "group-hover:text-indigo-600" : ""
+                    }`}
+                  >
+                    {series.title || "Unknown Title"}
+                  </h3>
+                  {series.description && (
+                    <p className="mt-1 line-clamp-2 text-xs text-slate-500">
+                      {series.description}
+                    </p>
+                  )}
+                </div>
+              </>
+            );
+
+            if (series.pipeline_id) {
+              return (
+                <Link
+                  key={series.id}
+                  href={`/drama/${encodeURIComponent(series.pipeline_id)}`}
+                  className="group flex flex-col overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 transition hover:shadow-md hover:ring-indigo-500"
+                >
+                  {cardInner}
+                </Link>
+              );
+            }
+
+            return (
+              <div
+                key={series.id}
+                className="flex flex-col overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200"
+              >
+                {cardInner}
               </div>
-              <div className="flex flex-1 flex-col p-3">
-                <h3 className="line-clamp-2 text-sm font-bold text-slate-900 group-hover:text-indigo-600">
-                  {series.title || "Unknown Title"}
-                </h3>
-                {series.description && (
-                  <p className="mt-1 line-clamp-2 text-xs text-slate-500">
-                    {series.description}
-                  </p>
-                )}
-              </div>
-            </Link>
             );
           })}
         </div>
