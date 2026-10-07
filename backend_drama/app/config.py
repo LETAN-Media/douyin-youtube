@@ -69,6 +69,23 @@ class Settings(BaseSettings):
     DRAMA_API_FALLBACK_4_KEY: str | None = None
     DRAMA_API_FALLBACK_4_PROVIDERS: str | None = None
 
+    # PHIMTAT / SnapVideo fallback provider for drama media resolution
+    PHIMTAT_ENABLED: bool = True
+    PHIMTAT_API_KEY: str | None = None
+    PHIMTAT_API_BASE_URL: str = "https://api.phimtat.vn/json/snapvideo.json"
+    PHIMTAT_REDIRECT_URL: str = "https://api.phimtat.vn/snapvideo/red64.php"
+    PHIMTAT_TIMEOUT_SECONDS: float | int | str | None = 60
+
+    def phimtat_api_key(self) -> str:
+        return (self.PHIMTAT_API_KEY or "").strip()
+
+    def phimtat_timeout(self) -> float:
+        try:
+            val = float(str(self.PHIMTAT_TIMEOUT_SECONDS or 60).strip())
+            return min(max(val, 5.0), 300.0)
+        except (TypeError, ValueError):
+            return 60.0
+
     def rapidix_key(self) -> str:
         return ((self.RAPIDIX_KEY or "") or (self.RAPIDAPI_KEY or "")).strip()
 

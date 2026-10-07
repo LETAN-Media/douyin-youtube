@@ -117,7 +117,7 @@ def test_payload_list_regression_shapes():
     assert len(RapidApiProvider._payload_list([{"id": "item2"}])) == 1
 
 
-def test_discover_service_aggregation_and_cache(monkeypatch):
+def test_discover_service_aggregation_and_cache(db, monkeypatch):
     calls = {"netshort": 0, "shortmax": 0}
 
     async def fake_execute(provider_name, op, **kwargs):
@@ -151,7 +151,7 @@ def test_discover_service_aggregation_and_cache(monkeypatch):
     assert calls["shortmax"] == 1
 
 
-def test_discover_one_provider_failure_does_not_break_all(monkeypatch):
+def test_discover_one_provider_failure_does_not_break_all(db, monkeypatch):
     async def fake_execute(provider_name, op, **kwargs):
         from app.models.drama import NormalizedSeries
         if provider_name == "netshort":
