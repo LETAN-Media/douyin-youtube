@@ -39,3 +39,50 @@ async def get_pipeline(pipeline_id: str, _: None = Depends(require_admin)) -> di
     if pipeline is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
     return pipeline
+
+
+@router.get("/pipelines/{pipeline_id}/summary")
+async def get_pipeline_summary(pipeline_id: str, _: None = Depends(require_admin)) -> dict:
+    pipeline = repo.get_pipeline(pipeline_id)
+    if pipeline is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
+        
+    conn = repo.get_client()
+    sources = conn.execute(
+        "SELECT COUNT(*) FROM drama_sources WHERE pipeline_id = ?", (pipeline_id,)
+    ).fetchone()[0]
+    
+    series = conn.execute(
+        "SELECT COUNT(t.id) FROM drama_series t "
+        "JOIN drama_sources s ON s.id = t.source_id "
+        "WHERE s.pipeline_id = ?", (pipeline_id,)
+    ).fetchone()[0]
+    
+    inventory = conn.execute(
+        "SELECT COUNT(e.id) FROM drama_episodes e "
+        "JOIN drama_series t ON t.id = e.series_id "
+        "JOIN drama_sources s ON s.id = t.source_id "
+        "WHERE s.pipeline_id = ?", (pipeline_id,)
+    ).fetchone()[0]
+    
+    return {
+        "pipeline": pipeline,
+        "sources": sources,
+        "inventory": inventory,
+        "series": series
+    }
+
+
+@router.get("/pipelines/{pipeline_id}/series")
+async def list_pipeline_series(pipeline_id: str, _: None = Depends(require_admin)) -> list[dict]:
+    if repo.get_pipeline(pipeline_id) is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
+        
+    conn = repo.get_client()
+    rows = conn.execute(
+        "SELECT t.* FROM drama_series t "
+        "JOIN drama_sources s ON s.id = t.source_id "
+        "WHERE s.pipeline_id = ? "
+        "ORDER BY t.created_at DESC", (pipeline_id,)
+    ).fetchall()
+    return [repo._row_to_series(r) for r in rows]

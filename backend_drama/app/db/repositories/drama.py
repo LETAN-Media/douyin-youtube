@@ -213,6 +213,43 @@ def get_series(series_id: str) -> dict[str, Any] | None:
     return _row_to_series(row) if row else None
 
 
+def list_series(*, query: str | None = None, limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+    conn = get_client()
+    where_clauses = []
+    params = []
+    
+    if query:
+        where_clauses.append("t.title LIKE ?")
+        params.append(f"%{query}%")
+        
+    where_sql = " AND ".join(where_clauses)
+    if where_sql:
+        where_sql = f"WHERE {where_sql}"
+        
+    total_row = conn.execute(
+        f"SELECT COUNT(*) FROM drama_series t {where_sql}", tuple(params)
+    ).fetchone()
+    total = total_row[0] if total_row else 0
+    
+    params.extend([limit, offset])
+    rows = conn.execute(
+        f"SELECT t.*, s.pipeline_id FROM drama_series t "
+        f"LEFT JOIN drama_sources s ON s.id = t.source_id "
+        f"{where_sql} "
+        "ORDER BY t.created_at DESC LIMIT ? OFFSET ?",
+        tuple(params)
+    ).fetchall()
+    
+    res = []
+    for r in rows:
+        d = _row_to_series(r)
+        if "pipeline_id" in r.keys():
+            d["pipeline_id"] = r["pipeline_id"]
+        res.append(d)
+        
+    return res, total
+
+
 # ---------- episodes ----------
 
 

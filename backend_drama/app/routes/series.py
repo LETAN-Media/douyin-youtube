@@ -9,6 +9,15 @@ from ._common import _err
 router = APIRouter(prefix="/api/drama", tags=["drama-series"])
 
 
+@router.get("/series")
+async def list_series(
+    query: str | None = None, limit: int = 50, offset: int = 0,
+    _: None = Depends(require_admin)
+) -> dict:
+    items, total = repo.list_series(query=query, limit=limit, offset=offset)
+    return {"items": items, "total": total}
+
+
 @router.get("/series/{series_id}/episodes")
 async def list_series_episodes(
     series_id: str, status: str | None = None, limit: int = 500,

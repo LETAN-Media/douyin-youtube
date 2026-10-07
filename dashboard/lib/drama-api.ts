@@ -50,6 +50,7 @@ export interface DramaSeriesDto {
   total_episodes: number | null;
   created_at: string | null;
   updated_at: string | null;
+  pipeline_id?: string;
 }
 
 export interface DramaEpisodeDto {
@@ -274,4 +275,14 @@ export async function listDramaPipelineInventory(
   return dramaFetch(
     `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/inventory?${q.toString()}`,
   );
+}
+
+export async function searchGlobalDramaSeries(
+  opts: { query?: string; limit?: number; offset?: number } = {}
+): Promise<{ items: DramaSeriesDto[]; total: number }> {
+  const q = new URLSearchParams();
+  if (opts.query) q.set("query", opts.query);
+  if (opts.limit) q.set("limit", String(opts.limit));
+  if (opts.offset) q.set("offset", String(opts.offset));
+  return dramaFetch(`/api/drama/series?${q.toString()}`);
 }
