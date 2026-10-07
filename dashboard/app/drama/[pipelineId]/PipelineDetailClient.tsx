@@ -885,19 +885,20 @@ export function PipelineDetailClient({
                   icon={<IconFilm size={24} />}
                 />
               ) : (
-                <div className="grid grid-cols-2 gap-3.5 p-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 sm:p-6">
+                <div className="grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 sm:p-6 xl:grid-cols-3 2xl:grid-cols-4">
                   {series.map((item) => (
                     <div
                       key={item.id}
                       onClick={() => setSelectedSeries(item)}
-                      className="group flex cursor-pointer flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm transition hover:border-indigo-300 hover:shadow-md"
+                      className="group flex cursor-pointer flex-row gap-3 overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-3 shadow-sm transition hover:border-indigo-300 hover:shadow-md sm:flex-col sm:gap-0 sm:p-0"
                     >
-                      <div className="relative aspect-[3/4] w-full overflow-hidden bg-slate-100">
+                      <div className="relative h-32 w-24 shrink-0 overflow-hidden rounded-xl bg-slate-100 sm:aspect-[3/4] sm:h-auto sm:w-full sm:rounded-none">
                         {item.thumbnail_url ? (
                           <img
                             src={item.thumbnail_url}
                             alt={item.title || "Poster"}
                             className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                            loading="lazy"
                           />
                         ) : (
                           <div className="flex h-full w-full items-center justify-center text-slate-300">
@@ -912,15 +913,15 @@ export function PipelineDetailClient({
                           </Badge>
                         </div>
                       </div>
-                      <div className="flex flex-1 flex-col p-3">
-                        <h4 className="line-clamp-2 text-xs font-bold text-slate-900 group-hover:text-indigo-600 sm:text-sm">
+                      <div className="flex min-w-0 flex-1 flex-col py-1 sm:p-3">
+                        <h4 className="line-clamp-2 text-sm font-bold text-slate-900 group-hover:text-indigo-600">
                           {item.title || "Chưa có tiêu đề"}
                         </h4>
-                        <div className="mt-auto pt-2 flex items-center justify-between text-[11px] text-slate-400">
-                          <span className="font-mono">
+                        <div className="mt-auto flex items-center justify-between gap-2 pt-2 text-[11px] text-slate-400">
+                          <span className="truncate font-mono">
                             {item.external_series_id || item.id.slice(0, 8)}
                           </span>
-                          <span className="text-indigo-600 font-semibold group-hover:underline">
+                          <span className="shrink-0 font-semibold text-indigo-600 group-hover:underline">
                             Xem tập →
                           </span>
                         </div>
