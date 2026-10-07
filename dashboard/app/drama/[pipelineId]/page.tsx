@@ -5,6 +5,7 @@ import { IconBack } from "@/components/icons";
 import {
   DramaApiError,
   getDramaPipelineDetail,
+  getDramaProcessingSettings,
   getDramaSummary,
   listDramaSources,
   listDramaSeries,
@@ -13,7 +14,7 @@ import {
 } from "@/lib/drama-api";
 import { PipelineDetailClient, type DramaTabKey } from "./PipelineDetailClient";
 
-const VALID_TABS: DramaTabKey[] = ["overview", "sources", "series", "inventory"];
+const VALID_TABS: DramaTabKey[] = ["overview", "sources", "series", "inventory", "settings"];
 
 export default async function DramaPipelinePage({
   params,
@@ -89,7 +90,7 @@ export default async function DramaPipelinePage({
   }
 
   // Load initial tab data with graceful independent fallback
-  const [summaryRes, sourcesRes, seriesRes, inventoryRes] = await Promise.all([
+  const [summaryRes, sourcesRes, seriesRes, inventoryRes, settingsRes] = await Promise.all([
     getDramaSummary(pipelineId).then(
       (v) => ({ ok: true as const, v }),
       (e) => ({
@@ -118,6 +119,13 @@ export default async function DramaPipelinePage({
         e: e instanceof Error ? e.message : "Lỗi tải inventory.",
       }),
     ),
+    getDramaProcessingSettings(pipelineId).then(
+      (v) => ({ ok: true as const, v }),
+      (e) => ({
+        ok: false as const,
+        e: e instanceof Error ? e.message : "Lỗi tải cài đặt.",
+      }),
+    ),
   ]);
 
   const initialSummary = summaryRes.ok
@@ -143,6 +151,8 @@ export default async function DramaPipelinePage({
           inventoryRes.ok ? inventoryRes.v : { items: [], total: 0 }
         }
         inventoryError={inventoryRes.ok ? null : inventoryRes.e}
+        initialSettings={settingsRes.ok ? settingsRes.v : null}
+        settingsError={settingsRes.ok ? null : settingsRes.e}
         initialTab={activeTab}
       />
     </Shell>

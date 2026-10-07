@@ -325,3 +325,43 @@ export async function searchGlobalDramaSeries(
   if (opts.offset) q.set("offset", String(opts.offset));
   return dramaFetch(`/api/drama/series?${q.toString()}`);
 }
+export interface DramaProcessingSettingsDto {
+  pipeline_id: string;
+  processing_mode: "direct_merge" | "translate_sub" | "dub_vi";
+  merge_all_episodes: boolean;
+  episodes_per_video: number | null;
+  target_language: string | null;
+  subtitle_enabled: boolean;
+  tts_enabled: boolean;
+  total_episodes: number;
+  planned_videos: number;
+}
+
+export async function getDramaProcessingSettings(
+  pipelineId: string,
+): Promise<DramaProcessingSettingsDto> {
+  return dramaFetch<DramaProcessingSettingsDto>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/processing-settings`,
+  );
+}
+
+export async function updateDramaProcessingSettings(
+  pipelineId: string,
+  payload: {
+    processing_mode?: string;
+    merge_all_episodes?: boolean;
+    episodes_per_video?: number | null;
+    target_language?: string | null;
+    subtitle_enabled?: boolean;
+    tts_enabled?: boolean;
+  },
+): Promise<DramaProcessingSettingsDto> {
+  return dramaFetch<DramaProcessingSettingsDto>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/processing-settings`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}

@@ -339,6 +339,46 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_episode_asr_series ON drama_episode_asr(series_id, status)",
         ],
     ),
+    (
+        "drama_005",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS drama_pipeline_settings (
+                pipeline_id TEXT PRIMARY KEY,
+                processing_mode TEXT NOT NULL DEFAULT 'direct_merge',
+                merge_all_episodes INTEGER NOT NULL DEFAULT 1,
+                episodes_per_video INTEGER,
+                target_language TEXT,
+                subtitle_enabled INTEGER NOT NULL DEFAULT 1,
+                tts_enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS drama_series_jobs (
+                id TEXT PRIMARY KEY,
+                pipeline_id TEXT NOT NULL,
+                series_id TEXT NOT NULL,
+                processing_mode TEXT NOT NULL DEFAULT 'direct_merge',
+                chunk_index INTEGER NOT NULL DEFAULT 0,
+                episode_start INTEGER,
+                episode_end INTEGER,
+                status TEXT NOT NULL DEFAULT 'queued',
+                stage TEXT,
+                downloaded_episode_ids_json TEXT NOT NULL DEFAULT '[]',
+                output_path TEXT,
+                youtube_video_id TEXT,
+                last_error_code TEXT,
+                last_error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_series_jobs_series ON drama_series_jobs(series_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_series_jobs_pipeline ON drama_series_jobs(pipeline_id, status)",
+        ],
+    ),
 ]
 
 

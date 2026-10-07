@@ -35,15 +35,19 @@ import type {
   DramaSeriesDto,
   DramaEpisodeDto,
   DramaPipelineInventoryDto,
+  DramaProcessingSettingsDto,
 } from "@/lib/drama-api";
+import { DramaProcessingSettings, type ProcessingMode } from "@/components/drama/DramaProcessingSettings";
+import { DramaProcessingFlow } from "@/components/drama/DramaProcessingFlow";
 
-export type DramaTabKey = "overview" | "sources" | "series" | "inventory";
+export type DramaTabKey = "overview" | "sources" | "series" | "inventory" | "settings";
 
 const TABS: { key: DramaTabKey; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "sources", label: "Sources" },
   { key: "series", label: "Series" },
   { key: "inventory", label: "Inventory" },
+  { key: "settings", label: "Chế độ xử lý" },
 ];
 
 const REGISTERED_PROVIDERS = [
@@ -411,6 +415,8 @@ export function PipelineDetailClient({
   seriesError,
   initialInventory,
   inventoryError,
+  initialSettings,
+  settingsError,
   initialTab,
 }: {
   pipeline: DramaPipelineDto;
@@ -422,6 +428,8 @@ export function PipelineDetailClient({
   seriesError: string | null;
   initialInventory: DramaPipelineInventoryDto;
   inventoryError: string | null;
+  initialSettings: DramaProcessingSettingsDto | null;
+  settingsError: string | null;
   initialTab: DramaTabKey;
 }) {
   const router = useRouter();
@@ -430,6 +438,8 @@ export function PipelineDetailClient({
   const [sources, setSources] = useState<DramaSourceDto[]>(initialSources);
   const [series, setSeries] = useState<DramaSeriesDto[]>(initialSeries);
   const [inventory, setInventory] = useState<DramaPipelineInventoryDto>(initialInventory);
+  const [processingSettings, setProcessingSettings] =
+    useState<DramaProcessingSettingsDto | null>(initialSettings);
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [scanningSourceId, setScanningSourceId] = useState<string | null>(null);
@@ -444,17 +454,19 @@ export function PipelineDetailClient({
 
   const refreshAllData = async () => {
     try {
-      const [sumRes, srcRes, serRes, invRes] = await Promise.all([
+      const [sumRes, srcRes, serRes, invRes, setRes] = await Promise.all([
         fetch(`/api/drama/pipelines/${encodeURIComponent(pipeline.id)}/summary`),
         fetch(`/api/drama/pipelines/${encodeURIComponent(pipeline.id)}/sources`),
         fetch(`/api/drama/pipelines/${encodeURIComponent(pipeline.id)}/series`),
         fetch(`/api/drama/pipelines/${encodeURIComponent(pipeline.id)}/inventory?limit=500`),
+        fetch(`/api/drama/pipelines/${encodeURIComponent(pipeline.id)}/processing-settings`),
       ]);
 
       if (sumRes.ok) setSummary(await sumRes.json());
       if (srcRes.ok) setSources(await srcRes.json());
       if (serRes.ok) setSeries(await serRes.json());
       if (invRes.ok) setInventory(await invRes.json());
+      if (setRes.ok) setProcessingSettings(await setRes.json());
     } catch {
       // ignore
     }
@@ -637,6 +649,15 @@ export function PipelineDetailClient({
                 sub="Tổng tập trong kho"
               />
             </div>
+
+            {processingSettings ? (
+              <DramaProcessingFlow
+                mode={
+                  (processingSettings.processing_mode as ProcessingMode) ??
+                  "direct_merge"
+                }
+              />
+            ) : null}
 
             <Card>
               <CardHeader
@@ -1023,6 +1044,29 @@ export function PipelineDetailClient({
           onClose={() => setCreateModalOpen(false)}
           onCreated={refreshAllData}
         />
+      )}
+
+      {/* ===================== TAB: SETTINGS ===================== */}
+      {activeTab === "settings" && (
+        <div className="space-y-4">
+          {settingsError && (
+            <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-700">
+              Lỗi tải cài đặt: {settingsError}
+            </div>
+          )}
+          {processingSettings ? (
+            <DramaProcessingSettings
+              pipelineId={pipeline.id}
+              initial={processingSettings}
+              onSaved={setProcessingSettings}
+            />
+          ) : (
+            <EmptyState
+              title="Chưa tải được cài đặt xử lý"
+              hint="Kiểm tra backend drama rồi tải lại trang."
+            />
+          )}
+        </div>
       )}
 
       {/* Series Episodes Modal */}

@@ -1,0 +1,106 @@
+"""Pipeline processing settings + series job routes."""
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
+
+from ..auth import require_admin
+from ..db.repositories import drama as repo
+from ..db.repositories import processing as proc
+from ._common import _err
+
+router = APIRouter(prefix="/api/drama", tags=["drama-processing"])
+
+
+class ProcessingSettingsUpdate(BaseModel):
+    processing_mode: str = "direct_merge"
+    merge_all_episodes: bool = True
+    episodes_per_video: int | None = None
+    target_language: str | None = None
+    subtitle_enabled: bool = True
+    tts_enabled: bool = False
+
+
+@router.get("/pipelines/{pipeline_id}/processing-settings")
+async def get_processing_settings(
+    pipeline_id: str, _: None = Depends(require_admin)
+) -> dict:
+    if repo.get_pipeline(pipeline_id) is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
+    settings = proc.get_settings(pipeline_id)
+    _, total = _series_episode_total(pipeline_id)
+    chunks = proc.plan_chunks(total, settings)
+    return {**settings, "total_episodes": total, "planned_videos": len(chunks)}
+
+
+def _series_episode_total(pipeline_id: str) -> tuple[list[dict], int]:
+    from ..db.client import get_client
+
+    conn = get_client()
+    total = conn.execute(
+        "SELECT COUNT(*) FROM drama_episodes r "
+        "JOIN drama_series t ON t.id = r.series_id "
+        "JOIN drama_sources s ON s.id = t.source_id "
+        "WHERE s.pipeline_id = ?",
+        (pipeline_id,),
+    ).fetchone()[0]
+    return [], total
+
+
+@router.put("/pipelines/{pipeline_id}/processing-settings")
+async def update_processing_settings(
+    pipeline_id: str, body: ProcessingSettingsUpdate,
+    _: None = Depends(require_admin),
+) -> dict:
+    if repo.get_pipeline(pipeline_id) is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
+    try:
+        settings = proc.update_settings(
+            pipeline_id,
+            processing_mode=body.processing_mode,
+            merge_all_episodes=body.merge_all_episodes,
+            episodes_per_video=body.episodes_per_video,
+            target_language=body.target_language,
+            subtitle_enabled=body.subtitle_enabled,
+            tts_enabled=body.tts_enabled,
+        )
+    except ValueError as exc:
+        raise _err(400, "INVALID_SETTINGS", str(exc))
+    _, total = _series_episode_total(pipeline_id)
+    chunks = proc.plan_chunks(total, settings)
+    return {**settings, "total_episodes": total, "planned_videos": len(chunks)}
+
+
+@router.get("/series/{series_id}/jobs")
+async def list_series_jobs(
+    series_id: str, _: None = Depends(require_admin)
+) -> dict:
+    if repo.get_series(series_id) is None:
+        raise _err(404, "SERIES_NOT_FOUND", "Series not found.")
+    return {"items": proc.list_jobs(series_id)}
+
+
+@router.post("/series/{series_id}/jobs", status_code=201)
+async def create_series_jobs(
+    series_id: str, _: None = Depends(require_admin)
+) -> dict:
+    """Plan chunk jobs for a series from its pipeline settings."""
+    series = repo.get_series(series_id)
+    if series is None:
+        raise _err(404, "SERIES_NOT_FOUND", "Series not found.")
+    source = repo.get_source(series["source_id"])
+    if source is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Owning source not found.")
+    pipeline_id = source["pipeline_id"]
+    settings = proc.get_settings(pipeline_id)
+    total = repo.list_episodes(series_id, limit=1)[1]
+    chunks = proc.plan_chunks(total, settings)
+    if not chunks:
+        raise _err(400, "NO_EPISODES", "Series has no episodes to process.")
+    jobs = [
+        proc.create_job(
+            pipeline_id, series_id, settings["processing_mode"], idx,
+            start, end,
+        )
+        for idx, (start, end) in enumerate(chunks)
+    ]
+    return {"items": jobs}
