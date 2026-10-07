@@ -11,7 +11,7 @@ import {
   btnPrimary,
   Badge,
 } from "@/components/ui";
-import { searchGlobalDramaSeries, DramaSeriesDto } from "@/lib/drama-api";
+import { DramaSeriesDto } from "@/lib/drama-api";
 
 export default function DramaSearchPage() {
   const [query, setQuery] = useState("");
@@ -25,8 +25,20 @@ export default function DramaSearchPage() {
     setError(null);
     setHasSearched(true);
     try {
-      const res = await searchGlobalDramaSeries({ query: q, limit: 100 });
-      setItems(res.items);
+      const qParams = new URLSearchParams();
+      if (q) qParams.set("query", q);
+      qParams.set("limit", "100");
+      const res = await fetch(`/api/drama/series?${qParams.toString()}`);
+      if (!res.ok) {
+        let msg = "Lỗi khi tìm kiếm phim";
+        try {
+           const d = await res.json();
+           if (d.error) msg = d.error;
+        } catch {}
+        throw new Error(msg);
+      }
+      const data = await res.json();
+      setItems(data.items || []);
     } catch (err: any) {
       setError(err.message || "Lỗi khi tìm kiếm phim");
     } finally {
