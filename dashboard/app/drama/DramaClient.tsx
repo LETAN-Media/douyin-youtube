@@ -500,8 +500,6 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
   const [providerStatuses, setProviderStatuses] = useState<Record<string, DramaProviderStatusDto>>({});
   const [providerErrors, setProviderErrors] = useState<DramaProviderErrorDto[]>([]);
   const [showTechDetails, setShowTechDetails] = useState(false);
-  const [isStale, setIsStale] = useState(false);
-  const [discoverySource, setDiscoverySource] = useState<string>("live");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
@@ -530,8 +528,6 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
       setItems(data.items || []);
       setProviderStatuses(data.providers || {});
       setProviderErrors(data.errors || []);
-      setIsStale(Boolean(data.stale));
-      setDiscoverySource(data.source || "live");
     } catch (err: any) {
       setError(err.message || "Lỗi khi kết nối hệ thống khám phá phim");
       setItems([]);
@@ -596,18 +592,6 @@ export function DramaSearchClient({ pipelines }: { pipelines: DramaPipelineDto[]
         })}
       </div>
 
-      {/* Stale / Last-Known-Good notice */}
-      {isStale && items.length > 0 && (
-        <div className="flex items-center justify-between rounded-xl border border-indigo-100 bg-indigo-50/70 px-3.5 py-2 text-xs text-indigo-800">
-          <span className="flex items-center gap-1.5 font-medium">
-            <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-            Dữ liệu gần nhất (Nguồn cấp dữ liệu trực tiếp đang tạm thời gián đoạn, hiển thị bản lưu gần đây)
-          </span>
-          <span className="rounded-md bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700">
-            LKG Cache
-          </span>
-        </div>
-      )}
 
       {/* Provider Warning / Notice Banner */}
       {providerErrors.length > 0 && (
