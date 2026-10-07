@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useCallback } from "react";
 import { Card, CardHeader, Badge, btnSmall, btnPrimary, btnSecondary, btnDangerGhost } from "@/components/ui";
-import { IconInventory, IconDrama } from "@/components/icons";
+import { IconInventory, IconPlay } from "@/components/icons";
 import type { FacebookInventoryDto } from "@/lib/facebook-api";
 
 const STATUS_TONE: Record<string, string> = {
@@ -45,7 +45,7 @@ function Thumbnail({ url, size = 80, fill = false }: { url: string | null; size?
         className={`flex items-center justify-center rounded-xl bg-slate-100 ${fill ? "h-full w-full" : ""}`}
         style={fill ? undefined : { width: size, height: size }}
       >
-        <IconDrama size={fill ? 24 : size > 60 ? 24 : 16} className="text-slate-400" />
+        <IconPlay size={fill ? 24 : size > 60 ? 24 : 16} className="text-slate-400" />
       </div>
     );
   }

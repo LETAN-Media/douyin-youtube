@@ -28,13 +28,6 @@ function Svg({
   );
 }
 
-export const IconDrama = (p: P) => (
-  <Svg {...p}>
-    <rect width="20" height="20" x="2" y="2" rx="2.18" />
-    <path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5" />
-  </Svg>
-);
-
 export const IconDashboard = (p: P) => (
   <Svg {...p}>
     <rect x="3" y="3" width="7" height="9" rx="1.5" />
