@@ -315,6 +315,30 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_discovery_snapshots_updated ON drama_discovery_snapshots(updated_at)",
         ],
     ),
+    (
+        "drama_004",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS drama_episode_asr (
+                episode_id TEXT PRIMARY KEY,
+                series_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                source_language TEXT,
+                engine TEXT NOT NULL DEFAULT 'jianying',
+                srt_text TEXT,
+                segment_count INTEGER,
+                duration_ms INTEGER,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error_code TEXT,
+                last_error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_episode_asr_series ON drama_episode_asr(series_id, status)",
+        ],
+    ),
 ]
 
 
