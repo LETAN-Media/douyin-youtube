@@ -285,6 +285,12 @@ class DramaProvider(abc.ABC):
     async def get_episode(self, episode_id: str):
         ...
 
+    async def discover_series(self, *, limit: int = 20):
+        raise ProviderError(
+            "UNSUPPORTED",
+            f"Provider '{self.name}' does not support browse/feed discovery.",
+        )
+
 
 PROVIDERS: dict[str, type[DramaProvider]] = {}
 

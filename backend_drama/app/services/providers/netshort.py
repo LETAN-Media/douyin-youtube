@@ -66,6 +66,17 @@ class NetShortProvider(RapidApiProvider, DramaProvider):
             "via feed/explore pages instead.",
         )
 
+    async def discover_series(self, *, limit: int = 20) -> list[NormalizedSeries]:
+        data = await self._get("/netshort/api/v1/feed/1", {"lang": "en"})
+        out: list[NormalizedSeries] = []
+        for item in self._payload_list(data)[: max(1, limit)]:
+            try:
+                out.append(normalize_series(self.name, item))
+            except ValueError as exc:
+                logger.warning("netshort: skipping unparseable series in discover: %s", exc)
+                continue
+        return out
+
     async def get_series(self, series_id: str) -> NormalizedSeries | None:
         data = await self._get(f"/netshort/api/v1/detail/{series_id}", {"lang": "en"})
         payload = data.get("drama", data) if isinstance(data, dict) else data

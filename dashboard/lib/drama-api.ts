@@ -40,7 +40,7 @@ export interface DramaSourceDto {
   last_scan_error: string | null;
 }
 
-export interface DramaSeriesDto {
+export interface DramaStoredSeriesDto {
   id: string;
   source_id: string;
   external_series_id: string;
@@ -50,7 +50,24 @@ export interface DramaSeriesDto {
   total_episodes: number | null;
   created_at: string | null;
   updated_at: string | null;
-  pipeline_id?: string;
+}
+
+// Stored series alias for compatibility
+export type DramaSeriesDto = DramaStoredSeriesDto;
+
+export interface DramaDiscoverySeriesDto {
+  provider: string;
+  external_series_id: string;
+  title: string | null;
+  description: string | null;
+  thumbnail_url: string | null;
+  total_episodes: number | null;
+}
+
+export interface DramaDiscoveryResponseDto {
+  items: DramaDiscoverySeriesDto[];
+  providers: Record<string, { status: string; count?: number; reason?: string; code?: string }>;
+  errors: Array<{ provider: string; code?: string; message?: string }>;
 }
 
 export interface DramaEpisodeDto {

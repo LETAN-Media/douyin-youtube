@@ -18,6 +18,7 @@ from ...models.drama import (
     NormalizedEpisode,
     NormalizedSeries,
     normalize_episode,
+    normalize_series,
 )
 from .base import (
     DramaProvider,
@@ -60,6 +61,17 @@ class ShortMaxProvider(RapidApiProvider, DramaProvider):
             "ShortMax exposes no keyword search endpoint; discover series "
             "via genre feeds instead.",
         )
+
+    async def discover_series(self, *, limit: int = 20) -> list[NormalizedSeries]:
+        data = await self._get("/shortmax/api/v1/feed/foryou", {"lang": "en"})
+        out: list[NormalizedSeries] = []
+        for item in self._payload_list(data)[: max(1, limit)]:
+            try:
+                out.append(normalize_series(self.name, item))
+            except ValueError as exc:
+                logger.warning("shortmax: skipping unparseable series in discover: %s", exc)
+                continue
+        return out
 
     async def get_series(self, series_id: str) -> NormalizedSeries | None:
         raise ProviderError(

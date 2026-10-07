@@ -21,3 +21,5 @@ __pycache__/
 *.pyc
 dashboard/.env.local
 backups/
+*.sqlite3
+*.db
