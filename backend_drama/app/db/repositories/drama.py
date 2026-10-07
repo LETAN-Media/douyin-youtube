@@ -207,12 +207,17 @@ def upsert_series(*, source_id: str, provider: str, external_series_id: str,
         created = True
     else:
         sid = row["id"]
+        meta_str = json.dumps(metadata) if metadata is not None else None
         conn.execute(
-            "UPDATE drama_series SET source_id = ?, title = ?, description = ?, "
-            "thumbnail_url = ?, total_episodes = ?, metadata_json = ?, "
+            "UPDATE drama_series SET source_id = ?, "
+            "title = COALESCE(?, title), "
+            "description = COALESCE(?, description), "
+            "thumbnail_url = COALESCE(?, thumbnail_url), "
+            "total_episodes = COALESCE(?, total_episodes), "
+            "metadata_json = COALESCE(?, metadata_json), "
             "updated_at = ? WHERE id = ?",
             (source_id, title, description, thumbnail_url, total_episodes,
-             json.dumps(metadata or {}), _now(), sid),
+             meta_str, _now(), sid),
         )
         conn.commit()
         created = False
