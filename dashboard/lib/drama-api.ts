@@ -333,6 +333,11 @@ export interface DramaProcessingSettingsDto {
   target_language: string | null;
   subtitle_enabled: boolean;
   tts_enabled: boolean;
+  template_enabled: boolean;
+  template_id: string | null;
+  template_mode: string | null;
+  youtube_destination_id: string | null;
+  auto_publish: boolean;
   total_episodes: number;
   planned_videos: number;
 }
@@ -354,6 +359,11 @@ export async function updateDramaProcessingSettings(
     target_language?: string | null;
     subtitle_enabled?: boolean;
     tts_enabled?: boolean;
+    template_enabled?: boolean;
+    template_id?: string | null;
+    template_mode?: string | null;
+    youtube_destination_id?: string | null;
+    auto_publish?: boolean;
   },
 ): Promise<DramaProcessingSettingsDto> {
   return dramaFetch<DramaProcessingSettingsDto>(
@@ -363,5 +373,65 @@ export async function updateDramaProcessingSettings(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     },
+  );
+}
+
+export interface DramaTemplateDto {
+  id: string;
+  name: string;
+  asset_url: string;
+  canvas_width: number;
+  canvas_height: number;
+  content_x: number;
+  content_y: number;
+  content_width: number;
+  content_height: number;
+}
+
+export async function listDramaTemplates(): Promise<{ items: DramaTemplateDto[] }> {
+  return dramaFetch<{ items: DramaTemplateDto[] }>(`/api/drama/templates`);
+}
+
+export async function createDramaTemplate(payload: {
+  name: string;
+  asset_url: string;
+  canvas_width?: number;
+  canvas_height?: number;
+  content_x?: number;
+  content_y?: number;
+  content_width?: number;
+  content_height?: number;
+}): Promise<DramaTemplateDto> {
+  return dramaFetch<DramaTemplateDto>(`/api/drama/templates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export interface DramaSeriesJobDto {
+  id: string;
+  pipeline_id: string;
+  series_id: string;
+  processing_mode: string;
+  chunk_index: number;
+  episode_start: number | null;
+  episode_end: number | null;
+  status: string;
+  stage: string | null;
+  downloaded_episode_ids: string[];
+  output_path: string | null;
+  youtube_video_id: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  upload_progress: number | null;
+  template_id: string | null;
+}
+
+export async function listDramaPipelineJobs(
+  pipelineId: string,
+): Promise<{ items: DramaSeriesJobDto[] }> {
+  return dramaFetch<{ items: DramaSeriesJobDto[] }>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/jobs`,
   );
 }

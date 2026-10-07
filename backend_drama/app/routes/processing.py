@@ -18,6 +18,11 @@ class ProcessingSettingsUpdate(BaseModel):
     target_language: str | None = None
     subtitle_enabled: bool = True
     tts_enabled: bool = False
+    template_enabled: bool = False
+    template_id: str | None = None
+    template_mode: str | None = None
+    youtube_destination_id: str | None = None
+    auto_publish: bool = True
 
 
 @router.get("/pipelines/{pipeline_id}/processing-settings")
@@ -53,6 +58,11 @@ async def update_processing_settings(
 ) -> dict:
     if repo.get_pipeline(pipeline_id) is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
+    if body.template_id:
+        from ..db.repositories import templates as templates_repo
+
+        if templates_repo.get_template(body.template_id.strip()) is None:
+            raise _err(404, "TEMPLATE_NOT_FOUND", "Template not found.")
     try:
         settings = proc.update_settings(
             pipeline_id,
@@ -62,6 +72,11 @@ async def update_processing_settings(
             target_language=body.target_language,
             subtitle_enabled=body.subtitle_enabled,
             tts_enabled=body.tts_enabled,
+            template_enabled=body.template_enabled,
+            template_id=body.template_id,
+            template_mode=body.template_mode,
+            youtube_destination_id=body.youtube_destination_id,
+            auto_publish=body.auto_publish,
         )
     except ValueError as exc:
         raise _err(400, "INVALID_SETTINGS", str(exc))
@@ -104,3 +119,12 @@ async def create_series_jobs(
         for idx, (start, end) in enumerate(chunks)
     ]
     return {"items": jobs}
+
+
+@router.get("/pipelines/{pipeline_id}/jobs")
+async def list_pipeline_jobs(
+    pipeline_id: str, limit: int = 50, _: None = Depends(require_admin)
+) -> dict:
+    if repo.get_pipeline(pipeline_id) is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
+    return {"items": proc.list_pipeline_jobs(pipeline_id, limit=limit)}

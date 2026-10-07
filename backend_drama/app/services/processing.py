@@ -67,6 +67,13 @@ async def run_series_job(
         "job_id": job_id, "mode": mode, "active": active, "skipped": skipped,
         "stages": {}, "output": None,
     }
+    # Upload idempotency: a restarted job that already published must never
+    # upload a duplicate — return the recorded completed state.
+    if job.get("youtube_video_id") and job.get("status") == "completed":
+        report["status"] = "completed"
+        report["output"] = job.get("output_path")
+        report["youtube_video_id"] = job.get("youtube_video_id")
+        return report
 
     def _step(name: str, state: str, **extra: Any) -> None:
         report["stages"][name] = {"state": state, **extra}
@@ -91,6 +98,13 @@ async def run_series_job(
             return _fail("NO_EPISODES", "No episodes in range.", "download")
         job_dir = workdir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
+        # Disk pre-flight before any byte lands on disk.
+        from .render.disk import DiskError, check_temp_space, estimate_job_bytes
+
+        try:
+            check_temp_space(job_dir, estimate_job_bytes(episodes))
+        except DiskError as exc:
+            return _fail(exc.code, str(exc), "download")
         ordered_paths: list[Path] = []
         downloader = download_episode or _default_not_implemented
         already = set(job.get("downloaded_episode_ids") or [])
@@ -152,9 +166,10 @@ async def run_series_job(
 
         # ---- merge ----
         _step("merge", "running")
-        final_path = job_dir / "final.mp4"
+        merged_path = job_dir / "merged.mp4"
+        final_path = merged_path
         try:
-            concat_paths(ordered_paths, final_path)
+            concat_paths(ordered_paths, merged_path)
             from .media.drama_media import probe_media
 
             probe = probe_media(final_path)
@@ -165,6 +180,44 @@ async def run_series_job(
         _step("merge", "done", output=str(final_path))
         report["output"] = str(final_path)
         proc_repo.update_job(job_id, status="merging", output_path=str(final_path))
+
+        # ---- template (once, on the merged video — never per episode) ----
+        settings = proc_repo.get_settings(job.get("pipeline_id") or "")
+        template = None
+        if settings.get("template_enabled") and settings.get("template_id"):
+            from ..db.repositories import templates as templates_repo
+
+            template = templates_repo.get_template(settings["template_id"])
+            if template is None:
+                return _fail(
+                    "TEMPLATE_MISSING",
+                    "Pipeline template not found.", "template",
+                )
+            proc_repo.update_job(job_id, template_id=template["id"])
+        if template is not None:
+            from .render.template_renderer import TemplateError, render_template
+
+            _step("template", "running")
+            templated_path = job_dir / "final.mp4"
+            try:
+                render_template(final_path, template, templated_path, workdir=job_dir)
+                from .media.drama_media import probe_media as _probe
+
+                probe = _probe(templated_path)
+                if probe.get("duration", 0) <= 0:
+                    raise TemplateError("TEMPLATE_RENDER_FAILED", "Templated output has no duration.")
+            except TemplateError as exc:
+                return _fail(exc.code, str(exc), "template")
+            try:
+                final_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            final_path = templated_path
+            _step("template", "done", output=str(final_path))
+            report["output"] = str(final_path)
+            proc_repo.update_job(job_id, output_path=str(final_path))
+        else:
+            _step("template", "skipped")
 
         # ---- upload ----
         uploader = upload_video or _default_not_implemented
@@ -181,13 +234,27 @@ async def run_series_job(
         if isinstance(up_out, dict) and up_out.get("youtube_video_id"):
             proc_repo.update_job(job_id, youtube_video_id=up_out["youtube_video_id"])
 
-        # ---- cleanup ----
+        # ---- cleanup (only after successful upload) ----
         _step("cleanup", "running")
         for path in ordered_paths:
             try:
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
+        for extra in ("merged.mp4", "concat.txt", "template_frame.png"):
+            try:
+                (job_dir / extra).unlink(missing_ok=True)
+            except Exception:
+                pass
+        # final.mp4 itself is removed too — Turso keeps job state + video id.
+        try:
+            final_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            job_dir.rmdir()
+        except Exception:
+            pass
         _step("cleanup", "done")
 
         proc_repo.update_job(job_id, status="completed", stage="completed")

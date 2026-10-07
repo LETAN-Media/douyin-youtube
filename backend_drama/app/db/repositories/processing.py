@@ -43,18 +43,34 @@ def _row_to_settings(r: Any) -> dict[str, Any]:
         "target_language": _col("target_language", 4),
         "subtitle_enabled": bool(_col("subtitle_enabled", 5, 1)),
         "tts_enabled": bool(_col("tts_enabled", 6, 0)),
+        "template_enabled": bool(_col("template_enabled", 7, 0)),
+        "template_id": _col("template_id", 8),
+        "template_mode": _col("template_mode", 9),
+        "youtube_destination_id": _col("youtube_destination_id", 10),
+        "auto_publish": bool(_col("auto_publish", 11, 1)),
     }
 
 
 def get_settings(pipeline_id: str) -> dict[str, Any]:
     """Defaults when no row exists: direct_merge, merge all, no ASR."""
     conn = get_client()
-    row = conn.execute(
-        "SELECT pipeline_id, processing_mode, merge_all_episodes, "
-        "episodes_per_video, target_language, subtitle_enabled, tts_enabled "
-        "FROM drama_pipeline_settings WHERE pipeline_id = ?",
-        (pipeline_id,),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            "SELECT pipeline_id, processing_mode, merge_all_episodes, "
+            "episodes_per_video, target_language, subtitle_enabled, tts_enabled, "
+            "template_enabled, template_id, template_mode, youtube_destination_id, "
+            "auto_publish "
+            "FROM drama_pipeline_settings WHERE pipeline_id = ?",
+            (pipeline_id,),
+        ).fetchone()
+    except Exception:
+        # Pre-migration DBs without the new columns.
+        row = conn.execute(
+            "SELECT pipeline_id, processing_mode, merge_all_episodes, "
+            "episodes_per_video, target_language, subtitle_enabled, tts_enabled "
+            "FROM drama_pipeline_settings WHERE pipeline_id = ?",
+            (pipeline_id,),
+        ).fetchone()
     if row is None:
         return {
             "pipeline_id": pipeline_id,
@@ -64,6 +80,11 @@ def get_settings(pipeline_id: str) -> dict[str, Any]:
             "target_language": None,
             "subtitle_enabled": True,
             "tts_enabled": False,
+            "template_enabled": False,
+            "template_id": None,
+            "template_mode": None,
+            "youtube_destination_id": None,
+            "auto_publish": True,
         }
     return _row_to_settings(row)
 
@@ -86,22 +107,46 @@ def update_settings(pipeline_id: str, **fields: Any) -> dict[str, Any]:
     target_language = fields.get("target_language", current["target_language"])
     if target_language is not None:
         target_language = str(target_language).strip().lower() or None
+    template_enabled = bool(fields.get("template_enabled", current["template_enabled"]))
+    template_id = fields.get("template_id", current["template_id"])
+    if template_id is not None:
+        template_id = str(template_id).strip() or None
+    template_mode = fields.get("template_mode", current["template_mode"])
+    if template_mode is not None:
+        template_mode = str(template_mode).strip().lower() or None
+        if template_mode not in ("overlay", "frame", "fullscreen"):
+            raise ValueError("template_mode must be overlay, frame, or fullscreen.")
+    youtube_destination_id = fields.get(
+        "youtube_destination_id", current["youtube_destination_id"]
+    )
+    if youtube_destination_id is not None:
+        youtube_destination_id = str(youtube_destination_id).strip() or None
     conn = get_client()
     conn.execute(
         "INSERT INTO drama_pipeline_settings (pipeline_id, processing_mode, "
         "merge_all_episodes, episodes_per_video, target_language, "
-        "subtitle_enabled, tts_enabled, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "subtitle_enabled, tts_enabled, template_enabled, template_id, "
+        "template_mode, youtube_destination_id, auto_publish, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(pipeline_id) DO UPDATE SET processing_mode = excluded.processing_mode, "
         "merge_all_episodes = excluded.merge_all_episodes, "
         "episodes_per_video = excluded.episodes_per_video, "
         "target_language = excluded.target_language, "
         "subtitle_enabled = excluded.subtitle_enabled, "
-        "tts_enabled = excluded.tts_enabled, updated_at = excluded.updated_at",
+        "tts_enabled = excluded.tts_enabled, "
+        "template_enabled = excluded.template_enabled, "
+        "template_id = excluded.template_id, "
+        "template_mode = excluded.template_mode, "
+        "youtube_destination_id = excluded.youtube_destination_id, "
+        "auto_publish = excluded.auto_publish, "
+        "updated_at = excluded.updated_at",
         (
             pipeline_id, mode, 1 if merge_all else 0, epv, target_language,
             1 if fields.get("subtitle_enabled", current["subtitle_enabled"]) else 0,
             1 if fields.get("tts_enabled", current["tts_enabled"]) else 0,
+            1 if template_enabled else 0, template_id, template_mode,
+            youtube_destination_id,
+            1 if fields.get("auto_publish", current["auto_publish"]) else 0,
             _now(),
         ),
     )
@@ -165,6 +210,8 @@ def _row_to_job(r: Any) -> dict[str, Any]:
         "youtube_video_id": _col("youtube_video_id", 11),
         "last_error_code": _col("last_error_code", 12),
         "last_error_message": _col("last_error_message", 13),
+        "upload_progress": _col("upload_progress", 14),
+        "template_id": _col("template_id", 15),
     }
 
 
@@ -194,7 +241,8 @@ def get_job(job_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT id, pipeline_id, series_id, processing_mode, chunk_index, "
         "episode_start, episode_end, status, stage, downloaded_episode_ids_json, "
-        "output_path, youtube_video_id, last_error_code, last_error_message "
+        "output_path, youtube_video_id, last_error_code, last_error_message, "
+        "upload_progress, template_id "
         "FROM drama_series_jobs WHERE id = ?",
         (job_id,),
     ).fetchone()
@@ -206,7 +254,8 @@ def list_jobs(series_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT id, pipeline_id, series_id, processing_mode, chunk_index, "
         "episode_start, episode_end, status, stage, downloaded_episode_ids_json, "
-        "output_path, youtube_video_id, last_error_code, last_error_message "
+        "output_path, youtube_video_id, last_error_code, last_error_message, "
+        "upload_progress, template_id "
         "FROM drama_series_jobs WHERE series_id = ? ORDER BY chunk_index ASC",
         (series_id,),
     ).fetchall()
@@ -217,6 +266,7 @@ def update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
     allowed = {
         "status", "stage", "output_path", "youtube_video_id",
         "last_error_code", "last_error_message",
+        "upload_progress", "template_id",
     }
     sets: list[str] = []
     params: list[Any] = []
@@ -247,3 +297,17 @@ def mark_episode_downloaded(job_id: str, episode_db_id: str) -> dict[str, Any] |
     if episode_db_id not in done:
         done.append(episode_db_id)
     return update_job(job_id, downloaded_episode_ids=done)
+
+
+def list_pipeline_jobs(pipeline_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    conn = get_client()
+    rows = conn.execute(
+        "SELECT id, pipeline_id, series_id, processing_mode, chunk_index, "
+        "episode_start, episode_end, status, stage, downloaded_episode_ids_json, "
+        "output_path, youtube_video_id, last_error_code, last_error_message, "
+        "upload_progress, template_id "
+        "FROM drama_series_jobs WHERE pipeline_id = ? "
+        "ORDER BY updated_at DESC, id DESC LIMIT ?",
+        (pipeline_id, max(1, min(limit, 200))),
+    ).fetchall()
+    return [_row_to_job(r) for r in rows]

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db.client import db_configured, migrate
-from .routes import discover, health, inventory, pipelines, processing, providers, series, sources
+from .routes import discover, health, inventory, pipelines, processing, providers, series, sources, templates
 
 logger = logging.getLogger("backend-drama")
 
@@ -57,6 +57,7 @@ def create_app() -> FastAPI:
     app.include_router(inventory.router)
     app.include_router(providers.router)
     app.include_router(processing.router)
+    app.include_router(templates.router)
     app.include_router(discover.router)
     return app
 

@@ -154,6 +154,10 @@ def test_direct_merge_skips_asr_translation_tts(db, tmp_path):
 
     async def fake_upload(job, final_path):
         calls.append(("upload", final_path.name))
+        # Final must be ffprobe-readable at upload time.
+        from app.services.media.drama_media import probe_media
+
+        assert probe_media(final_path)["duration"] > 0
         assert final_path.exists()
         return {"youtube_video_id": "yt_1"}
 
@@ -171,13 +175,10 @@ def test_direct_merge_skips_asr_translation_tts(db, tmp_path):
     assert out["skipped"] == ["asr", "translate", "tts", "render", "subtitle"]
     assert ("SHOULD_NOT_RUN",) not in calls
     assert sorted(c[1] for c in calls if c[0] == "download") == [1, 2]
-    assert Path(out["output"]).exists()
-    # episode source files cleaned, final kept
+    # After successful upload everything local is cleaned, including final.
+    assert not Path(out["output"]).exists()
     assert not (tmp_path / "work" / job["id"] / "ep_001.mp4").exists()
-    # merged output is ffprobe-readable
-    from app.services.media.drama_media import probe_media
-
-    assert probe_media(Path(out["output"]))["duration"] > 0
+    assert not (tmp_path / "work" / job["id"] / "merged.mp4").exists()
 
 
 def test_translate_sub_invokes_asr_and_translation_not_tts(db, tmp_path):
@@ -291,3 +292,196 @@ def test_episode_order_numeric(db, tmp_path):
     ))
     assert out["status"] == "completed", out
     assert seen == list(range(1, 13))
+
+
+# ---------- templates ----------
+
+
+def test_template_crud_and_settings_link(db):
+    from fastapi.testclient import TestClient
+
+    from app.db.repositories import templates as templates_repo
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    bad = client.post(
+        "/api/drama/templates", headers=ADMIN,
+        json={"name": "X", "asset_url": "not-a-url"},
+    )
+    assert bad.status_code == 400
+    tpl = templates_repo.create_template(
+        name="Frame A", asset_url="file:///tmp/frame_a.png",
+        canvas_width=1280, canvas_height=720,
+        content_x=0, content_y=0, content_width=1280, content_height=720,
+    )
+    assert tpl["id"].startswith("dtpl_")
+    assert [t["id"] for t in templates_repo.list_templates()] == [tpl["id"]]
+
+    p = repo.create_pipeline(name="Tpl Pipe")
+    r = client.put(
+        f"/api/drama/pipelines/{p['id']}/processing-settings", headers=ADMIN,
+        json={"template_enabled": True, "template_id": tpl["id"],
+              "template_mode": "overlay", "youtube_destination_id": "ytd_1",
+              "auto_publish": False},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["template_enabled"] is True
+    assert body["template_id"] == tpl["id"]
+    assert body["youtube_destination_id"] == "ytd_1"
+    assert body["auto_publish"] is False
+    missing = client.put(
+        f"/api/drama/pipelines/{p['id']}/processing-settings", headers=ADMIN,
+        json={"template_id": "dtpl_nope"},
+    )
+    assert missing.status_code == 404
+    assert templates_repo.delete_template(tpl["id"]) is True
+    assert templates_repo.delete_template(tpl["id"]) is False
+
+
+def _make_frame(path):
+    import subprocess
+
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+         "-i", "color=c=0x1a1a2e:size=1280x720:duration=1",
+         "-frames:v", "1", str(path)],
+        check=True, timeout=60,
+    )
+    return path
+
+
+def test_template_render_once_over_merged(db, tmp_path):
+    from app.services.render.template_renderer import render_template
+
+    _p, series = _seed_series(db, n=2, prefix="tmpl")
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    from app.services.merge import concat_paths
+
+    ep_paths = []
+    for i in (1, 2):
+        target = work / f"ep_{i:03d}.mp4"
+        target.write_bytes(src.read_bytes())
+        ep_paths.append(target)
+    merged = work / "merged.mp4"
+    concat_paths(ep_paths, merged)
+    frame = _make_frame(work / "frame.png")
+    tpl = {
+        "id": "dtpl_t", "asset_url": f"file://{frame}",
+        "canvas_width": 1280, "canvas_height": 720,
+        "content_x": 0, "content_y": 0,
+        "content_width": 1280, "content_height": 720,
+    }
+    final = work / "final.mp4"
+    render_template(merged, tpl, final, workdir=work)
+    from app.services.media.drama_media import probe_media
+
+    probe = probe_media(final)
+    assert probe["duration"] > 0
+    assert probe["width"] == 1280 and probe["height"] == 720
+    plain = work / "plain.mp4"
+    render_template(merged, None, plain, workdir=work)
+    assert plain.exists()
+
+
+def test_template_missing_asset_fails_loudly(db, tmp_path):
+    from app.services.render.template_renderer import TemplateError, render_template
+
+    _p, series = _seed_series(db, n=1, prefix="tmplmiss")
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "merged.mp4").write_bytes(src.read_bytes())
+    with pytest.raises(TemplateError) as exc:
+        render_template(
+            work / "merged.mp4",
+            {"id": "x", "asset_url": "file:///nope/missing.png"},
+            work / "final.mp4", workdir=work,
+        )
+    assert exc.value.code == "TEMPLATE_MISSING"
+
+
+def test_disk_guard_blocks_when_full(db, tmp_path, monkeypatch):
+    from app.services.render import disk as disk_mod
+
+    _p, series = _seed_series(db, n=1, prefix="disk")
+    monkeypatch.setattr(disk_mod, "disk_free_bytes", lambda path: 1024)
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 1)
+
+    async def _boom(ep, target):
+        raise AssertionError("must not download without disk space")
+
+    async def _upload(job, final_path):
+        return {}
+
+    out = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=_boom,
+        upload_video=_upload,
+    ))
+    assert out["status"] == "failed", out
+    assert out["error"]["code"] == "INSUFFICIENT_TEMP_STORAGE"
+
+
+def test_disk_estimate_scales_with_episodes():
+    from app.services.render import disk as disk_mod
+
+    small = disk_mod.estimate_job_bytes([{"duration": 600}])
+    big = disk_mod.estimate_job_bytes([{"duration": 600}] * 60)
+    assert big == small * 60
+    assert small > 0
+
+
+def test_upload_idempotency_skips_duplicate(db, tmp_path):
+    _p, series = _seed_series(db, n=1, prefix="idem")
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 1)
+    proc.update_job(job["id"], status="completed", youtube_video_id="yt_done",
+                    output_path="/tmp/gone.mp4")
+
+    async def _boom(*a, **k):
+        raise AssertionError("must not run anything when already published")
+
+    out = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=_boom,
+        upload_video=_boom,
+    ))
+    assert out["status"] == "completed"
+    assert out["youtube_video_id"] == "yt_done"
+
+
+def test_orchestrator_template_stage_end_to_end(db, tmp_path):
+    _p, series = _seed_series(db, n=2, prefix="e2e")
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+    frame = _make_frame(tmp_path / "fix" / "frame.png")
+    from app.db.repositories import templates as templates_repo
+
+    tpl = templates_repo.create_template(
+        name="T", asset_url=f"file://{frame}",
+        canvas_width=1280, canvas_height=720,
+        content_x=0, content_y=0, content_width=1280, content_height=720,
+    )
+    proc.update_settings(
+        _pipeline_of(series), processing_mode="direct_merge",
+        template_enabled=True, template_id=tpl["id"],
+    )
+    seen_final = {}
+
+    async def fake_download(ep, target):
+        target.write_bytes(src.read_bytes())
+
+    async def fake_upload(job, final_path):
+        seen_final["path"] = str(final_path)
+        from app.services.media.drama_media import probe_media
+
+        assert probe_media(final_path)["width"] == 1280
+        return {"youtube_video_id": "yt_t"}
+
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 2)
+    out = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=fake_download,
+        upload_video=fake_upload,
+    ))
+    assert out["status"] == "completed", out
+    assert out["stages"]["template"]["state"] == "done"
+    assert seen_final["path"].endswith("final.mp4")

@@ -379,6 +379,33 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_series_jobs_pipeline ON drama_series_jobs(pipeline_id, status)",
         ],
     ),
+    (
+        "drama_006",
+        [
+            "ALTER TABLE drama_pipeline_settings ADD COLUMN template_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE drama_pipeline_settings ADD COLUMN template_id TEXT",
+            "ALTER TABLE drama_pipeline_settings ADD COLUMN template_mode TEXT",
+            "ALTER TABLE drama_pipeline_settings ADD COLUMN youtube_destination_id TEXT",
+            "ALTER TABLE drama_pipeline_settings ADD COLUMN auto_publish INTEGER NOT NULL DEFAULT 1",
+            """
+            CREATE TABLE IF NOT EXISTS drama_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                asset_url TEXT NOT NULL,
+                canvas_width INTEGER NOT NULL DEFAULT 1280,
+                canvas_height INTEGER NOT NULL DEFAULT 720,
+                content_x INTEGER NOT NULL DEFAULT 0,
+                content_y INTEGER NOT NULL DEFAULT 0,
+                content_width INTEGER NOT NULL DEFAULT 1280,
+                content_height INTEGER NOT NULL DEFAULT 720,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            "ALTER TABLE drama_series_jobs ADD COLUMN upload_progress REAL",
+            "ALTER TABLE drama_series_jobs ADD COLUMN template_id TEXT",
+        ],
+    ),
 ]
 
 
@@ -409,7 +436,14 @@ def migrate() -> list[str]:
             if version in have:
                 continue
             for sql in statements:
-                conn.execute(sql)
+                try:
+                    conn.execute(sql)
+                except Exception as exc:
+                    # Tolerate re-runs after a partial apply (e.g. a column
+                    # that already exists from an earlier attempt).
+                    if "duplicate column name" in str(exc).lower():
+                        continue
+                    raise
             conn.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?)", (version,)
             )
