@@ -221,6 +221,15 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             )""",
         ],
     ),
+    (
+        "audio_006",
+        [
+            "ALTER TABLE audio_processing_settings ADD COLUMN template_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE audio_processing_settings ADD COLUMN template_asset_id TEXT",
+            "ALTER TABLE audio_processing_settings ADD COLUMN template_interval_s REAL NOT NULL DEFAULT 600",
+            "ALTER TABLE audio_processing_jobs ADD COLUMN template_asset_id TEXT",
+        ],
+    ),
 ]
 
 

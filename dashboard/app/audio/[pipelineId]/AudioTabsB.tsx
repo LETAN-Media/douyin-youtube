@@ -122,20 +122,86 @@ function AiTab({ pipeline }: { pipeline: AudioPipelineDto }) {
           </div>
         </div>
         <div>
-          <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">Thể loại</p>
+          <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+            Thể loại (chọn nhiều)
+          </p>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            {(s.genres ?? []).map((g: string) => (
-              <button key={g} type="button" onClick={() => set("genre", g)}
-                className={`rounded-full px-3 py-1.5 text-[11px] font-bold ${
-                  s.genre === g ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-600"
-                }`}>{g}</button>
-            ))}
+            {(s.genres ?? []).map((g: string) => {
+              const selected: string[] = Array.isArray(s.genre)
+                ? s.genre : s.genre ? [s.genre] : [];
+              const on = selected.includes(g);
+              return (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={() => set("genre",
+                    on ? selected.filter((x) => x !== g) : [...selected, g])}
+                  className={`rounded-full px-3 py-1.5 text-[11px] font-bold ${
+                    on ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-600"
+                  }`}
+                >
+                  {on ? "✓ " : ""}{g}
+                </button>
+              );
+            })}
           </div>
-          <input
-            value={s.genre ?? ""} onChange={(e) => set("genre", e.target.value)}
-            placeholder="Thể loại tùy chỉnh…"
-            className="mt-2 block min-h-[44px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-          />
+          <div className="mt-2 flex gap-2">
+            <input
+              id="audio-genre-custom"
+              placeholder="Thể loại tùy chỉnh…"
+              className="block min-h-[44px] flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                const input = e.target as HTMLInputElement;
+                const v = input.value.trim();
+                if (!v) return;
+                const selected: string[] = Array.isArray(s.genre)
+                  ? s.genre : s.genre ? [s.genre] : [];
+                if (!selected.includes(v)) set("genre", [...selected, v]);
+                input.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const input = document.getElementById(
+                  "audio-genre-custom") as HTMLInputElement | null;
+                const v = input?.value.trim();
+                if (!v) return;
+                const selected: string[] = Array.isArray(s.genre)
+                  ? s.genre : s.genre ? [s.genre] : [];
+                if (!selected.includes(v)) set("genre", [...selected, v]);
+                if (input) input.value = "";
+              }}
+              className="inline-flex min-h-[44px] shrink-0 items-center rounded-xl bg-slate-900 px-3 text-xs font-bold text-white"
+            >
+              + Thêm
+            </button>
+          </div>
+          {(() => {
+            const selected: string[] = Array.isArray(s.genre)
+              ? s.genre : s.genre ? [s.genre] : [];
+            const custom = selected.filter(
+              (x) => !(s.genres ?? []).includes(x));
+            if (custom.length === 0) return null;
+            return (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {custom.map((g) => (
+                  <button
+                    key={g}
+                    type="button"
+                    onClick={() => set("genre",
+                      selected.filter((x) => x !== g))}
+                    title="Bấm để bỏ chọn"
+                    className="rounded-full bg-indigo-600 px-3 py-1.5 text-[11px] font-bold text-white"
+                  >
+                    ✓ {g} ✕
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
         </div>
         {["generate_title", "generate_description", "generate_hashtags"].map((k) => (
           <label key={k} className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">

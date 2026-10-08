@@ -16,7 +16,7 @@ GENRES = ["Audio Ngôn Tình", "Audio Boy Love", "Audio Kinh Dị",
 class AiUpdate(BaseModel):
     enabled: bool | None = None
     language: str | None = None
-    genre: str | None = None
+    genre: str | list[str] | None = None
     generate_title: bool | None = None
     generate_description: bool | None = None
     generate_hashtags: bool | None = None

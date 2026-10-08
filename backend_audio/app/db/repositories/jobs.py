@@ -64,7 +64,7 @@ def claim_next_queued(worker_id: str, lease_seconds: int = 3600) -> dict | None:
 
 def update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
     allowed = {"status", "stage", "progress_percent", "background_asset_id",
-               "logo_asset_id", "srt_object_key", "ai_title", "ai_description",
+               "logo_asset_id", "template_asset_id", "srt_object_key", "ai_title", "ai_description",
                "ai_hashtags_json", "ai_metadata_status", "youtube_video_id",
                "youtube_url", "last_error_code", "last_error_message",
                "lease_owner", "lease_expires_at"}

@@ -146,6 +146,16 @@ def pick_random_background(pipeline_id: str,
     return random.choice(pool)
 
 
+def pick_random_template(pipeline_id: str) -> dict | None:
+    """Random enabled template (auto mode). ~10 per pipeline, one per job."""
+    import random
+
+    assets = [a for a in list_assets(pipeline_id, "template") if a.get("enabled")]
+    if not assets:
+        return None
+    return random.choice(assets)
+
+
 # ---- AI settings ----
 
 AI_DEFAULTS = {
@@ -185,8 +195,30 @@ def get_ai_settings(pipeline_id: str) -> dict[str, Any]:
     for flag in ("generate_title", "generate_description", "generate_hashtags"):
         out[flag] = bool(out.get(flag, 1))
     out["locked_hashtags"] = _parse_locked(out.get("locked_hashtags_json"))
+    out["genre"] = _parse_genre(out.get("genre"))
     out["config_version"] = int(out.get("config_version") or 1)
     return out
+
+
+def _parse_genre(raw: Any) -> list[str] | None:
+    """Genre is multi-select: stored as JSON array; legacy plain strings kept."""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+        return items or None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.startswith("["):
+        try:
+            items = json.loads(text)
+            if isinstance(items, list):
+                items = [str(x).strip() for x in items if str(x).strip()]
+                return items or None
+        except Exception:
+            pass
+    return [text]
 
 
 def upsert_ai_settings(pipeline_id: str, **fields: Any) -> dict[str, Any]:
@@ -203,6 +235,23 @@ def upsert_ai_settings(pipeline_id: str, **fields: Any) -> dict[str, Any]:
             return bool(value)
         if key == "locked_hashtags":
             return value if isinstance(value, list) else _parse_locked(value)
+        if key == "genre":
+            if value is None:
+                return None
+            if isinstance(value, list):
+                items = [str(x).strip() for x in value if str(x).strip()]
+                return json.dumps(items, ensure_ascii=False) if items else None
+            text = str(value).strip()
+            if text.startswith("["):
+                try:
+                    items = json.loads(text)
+                    if isinstance(items, list):
+                        return json.dumps(
+                            [str(x).strip() for x in items if str(x).strip()],
+                            ensure_ascii=False)
+                except Exception:
+                    pass
+            return text or None
         if isinstance(value, str):
             return value.strip() or None
         return value

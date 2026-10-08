@@ -142,7 +142,7 @@ export interface AudioAiSettingsDto {
   pipeline_id: string;
   enabled: boolean;
   language: string;
-  genre: string | null;
+  genre: string | string[] | null;
   generate_title: boolean;
   generate_description: boolean;
   generate_hashtags: boolean;

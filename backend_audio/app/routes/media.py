@@ -13,6 +13,7 @@ ALLOWED = {
     "background": {"image/gif", "video/mp4", "image/jpeg", "image/png"},
     "logo": {"image/png", "image/svg+xml", "image/jpeg"},
     "srt": {"application/x-subrip", "text/plain"},
+    "template": {"video/mp4", "video/quicktime"},
 }
 MAX_UPLOAD_BYTES = 300 * 1024 * 1024
 

@@ -72,7 +72,7 @@ class GeneratedMetadata:
 
 @dataclass
 class AiContext:
-    genre: str | None = None
+    genre: str | list[str] | None = None
     source_title: str | None = None
     source_caption: str | None = None
     audio_duration_s: float | None = None
@@ -198,8 +198,10 @@ async def generate_metadata(ctx: AiContext, settings_row: dict,
     await _limiter.reserve()
 
     system = BASE_PROMPTS[language]
-    if (ctx.genre or "").strip():
-        system += f"\nThể loại nội dung: {ctx.genre.strip()}"
+    genre_text = (", ".join(g for g in ctx.genre if str(g).strip())
+                  if isinstance(ctx.genre, list) else str(ctx.genre or "").strip())
+    if genre_text:
+        system += f"\nThể loại nội dung: {genre_text}"
     if settings_row.get("system_prompt"):
         system += ("\n\nHướng dẫn riêng của pipeline (vẫn tuân thủ mọi quy tắc "
                    "nền và định dạng JSON):\n" + settings_row["system_prompt"].strip())
@@ -285,10 +287,13 @@ def _parse_locked(raw: Any) -> list[str]:
 
 
 def config_hash_for(settings_row: dict, model: str) -> str:
+    genre = settings_row.get("genre")
+    genre_text = (", ".join(sorted(str(g).strip() for g in genre if str(g).strip()))
+                  if isinstance(genre, list) else str(genre or "").strip())
     canonical = json.dumps({
         "enabled": bool(settings_row.get("enabled")),
         "language": normalize_language(settings_row.get("language")),
-        "genre": (settings_row.get("genre") or "").strip(),
+        "genre": genre_text,
         "generate_title": bool(settings_row.get("generate_title", True)),
         "generate_description": bool(settings_row.get("generate_description", True)),
         "generate_hashtags": bool(settings_row.get("generate_hashtags", True)),

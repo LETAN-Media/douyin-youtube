@@ -154,6 +154,33 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
                 jobs_repo.add_event(job_id, "generating_srt", "skipped",
                                     f"{exc.code} (optional)")
 
+    # ---- template overlay (auto random or manual pick) ----
+    template_local: Path | None = None
+    template_len: float | None = None
+    if proc_settings.get("template_enabled"):
+        picked = None
+        manual_tid = proc_settings.get("template_asset_id")
+        if manual_tid:
+            for asset in audio_repo.list_assets(pipeline_id, "template"):
+                if asset["id"] == manual_tid and asset.get("enabled"):
+                    picked = asset
+                    break
+        if picked is None:
+            picked = audio_repo.pick_random_template(pipeline_id)
+        if picked is not None:
+            try:
+                template_local = job_dir / "template.mp4"
+                r2_storage.download_file(picked["object_key"], template_local)
+                template_len = audio_extractor.probe_media(
+                    template_local)["duration"]
+                jobs_repo.update_job(job_id, template_asset_id=picked["id"])
+                jobs_repo.add_event(job_id, "rendering", "template",
+                                    f"{picked['id']} ({template_len:.1f}s)")
+            except Exception as exc:
+                jobs_repo.add_event(job_id, "rendering", "template_skipped",
+                                    f"{type(exc).__name__} (non-blocking)")
+                template_local = None
+
     # ---- rendering ----
     _step(job_id, "rendering", "running", 60)
     logo_local: Path | None = None
@@ -173,7 +200,11 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
             duration=duration, logo=logo_local,
             logo_position=proc_settings.get("logo_position", "top-right"),
             orientation=proc_settings.get("orientation", "landscape"),
-            threads=threads)
+            threads=threads,
+            template=template_local,
+            template_interval_s=float(
+                proc_settings.get("template_interval_s") or 600),
+            template_duration_s=template_len)
     except loop_renderer.RenderError as exc:
         return _fail(job_id, exc.code, str(exc), "rendering")
 
@@ -307,7 +338,8 @@ def _processing_settings(pipeline_id: str) -> dict[str, Any]:
     if row is None:
         return {"subtitle_mode": "youtube_captions", "srt_auto_generate": True,
                 "srt_required": True, "logo_position": "top-right",
-                "orientation": "landscape"}
+                "orientation": "landscape", "template_enabled": False,
+                "template_asset_id": None, "template_interval_s": 600}
     return dict(row)
 
 

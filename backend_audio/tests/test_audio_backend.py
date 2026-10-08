@@ -73,7 +73,7 @@ def test_ai_settings_version_and_reset(db, client):
                          "genre": "Horror Stories",
                          "expected_config_version": v1})
     assert r.status_code == 200
-    assert r.json()["genre"] == "Horror Stories"
+    assert r.json()["genre"] == ["Horror Stories"]
     r = client.put(base, headers=ADMIN,
                    json={"language": "zh", "expected_config_version": v1})
     assert r.status_code == 409

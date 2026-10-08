@@ -30,10 +30,15 @@ def build_loop_video(
     threads: int = 2,
     still_image: bool = False,
     preset: str = "veryfast",
+    template: Path | None = None,
+    template_interval_s: float = 600,
+    template_duration_s: float | None = None,
 ) -> Path:
     """Render final MP4 matching audio duration.
 
     - Video looped with -stream_loop -1 + -shortest (no black tail, no overrun).
+    - Optional fullscreen template overlay at repeating marks
+      (enable=between() chain, single pass, main audio kept).
     - Logo overlay in the same filter graph (single pass).
     - H.264 + AAC + yuv420p.
     """
@@ -44,19 +49,39 @@ def build_loop_video(
     crop = "1280:720" if orientation == "landscape" else "720:1280"
 
     if still_image:
-        inputs = ["-loop", "1", "-framerate", "2", "-i", str(background)]
-        vfilter = f"scale={size}:force_original_aspect_ratio=increase,crop={crop},fps={fps},format=yuv420p"
+        bg_inputs = ["-loop", "1", "-framerate", "2", "-i", str(background)]
     else:
-        inputs = ["-stream_loop", "-1", "-i", str(background)]
-        vfilter = (
-            f"scale={size}:force_original_aspect_ratio=increase,"
-            f"crop={crop},fps={fps},format=yuv420p"
-        )
+        bg_inputs = ["-stream_loop", "-1", "-i", str(background)]
+    vfilter = (f"scale={size}:force_original_aspect_ratio=increase,"
+               f"crop={crop},fps={fps},format=yuv420p")
 
-    filter_parts = [f"[0:v]{vfilter}[bg]"]
-    overlay: list[str] = []
+    # Input layout: 0:v = bg, 1:a = audio, then optional template/logo videos.
+    cmd_inputs: list[str] = [*bg_inputs, "-i", str(audio)]
+    next_idx = 2
+    template_idx: int | None = None
+    if template is not None and template.exists():
+        cmd_inputs += ["-stream_loop", "-1", "-i", str(template)]
+        template_idx = next_idx
+        next_idx += 1
+    logo_idx: int | None = None
     if logo is not None and logo.exists():
-        overlay = ["-i", str(logo)]
+        cmd_inputs += ["-i", str(logo)]
+        logo_idx = next_idx
+        next_idx += 1
+
+    parts = [f"[0:v]{vfilter}[bg]"]
+    current = "bg"
+    if template_idx is not None:
+        marks = _template_marks(duration, template_interval_s,
+                                template_duration_s or 30.0)
+        parts.append(
+            f"[{template_idx}:v]scale={size},fps={fps},format=yuv420p[tmpl]")
+        if marks:
+            parts.append(f"[{current}][tmpl]overlay=0:0:enable='{marks}'[tbg]")
+            current = "tbg"
+        else:
+            current = "bg"
+    if logo_idx is not None:
         lw = max(24, int(1280 * logo_scale)) if orientation == "landscape" else max(
             24, int(720 * logo_scale))
         pos = {
@@ -65,20 +90,15 @@ def build_loop_video(
             "bottom-right": f"W-w-{logo_margin}:H-h-{logo_margin}",
             "bottom-left": f"{logo_margin}:H-h-{logo_margin}",
         }.get(logo_position, f"W-w-{logo_margin}:{logo_margin}")
-        filter_parts = [
-            f"[0:v]{vfilter}[bg]",
-            f"[1:v]scale={lw}:-1[lg]",
-            f"[bg][lg]overlay={pos},format=yuv420p[v]",
-        ]
-        vmap = ["-map", "[v]"]
-    else:
-        filter_parts = [f"[0:v]{vfilter},format=yuv420p[v]"]
-        vmap = ["-map", "[v]"]
+        parts.append(f"[{logo_idx}:v]scale={lw}:-1[lg]")
+        parts.append(f"[{current}][lg]overlay={pos}[withlogo]")
+        current = "withlogo"
+    parts.append(f"[{current}]format=yuv420p[v]")
 
     cmd = (
-        ["ffmpeg", "-v", "error", "-y", *inputs, "-i", str(audio), *overlay,
-         "-filter_complex", ";".join(filter_parts),
-         *vmap, "-map", "1:a",
+        ["ffmpeg", "-v", "error", "-y", *cmd_inputs,
+         "-filter_complex", ";".join(parts),
+         "-map", "[v]", "-map", "1:a",
          "-c:v", "libx264", "-preset", preset, "-crf", "21",
          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
          "-shortest", "-threads", str(threads), str(output)]
@@ -91,6 +111,20 @@ def build_loop_video(
         raise RenderError("RENDER_FAILED", (proc.stderr or "")[-500:])
     logger.info("rendered %s (%.1fs target)", output.name, duration)
     return output
+
+
+def _template_marks(duration: float, interval_s: float,
+                    template_len_s: float) -> str:
+    """between() chain: template covers [start, start+len) every interval."""
+    if interval_s <= 0 or template_len_s <= 0:
+        return ""
+    marks = []
+    start = interval_s
+    while start < duration:
+        end = min(duration, start + template_len_s)
+        marks.append(f"between(t,{start:.1f},{end:.1f})")
+        start += interval_s
+    return "+".join(marks)
 
 
 def make_preview_clip(source: Path, dest: Path, seconds: int = 15) -> Path:
