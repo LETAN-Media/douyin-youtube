@@ -86,6 +86,8 @@ def start_oauth(pipeline_id: str, destination_id: str,
 
 
 def consume_state(state: str) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
     from app.db.client import get_client
 
     client = get_client()
@@ -95,7 +97,15 @@ def consume_state(state: str) -> dict[str, Any]:
         raise OAuthError("INVALID_STATE", "Unknown OAuth state.")
     client.execute("DELETE FROM audio_oauth_states WHERE state = ?", (state,))
     client.commit()
-    return dict(row)
+    data = dict(row)
+    try:
+        expired = (data.get("expires_at") or "") < datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        expired = True
+    if expired:
+        raise OAuthError("INVALID_STATE", "OAuth state expired. Please reconnect.")
+    return data
 
 
 async def exchange_code(code: str) -> dict[str, Any]:

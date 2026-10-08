@@ -41,7 +41,11 @@ async def oauth_start(pipeline_id: str, destination_id: str | None = None,
         if dest is None or dest.get("pipeline_id") != pipeline_id:
             return _err(404, "DESTINATION_NOT_FOUND", "Destination không tồn tại.")
     else:
-        dest = repo.create_destination(pipeline_id)
+        # Reconnect: reuse the pipeline's unconnected destination instead of
+        # piling up a new row on every click. Existing valid credentials kept.
+        existing = [d for d in repo.list_destinations(pipeline_id)
+                    if not d.get("connected")]
+        dest = existing[0] if existing else repo.create_destination(pipeline_id)
         destination_id = dest["id"]
     try:
         from app.config import settings
@@ -54,9 +58,6 @@ async def oauth_start(pipeline_id: str, destination_id: str | None = None,
     return result
 
 
-# Alias: Google Cloud already has the /api/drama/... URI registered for this
-# domain. Same handler, Audio's own state/credential store (never drama's).
-@router.get("/drama/youtube/oauth/callback", include_in_schema=False)
 @router.get("/youtube/oauth/callback")
 async def oauth_callback(code: str | None = None, state: str | None = None,
                          error: str | None = None):
@@ -73,11 +74,18 @@ async def oauth_callback(code: str | None = None, state: str | None = None,
         if not refresh:
             raise oauth.OAuthError("NO_REFRESH_TOKEN",
                                    "Google did not return a refresh token.")
-        channel_id = await _resolve_channel_id(tokens.get("access_token"))
-        oauth.save_credentials(consumed["destination_id"], channel_id, refresh)
+        channel = await _resolve_channel(tokens.get("access_token"))
+        oauth.save_credentials(consumed["destination_id"],
+                               channel.get("channel_id"), refresh)
         dest = repo.get_destination(consumed["destination_id"])
-        if dest and not dest.get("channel_title") and channel_id:
-            repo.update_destination(dest["id"], channel_title=channel_id)
+        if dest:
+            repo.update_destination(
+                dest["id"],
+                **{k: v for k, v in {
+                    "channel_id": channel.get("channel_id"),
+                    "channel_title": channel.get("channel_title"),
+                    "channel_thumbnail": channel.get("channel_thumbnail"),
+                }.items() if v})
         return_to = consumed.get("return_to") or f"{dashboard}/audio"
         sep = "&" if "?" in return_to else "?"
         return RedirectResponse(f"{return_to}{sep}oauth=connected", status_code=302)
@@ -85,9 +93,13 @@ async def oauth_callback(code: str | None = None, state: str | None = None,
         return RedirectResponse(f"{dashboard}/audio?oauth=error", status_code=302)
 
 
-async def _resolve_channel_id(access_token: str | None) -> str | None:
+async def _resolve_channel(access_token: str | None) -> dict[str, str | None]:
+    """Resolve the authed user's channel: real id + title + thumbnail.
+
+    Returns {} when unresolvable (never fabricate an id from the title).
+    """
     if not access_token:
-        return None
+        return {}
     import httpx
 
     try:
@@ -97,14 +109,18 @@ async def _resolve_channel_id(access_token: str | None) -> str | None:
                 params={"part": "snippet", "mine": "true"},
                 headers={"Authorization": f"Bearer {access_token}"})
         if resp.status_code != 200:
-            return None
+            return {}
         items = resp.json().get("items") or []
-        if not items:
-            return None
+        if not items or not items[0].get("id"):
+            return {}
         snippet = items[0].get("snippet") or {}
-        return snippet.get("title") or items[0].get("id")
+        thumbs = snippet.get("thumbnails") or {}
+        thumb = (thumbs.get("medium") or thumbs.get("default") or {}).get("url")
+        return {"channel_id": items[0]["id"],
+                "channel_title": snippet.get("title"),
+                "channel_thumbnail": thumb}
     except Exception:
-        return None
+        return {}
 
 
 @router.post("/youtube-destinations/{destination_id}/disconnect")

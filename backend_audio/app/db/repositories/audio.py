@@ -33,9 +33,13 @@ def get_destination(destination_id: str) -> dict[str, Any] | None:
 
 
 def list_destinations(pipeline_id: str) -> list[dict[str, Any]]:
-    return [dict(r) for r in get_client().execute(
+    items = [dict(r) for r in get_client().execute(
         "SELECT * FROM audio_destinations WHERE pipeline_id = ? ORDER BY created_at",
         (pipeline_id,)).fetchall()]
+    for item in items:
+        item["enabled"] = bool(item.get("enabled", 1))
+        item["connected"] = bool(item.get("connected", 0))
+    return items
 
 
 def update_destination(destination_id: str, **fields: Any) -> dict | None:
