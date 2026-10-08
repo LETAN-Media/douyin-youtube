@@ -70,20 +70,24 @@ def delete_destination(destination_id: str) -> None:
 
 
 def resolve_destination_for_job(pipeline_id: str,
-                                job: dict[str, Any]) -> dict[str, Any] | None:
-    """Scheduler-chosen destination wins; else the pipeline's connected one."""
-    from app.db.repositories import scheduler as sched_repo
+                                job: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Scheduler-chosen destination wins; else the pipeline's connected one.
 
-    sched = sched_repo.get_settings(pipeline_id)
-    candidates: list[dict[str, Any]] = []
-    if sched.get("destination_id"):
-        dest = get_destination(sched["destination_id"])
-        if dest and dest.get("connected") and dest.get("enabled"):
+    Rejects disconnected/disabled destinations. Returns None when nothing
+    usable exists (caller raises DESTINATION_REQUIRED).
+    """
+    del job  # reserved for future per-job overrides; selection is pipeline-level
+    sched = get_scheduler_settings(pipeline_id)
+    explicit_id = sched.get("destination_id")
+    if explicit_id:
+        dest = get_destination(explicit_id)
+        if dest is not None and dest.get("connected") and dest.get("enabled"):
             return dest
+        return None
     for dest in list_destinations(pipeline_id):
         if dest.get("connected") and dest.get("enabled"):
-            candidates.append(dest)
-    return candidates[0] if candidates else None
+            return dest
+    return None
 
 
 # ---- media assets ----

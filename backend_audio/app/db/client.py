@@ -180,6 +180,11 @@ def get_client() -> Any:
             if url and not url.startswith("file:"):
                 _client = HranaDatabase(url, settings.AUDIO_TURSO_TOKEN or "")
             else:
+                # Production must never silently fall back to ephemeral SQLite.
+                if (settings.APP_ENV or "").strip().lower() == "production":
+                    raise RuntimeError(
+                        "AUDIO_TURSO_URL is missing in production; refusing "
+                        "ephemeral SQLite fallback.")
                 path = (
                     Path(url[len("file:"):])
                     if url.startswith("file:")

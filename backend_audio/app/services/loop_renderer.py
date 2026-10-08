@@ -33,6 +33,8 @@ def build_loop_video(
     template: Path | None = None,
     template_interval_s: float = 600,
     template_duration_s: float | None = None,
+    srt: Path | None = None,
+    hardsub: bool = False,
 ) -> Path:
     """Render final MP4 matching audio duration.
 
@@ -40,10 +42,15 @@ def build_loop_video(
     - Optional fullscreen template overlay at repeating marks
       (enable=between() chain, single pass, main audio kept).
     - Logo overlay in the same filter graph (single pass).
+    - Optional hardsub burn-in (subtitles filter, SAME single pass, never a
+      second encode). Requires srt when hardsub=True.
     - H.264 + AAC + yuv420p.
     """
     if duration <= 0:
         raise RenderError("BAD_DURATION", "Audio duration must be positive.")
+    if hardsub and srt is None:
+        raise RenderError("HARDSUB_SRT_MISSING",
+                          "hardsub requested but no SRT file was provided.")
     output.parent.mkdir(parents=True, exist_ok=True)
     size = "1280x720" if orientation == "landscape" else "720x1280"
     crop = "1280:720" if orientation == "landscape" else "720:1280"
@@ -94,6 +101,20 @@ def build_loop_video(
         parts.append(f"[{current}][lg]overlay={pos}[withlogo]")
         current = "withlogo"
     parts.append(f"[{current}]format=yuv420p[v]")
+    if hardsub:
+        assert srt is not None  # guarded above; never burn without an SRT
+        if not srt.exists() or srt.stat().st_size == 0:
+            raise RenderError("HARDSUB_SRT_INVALID",
+                              "SRT file is missing or empty.")
+        sub = _escape_subtitles_path(srt)
+        # Burn into the composited stream in the SAME pass (index-safe:
+        # insert before the final format conversion).
+        parts.pop()
+        parts.append(
+            f"[{current}]subtitles={sub}:force_style="
+            "'FontName=Noto Sans CJK SC,FontSize=16,Outline=2,"
+            "Shadow=0,MarginV=24,Alignment=2'[sub]")
+        parts.append("[sub]format=yuv420p[v]")
 
     cmd = (
         ["ffmpeg", "-v", "error", "-y", *cmd_inputs,
@@ -111,6 +132,13 @@ def build_loop_video(
         raise RenderError("RENDER_FAILED", (proc.stderr or "")[-500:])
     logger.info("rendered %s (%.1fs target)", output.name, duration)
     return output
+
+
+def _escape_subtitles_path(path: Path) -> str:
+    """Escape for the subtitles filter: backslash-colon-quote handling."""
+    text = str(path).replace("\\", "/")
+    text = text.replace(":", "\\:").replace("'", "\\'")
+    return f"'{text}'"
 
 
 def _template_marks(duration: float, interval_s: float,

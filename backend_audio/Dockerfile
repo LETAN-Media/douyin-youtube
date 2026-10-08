@@ -14,8 +14,13 @@ WORKDIR /srv/backend_audio
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY assets/jianying/package.json ./assets/jianying/
-RUN cd assets/jianying && npm install --omit=dev 2>/dev/null || true
+COPY assets/jianying/package.json assets/jianying/transcribe.mjs ./assets/jianying/
+# No '|| true' anywhere: install or bridge failures must fail the image build.
+RUN cd assets/jianying && npm install --omit=dev
+RUN cd assets/jianying && node --check transcribe.mjs \
+ && test -d node_modules/jianying-subtitle
+# Bridge boots and reports usage (exit 1) without args; any other exit fails.
+RUN cd assets/jianying && node transcribe.mjs >/dev/null 2>&1; code=$?; [ "$code" -eq 1 ]
 
 COPY app ./app
 

@@ -128,17 +128,36 @@ async def publish_final(
     captions_required: bool = False,
 ) -> dict[str, Any]:
     """Upload a finished MP4 (+ optional SRT captions). Idempotent per job."""
+    from app.db.repositories import audio as audio_repo
     from app.db.repositories import jobs as jobs_repo
-    from app.db.repositories import youtube as yt_repo
     from app.services.youtube_oauth import OAuthError, load_credentials
 
     job_id = job["id"]
     fresh = jobs_repo.get_job(job_id) or job
     if fresh.get("youtube_video_id"):
-        return {"youtube_video_id": fresh["youtube_video_id"], "already": True}
+        # Video already uploaded: NEVER re-upload. Captions retry independently.
+        caption_state = "skipped"
+        if srt_path is not None and srt_path.exists():
+            pipeline_id = job.get("pipeline_id") or ""
+            dest = audio_repo.resolve_destination_for_job(pipeline_id, job)
+            if dest is not None:
+                try:
+                    creds = load_credentials(dest["id"])
+                    await asyncio.to_thread(
+                        _blocking_caption_upload, creds["refresh_token"],
+                        fresh["youtube_video_id"], srt_path)
+                    caption_state = "uploaded"
+                except PublisherError as exc:
+                    caption_state = "failed"
+                    if captions_required:
+                        raise
+                    logger.warning("caption retry failed (non-blocking): %s",
+                                   exc)
+        return {"youtube_video_id": fresh["youtube_video_id"], "already": True,
+                "captions": caption_state}
 
     pipeline_id = job.get("pipeline_id") or ""
-    dest = yt_repo.resolve_destination_for_job(pipeline_id, job)
+    dest = audio_repo.resolve_destination_for_job(pipeline_id, job)
     if dest is None:
         raise PublisherError(DESTINATION_REQUIRED,
                              "No connected YouTube destination for this pipeline.")

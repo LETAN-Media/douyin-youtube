@@ -18,12 +18,17 @@ logger = logging.getLogger("backend-audio")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
+    app.state.db_ready = False
     try:
         applied = migrate()
         if applied:
             logger.info("audio migrations applied: %s", applied)
     except Exception as exc:
-        logger.exception("audio migration failed: %s", exc)
+        # Fail fast: a worker must never run without a migrated database.
+        logger.exception("audio migration failed; worker will NOT start: %s", exc)
+        yield
+        return
+    app.state.db_ready = True
     try:
         from app.workers.audio_worker import start
 

@@ -102,9 +102,6 @@ def job_events(job_id: str) -> list[dict[str, Any]]:
 def recover_stale_running(lease_grace_seconds: int = 900) -> int:
     """Jobs stuck running past lease expiry (e.g. restart) go back to queued."""
     client = get_client()
-    rows = client.execute(
-        "SELECT id FROM audio_processing_jobs WHERE status = 'running' "
-        "AND (lease_expires_at IS NULL OR lease_expires_at < ?)").fetchall()
     # lease check done in python for portability
     from datetime import datetime, timezone
 

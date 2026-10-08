@@ -194,6 +194,11 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
         except r2_storage.R2Error:
             logo_local = None
     final_mp4 = job_dir / "rendered.mp4"
+    hardsub = proc_settings.get("subtitle_mode") == "hardsub"
+    if hardsub and srt_local is None:
+        return _fail(job_id, "HARDSUB_SRT_MISSING",
+                     "subtitle_mode=hardsub but no SRT was produced or provided.",
+                     "rendering")
     try:
         loop_renderer.build_loop_video(
             background=bg_local, audio=audio_path, output=final_mp4,
@@ -204,16 +209,16 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
             template=template_local,
             template_interval_s=float(
                 proc_settings.get("template_interval_s") or 600),
-            template_duration_s=template_len)
+            template_duration_s=template_len,
+            srt=srt_local if hardsub else None,
+            hardsub=hardsub)
     except loop_renderer.RenderError as exc:
         return _fail(job_id, exc.code, str(exc), "rendering")
 
     # ---- AI metadata ----
     ai_cfg = audio_repo.get_ai_settings(pipeline_id)
-    title = (resolved.get("title") or inventory or {}).get("caption") or "Audio"
-    if isinstance(title, dict):
-        title = title.get("caption") or "Audio"
-    description, hashtags = "", []
+    title, description, hashtags = resolve_initial_metadata(job, resolved,
+                                                            inventory)
     if ai_cfg.get("enabled"):
         _step(job_id, "ai_metadata", "running", 78)
         try:
@@ -274,25 +279,30 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
     client.commit()
     if inventory:
         src_repo.set_inventory_status(inventory["id"], "published")
+    # Completion is persisted BEFORE cleanup: progress never decreases again.
     jobs_repo.update_job(job_id, status="completed", stage="completed:done",
                          progress_percent=100,
                          youtube_url=pub.get("youtube_url"))
+    jobs_repo.add_event(job_id, "completed", "done",
+                        pub.get("youtube_url"))
 
-    # ---- cleanup ----
-    _step(job_id, "cleanup", "running", 97)
-    for name in ("source.mp4", "audio.m4a", "rendered.mp4", "background.mp4",
-                 "logo.png", "subs.srt"):
-        try:
-            (job_dir / name).unlink(missing_ok=True)
-        except Exception:
-            pass
-    chunks = job_dir / "chunks"
-    if chunks.exists():
-        shutil.rmtree(chunks, ignore_errors=True)
+    # ---- cleanup (best-effort; never touches R2 library or stored SRT) ----
     try:
-        job_dir.rmdir()
-    except OSError:
-        pass
+        for name in ("source.mp4", "audio.m4a", "rendered.mp4",
+                     "background.mp4", "template.mp4", "logo.png", "subs.srt"):
+            try:
+                (job_dir / name).unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("cleanup %s: %s", name, type(exc).__name__)
+        chunks = job_dir / "chunks"
+        if chunks.exists():
+            shutil.rmtree(chunks, ignore_errors=True)
+        try:
+            job_dir.rmdir()
+        except OSError:
+            pass
+    except Exception as exc:
+        logger.warning("job %s cleanup warning: %s", job_id, exc)
     jobs_repo.add_event(job_id, "cleanup", "done")
     return {"job_id": job_id, "status": "completed",
             "youtube_video_id": pub["youtube_video_id"],
@@ -327,6 +337,45 @@ async def _generate_srt(job_id: str, pipeline_id: str, audio_path: Path,
 
     jobs_repo.update_job(job_id, srt_object_key=key)
     return merged
+
+
+def resolve_initial_metadata(job: dict[str, Any], resolved: dict[str, Any],
+                             inventory: dict[str, Any] | None
+                             ) -> tuple[str, str, list[str]]:
+    """Safe title/description/hashtags precedence (never crashes on types).
+
+    1. Manual values stored on the job (manual route sets ai_* + status manual).
+    2. Resolver title.
+    3. Inventory caption.
+    4. Default "Audio".
+    Manual description/hashtags are preserved when AI is disabled.
+    """
+    def _clean_title(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        return text[:100].rstrip() if text else None
+
+    manual_title = _clean_title((job or {}).get("ai_title"))
+    if manual_title:
+        description = (job.get("ai_description") or "")
+        if not isinstance(description, str):
+            description = ""
+        try:
+            tags = json.loads(job.get("ai_hashtags_json") or "[]")
+        except Exception:
+            tags = []
+        if not isinstance(tags, list):
+            tags = []
+        return manual_title, description.strip()[:5000], [str(t) for t in tags]
+
+    title = _clean_title(resolved.get("title"))
+    if title:
+        return title, "", []
+    title = _clean_title((inventory or {}).get("caption"))
+    if title:
+        return title, "", []
+    return "Audio", "", []
 
 
 def _processing_settings(pipeline_id: str) -> dict[str, Any]:
