@@ -54,6 +54,9 @@ async def oauth_start(pipeline_id: str, destination_id: str | None = None,
     return result
 
 
+# Alias: Google Cloud already has the /api/drama/... URI registered for this
+# domain. Same handler, Audio's own state/credential store (never drama's).
+@router.get("/drama/youtube/oauth/callback", include_in_schema=False)
 @router.get("/youtube/oauth/callback")
 async def oauth_callback(code: str | None = None, state: str | None = None,
                          error: str | None = None):

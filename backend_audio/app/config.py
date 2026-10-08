@@ -26,6 +26,7 @@ class Settings(BaseSettings):
         "https://audio-api.toolnet.tech/api/audio/youtube/oauth/callback"
     )
     AUDIO_DASHBOARD_URL: str = "https://douyin.toolnet.tech"
+    AUDIO_API_BASE_URL: str = "https://audio-api.toolnet.tech"
     AUDIO_TOKEN_ENCRYPTION_KEY: str | None = None
 
     # SnapVideo / PHIMTAT download resolver (same style as backend_facebook).
