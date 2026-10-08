@@ -72,6 +72,13 @@ async def pause(source_id: str, _: None = Depends(require_admin)):
     return {"paused": True}
 
 
+@router.get("/sources/{source_id}/scan-runs")
+async def list_scan_runs(source_id: str, _: None = Depends(require_admin)):
+    from app.db.repositories import scan_runs
+
+    return {"items": scan_runs.list_runs_for_source(source_id)}
+
+
 @router.put("/sources/{source_id}")
 async def set_enabled(source_id: str, enabled: bool,
                       _: None = Depends(require_admin)):

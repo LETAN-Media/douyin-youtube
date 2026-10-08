@@ -29,7 +29,23 @@ class Settings(BaseSettings):
     AUDIO_API_BASE_URL: str = "https://audio-api.toolnet.tech"
     AUDIO_TOKEN_ENCRYPTION_KEY: str | None = None
 
-    # SnapVideo / PHIMTAT download resolver (same style as backend_facebook).
+    # Facebook listing provider (facebook-scraper3 via RapidAPI).
+    # Keys live here (AUDIO_*); never reuse another backend's quota blindly.
+    AUDIO_RAPIDAPI_HOST: str | None = None
+    AUDIO_RAPIDAPI_BASE_URL: str | None = None
+    AUDIO_RAPIDAPI_KEY: str | None = None
+    AUDIO_RAPIDAPI_TIMEOUT: float = 20.0
+    AUDIO_SCAN_MAX_PAGES: int = 200
+    AUDIO_SCAN_MAX_VIDEOS: int = 5000
+    AUDIO_SCAN_KNOWN_PAGES_STOP: int = 3
+
+    # Optional FastSaver fallback resolver (only used when configured).
+    AUDIO_FASTSAVER_BASE_URL: str | None = None
+    AUDIO_FASTSAVER_API_KEY: str | None = None
+
+    # PHIMTAT resolver. Verified live: snapvideo.json answers ONLY the proven
+    # b64 + red64.php wrapped flow; direct POST/GET returns 405 or a static
+    # shortcut menu and must NOT be used.
     PHIMTAT_ENABLED: bool = True
     PHIMTAT_API_KEY: str | None = None
     PHIMTAT_API_BASE_URL: str = "https://api.phimtat.vn/json/snapvideo.json"

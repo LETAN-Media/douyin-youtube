@@ -230,6 +230,33 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "ALTER TABLE audio_processing_jobs ADD COLUMN template_asset_id TEXT",
         ],
     ),
+    (
+        "audio_007",
+        [
+            """CREATE TABLE IF NOT EXISTS audio_scan_runs (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                pipeline_id TEXT NOT NULL,
+                scan_mode TEXT NOT NULL DEFAULT 'initial',
+                status TEXT NOT NULL DEFAULT 'queued',
+                next_cursor TEXT,
+                pages_fetched INTEGER NOT NULL DEFAULT 0,
+                videos_discovered INTEGER NOT NULL DEFAULT 0,
+                videos_added INTEGER NOT NULL DEFAULT 0,
+                videos_existing INTEGER NOT NULL DEFAULT 0,
+                provider_reported_total INTEGER,
+                pagination_exhausted INTEGER NOT NULL DEFAULT 0,
+                stop_reason TEXT,
+                last_error_code TEXT,
+                last_error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_audio_scan_source ON audio_scan_runs(source_id, status, created_at)",
+        ],
+    ),
 ]
 
 
