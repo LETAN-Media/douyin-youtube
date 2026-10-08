@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardHeader, btnSmall } from "@/components/ui";
 import type {
   DramaEpisodeTaskDto,
   DramaProcessingSettingsDto,
   DramaSeriesJobDto,
   DramaTemplateDto,
+  DramaYoutubeDestinationDto,
 } from "@/lib/drama-api";
 
 function JobEpisodes({ jobId }: { jobId: string }) {
@@ -194,6 +195,8 @@ export function DramaProcessingSettings({
   const [newTplUrl, setNewTplUrl] = useState("");
   const [tplSaving, setTplSaving] = useState(false);
   const [destId, setDestId] = useState(initial.youtube_destination_id ?? "");
+  const [destinations, setDestinations] = useState<DramaYoutubeDestinationDto[] | null>(null);
+  const destDirtyRef = useRef(false);
   const [autoPublish, setAutoPublish] = useState(initial.auto_publish ?? true);
   const [jobs, setJobs] = useState<DramaSeriesJobDto[] | null>(null);
   const [saving, setSaving] = useState(false);
@@ -224,11 +227,19 @@ export function DramaProcessingSettings({
     let cancelled = false;
     (async () => {
       try {
-        const [tplRes, jobsRes] = await Promise.all([
+        const [tplRes, jobsRes, destRes, setRes] = await Promise.all([
           fetch("/api/drama/templates", { cache: "no-store" }),
           fetch(`/api/drama/pipelines/${encodeURIComponent(pipelineId)}/jobs`, {
             cache: "no-store",
           }),
+          fetch(
+            `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/youtube-destinations`,
+            { cache: "no-store" },
+          ),
+          fetch(
+            `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/processing-settings`,
+            { cache: "no-store" },
+          ),
         ]);
         if (!cancelled && tplRes.ok) {
           const data = await tplRes.json();
@@ -237,6 +248,20 @@ export function DramaProcessingSettings({
         if (!cancelled && jobsRes.ok) {
           const data = await jobsRes.json();
           if (Array.isArray(data.items)) setJobs(data.items);
+        }
+        if (!cancelled && destRes.ok) {
+          const data = await destRes.json();
+          if (Array.isArray(data)) setDestinations(data);
+        }
+        // Re-sync destination from server (the YouTube tab may have
+        // changed it while this tab held stale state).
+        if (!cancelled && setRes.ok) {
+          const data = await setRes.json();
+          const serverDest =
+            typeof data.youtube_destination_id === "string"
+              ? data.youtube_destination_id
+              : "";
+          setDestId((prev) => (destDirtyRef.current ? prev : serverDest));
         }
       } catch {
         // non-fatal; sections stay hidden/empty
@@ -307,7 +332,7 @@ export function DramaProcessingSettings({
             tts_enabled: mode === "dub_vi",
             template_enabled: templateEnabled,
             template_id: templateEnabled ? templateId || null : null,
-            youtube_destination_id: destId.trim() || null,
+            youtube_destination_id: destId || null,
             auto_publish: autoPublish,
           }),
         },
@@ -321,6 +346,12 @@ export function DramaProcessingSettings({
         );
       }
       setLive(data as DramaProcessingSettingsDto);
+      setDestId(
+        typeof (data as DramaProcessingSettingsDto).youtube_destination_id === "string"
+          ? (data as DramaProcessingSettingsDto).youtube_destination_id ?? ""
+          : "",
+      );
+      destDirtyRef.current = false;
       onSaved?.(data as DramaProcessingSettingsDto);
       setSaved(true);
       setTimeout(() => setSaved(false), 4000);
@@ -543,14 +574,73 @@ export function DramaProcessingSettings({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="rounded-2xl border border-slate-200/90 bg-white p-4">
             <label className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
-              Kênh YouTube (destination ID)
+              Kênh YouTube
             </label>
-            <input
-              value={destId}
-              onChange={(e) => setDestId(e.target.value)}
-              placeholder="ytd_…"
-              className="mt-2 block min-h-[44px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none focus:border-indigo-500"
-            />
+            {destinations === null ? (
+              <p className="mt-2 text-xs text-slate-400">Đang tải danh sách kênh…</p>
+            ) : destinations.length === 0 ? (
+              <div className="mt-2">
+                <p className="text-xs text-slate-500">Chưa kết nối kênh YouTube</p>
+                <a
+                  href={`/drama/${encodeURIComponent(pipelineId)}?tab=youtube`}
+                  className={`mt-2 inline-flex min-h-[44px] items-center rounded-xl bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700 ${btnSmall}`}
+                >
+                  + Kết nối YouTube
+                </a>
+              </div>
+            ) : (
+              <>
+                <select
+                  value={destId}
+                  onChange={(e) => {
+                    setDestId(e.target.value);
+                    destDirtyRef.current = true;
+                  }}
+                  className="mt-2 block min-h-[44px] w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-indigo-500"
+                >
+                  <option value="">— Không đăng YouTube —</option>
+                  {destinations.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.channel_title ?? d.channel_id ?? d.id}
+                      {d.connected ? "" : " (đã ngắt kết nối)"}
+                    </option>
+                  ))}
+                </select>
+                {destId !== "" && destinations.some((d) => d.id === destId) ? (
+                  <div className="mt-2 flex items-center gap-2">
+                    {destinations.find((d) => d.id === destId)?.channel_thumbnail ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={destinations.find((d) => d.id === destId)!.channel_thumbnail!}
+                        alt=""
+                        className="h-8 w-8 rounded-full object-cover"
+                      />
+                    ) : null}
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold text-slate-900">
+                        {destinations.find((d) => d.id === destId)?.channel_title ??
+                          destinations.find((d) => d.id === destId)?.channel_id ??
+                          destId}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        {destinations.find((d) => d.id === destId)?.connected
+                          ? "Đã kết nối · Đang chọn"
+                          : "Đã ngắt kết nối"}
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+                {destId !== "" &&
+                destinations.some((d) => d.id === destId && !d.connected) ? (
+                  <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+                    Kênh này đã bị ngắt kết nối. Auto Publish sẽ không dùng kênh này — hãy kết nối lại trong tab YouTube.
+                  </p>
+                ) : null}
+                <p className="mt-2 text-xs text-slate-400">
+                  Đồng bộ với kênh đã chọn trong tab YouTube.
+                </p>
+              </>
+            )}
           </div>
           <div className="rounded-2xl border border-slate-200/90 bg-white p-4">
             <label className="flex cursor-pointer items-center justify-between gap-3">
