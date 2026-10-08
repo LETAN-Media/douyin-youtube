@@ -65,6 +65,24 @@ async def scan_source(source_id: str, *, full: bool = False,
     if active is not None:
         return _public(active)
 
+    if not full:
+        # Resume (Pause/restart/partial-cap): continue the latest interrupted
+        # run from its stored cursor instead of starting over.
+        latest = scan_runs.latest_run_for_source(source_id)
+        if (latest is not None
+                and latest["status"] in ("paused", "failed", "partial")
+                and latest.get("next_cursor")):
+            scan_runs.update_run(latest["id"], status="queued",
+                                 last_error_code=None, last_error_message=None)
+            task = asyncio.create_task(
+                _run_scan(latest["id"], limit=limit))
+            _tasks[latest["id"]] = task
+            task.add_done_callback(
+                lambda t, rid=latest["id"]: _tasks.pop(rid, None))
+            resumed = scan_runs.get_run(latest["id"])
+            assert resumed is not None
+            return _public(resumed)
+
     if full:
         mode = "full"
     elif scan_runs.latest_run_for_source(source_id) is None:
@@ -229,3 +247,26 @@ def pause_scan(source_id: str) -> None:
     active = scan_runs.active_run_for_source(source_id)
     if active is not None:
         scan_runs.update_run(active["id"], status="paused")
+
+
+def recover_interrupted_scans() -> int:
+    """Startup recovery: stale running/queued runs become paused (cursor kept).
+
+    No scan restarts by itself after a restart — the user (or scheduler)
+    resumes explicitly, so no quota is spent unexpectedly.
+    """
+    from app.db.client import get_client
+    from app.db.repositories import scan_runs
+
+    count = 0
+    for row in get_client().execute(
+            "SELECT id FROM audio_scan_runs WHERE status IN "
+            "('queued','running')").fetchall():
+        scan_runs.update_run(row["id"], status="paused",
+                             last_error_code="RESTART_INTERRUPTED",
+                             last_error_message="Backend restarted mid-scan; "
+                             "resume to continue from checkpoint.")
+        count += 1
+    if count:
+        logger.info("marked %d interrupted scans as paused", count)
+    return count

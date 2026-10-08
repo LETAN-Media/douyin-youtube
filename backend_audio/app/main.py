@@ -30,6 +30,12 @@ async def lifespan(app: FastAPI):
         return
     app.state.db_ready = True
     try:
+        from app.services.scanner import recover_interrupted_scans
+
+        recover_interrupted_scans()
+    except Exception as exc:
+        logger.warning("scan recovery failed: %s", exc)
+    try:
         from app.workers.audio_worker import start
 
         start()

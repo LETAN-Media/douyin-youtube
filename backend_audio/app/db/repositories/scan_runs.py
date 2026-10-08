@@ -31,7 +31,7 @@ def get_run(run_id: str) -> dict[str, Any] | None:
 def active_run_for_source(source_id: str) -> dict[str, Any] | None:
     row = get_client().execute(
         "SELECT * FROM audio_scan_runs WHERE source_id = ? AND status IN "
-        "('queued','running') ORDER BY created_at DESC LIMIT 1",
+        "('queued','running') ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (source_id,)).fetchone()
     return dict(row) if row else None
 
@@ -39,7 +39,7 @@ def active_run_for_source(source_id: str) -> dict[str, Any] | None:
 def latest_run_for_source(source_id: str) -> dict[str, Any] | None:
     row = get_client().execute(
         "SELECT * FROM audio_scan_runs WHERE source_id = ? "
-        "ORDER BY created_at DESC LIMIT 1", (source_id,)).fetchone()
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1", (source_id,)).fetchone()
     return dict(row) if row else None
 
 

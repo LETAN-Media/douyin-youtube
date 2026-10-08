@@ -24,6 +24,9 @@ def _listing_env(monkeypatch):
     monkeypatch.setattr(settings, "AUDIO_RAPIDAPI_KEY", "test-key")
     monkeypatch.setattr(settings, "AUDIO_RAPIDAPI_HOST", "test-host")
     monkeypatch.setattr(settings, "AUDIO_RAPIDAPI_BASE_URL", "https://test-host")
+    # Isolate resolver tests from real local .env credentials.
+    monkeypatch.setattr(settings, "AUDIO_FASTSAVER_BASE_URL", "")
+    monkeypatch.setattr(settings, "AUDIO_FASTSAVER_API_KEY", "")
 
 
 def _pipe(client, name="P"):
@@ -398,3 +401,32 @@ def test_ssrf_guard_rejects_private_hosts(db):
         sv._assert_public_http_url("http://127.0.0.1/video.mp4")
     with pytest.raises(sv.SnapVideoError):
         sv._assert_public_http_url("file:///etc/passwd")
+
+
+def test_phimtat_consent_gate_flow(db):
+    import asyncio
+
+    from app.services import snapvideo as sv
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if "agree-terms.php" in request.url.path:
+            return httpx.Response(200, json={"ok": True, "agreed": True})
+        if calls["n"] == 1:
+            return httpx.Response(200, json={
+                "title": "terms", "medias": {
+                    "agree": "https://api.snapvideo.co/agree-terms.php?x=1",
+                    "Close": "{{open-link}}"}})
+        return httpx.Response(200, json={
+            "title": "Real Title", "thumbnail": "https://img/t.jpg",
+            "medias": {"MP4 HD": "https://cdn.example/hd.mp4",
+                       "MP4 SD": "https://cdn.example/sd.mp4"}})
+
+    out = asyncio.run(sv.resolve_media_url(
+        "https://www.facebook.com/reel/123/",
+        transport=httpx.MockTransport(handler)))
+    assert out["media_url"] == "https://cdn.example/hd.mp4"
+    assert out["provider"] == "phimtat"
+    assert calls["n"] == 3
