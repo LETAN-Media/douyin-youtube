@@ -170,3 +170,99 @@ async def retry_job_episodes(
         raise _err(400, "NOTHING_TO_RETRY", "Provide episode_numbers or failed_only=true.")
     proc.update_job(job_id, status="queued", stage="queued")
     return {"ok": True, "job_id": job_id, "reset": reset}
+
+
+class TestMergeJobRequest(BaseModel):
+    pipeline_slug: str = "test-rapidix-pipeline"
+    episode_start: int = 1
+    episode_end: int = 2
+    chunk_index: int = 0
+    job_type: str = "TEST_SINGLE_MERGE"
+    visibility_override: str = "unlisted"
+
+
+@router.post("/series/{series_id}/test-job", status_code=201)
+async def create_single_test_job(
+    series_id: str,
+    body: TestMergeJobRequest,
+    _: None = Depends(require_admin),
+) -> dict:
+    series = repo.get_series(series_id)
+    if series is None:
+        raise _err(404, "SERIES_NOT_FOUND", "Series not found.")
+    source = repo.get_source(series["source_id"])
+    if source is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Owning source not found.")
+    pipeline = repo.get_pipeline(source["pipeline_id"])
+    if pipeline is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
+    if pipeline["slug"] != body.pipeline_slug:
+        raise _err(
+            400,
+            "SLUG_MISMATCH",
+            f"Series belongs to pipeline with slug '{pipeline['slug']}', not '{body.pipeline_slug}'.",
+        )
+
+    # Validate episodes
+    from ..db.client import get_client
+
+    conn = get_client()
+    ep_count = conn.execute(
+        "SELECT COUNT(*) FROM drama_episodes WHERE series_id = ? AND episode_number IN (?, ?)",
+        (series_id, body.episode_start, body.episode_end),
+    ).fetchone()[0]
+    if ep_count < 2:
+        raise _err(
+            404,
+            "EPISODES_NOT_FOUND",
+            f"Episodes {body.episode_start} and {body.episode_end} not found for series.",
+        )
+
+    # Idempotency check: see if a job for this series and episode range already exists
+    existing = conn.execute(
+        "SELECT id FROM drama_series_jobs WHERE series_id = ? AND episode_start = ? AND episode_end = ?",
+        (series_id, body.episode_start, body.episode_end),
+    ).fetchone()
+
+    if existing:
+        job_id = existing[0] if isinstance(existing, tuple) else existing["id"]
+        job = proc.get_job(job_id)
+        assert job is not None
+        if job.get("status") == "completed" and job.get("youtube_video_id"):
+            return {"job": job, "action": "already_completed"}
+        return {"job": job, "action": "reused"}
+
+    settings = proc.get_settings(source["pipeline_id"])
+    job = proc.create_job(
+        source["pipeline_id"],
+        series_id,
+        settings["processing_mode"],
+        body.chunk_index,
+        body.episode_start,
+        body.episode_end,
+    )
+    return {"job": job, "action": "created"}
+
+
+@router.post("/series-jobs/{job_id}/run")
+async def run_job(
+    job_id: str,
+    visibility_override: str = "unlisted",
+    _: None = Depends(require_admin),
+) -> dict:
+    from pathlib import Path
+
+    from ..services.processing import run_series_job
+
+    job = proc.get_job(job_id)
+    if job is None:
+        raise _err(404, "JOB_NOT_FOUND", "Job not found.")
+
+    workdir = Path("/tmp/drama_jobs")
+    report = await run_series_job(
+        job_id,
+        workdir=workdir,
+        visibility_override=visibility_override,
+    )
+    return {"report": report}
+

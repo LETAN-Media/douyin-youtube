@@ -184,7 +184,7 @@ async def publish_job_final(
     title: str | None = None,
     description: str = "",
     hashtags: list[str] | None = None,
-    visibility: str = "public",
+    visibility: str | None = None,
     publish_at: str | None = None,
     youtube_factory: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
@@ -245,9 +245,19 @@ async def publish_job_final(
             title = ai_result.metadata.title
             description = ai_result.metadata.description
             hashtags = ai_result.metadata.hashtags
+            start = job.get("episode_start")
+            end = job.get("episode_end")
+            if start is not None and end is not None:
+                ep_range = f"Tập {start}-{end}" if start != end else f"Tập {start}"
+                if ep_range.lower() not in (title or "").lower():
+                    suffix = f" - {ep_range}"
+                    if len(title) + len(suffix) <= 100:
+                        title = f"{title}{suffix}"
+                    else:
+                        title = f"{title[:100 - len(suffix)].rstrip()}{suffix}"
             proc_repo.update_job(
                 job_id,
-                ai_title=ai_result.metadata.title,
+                ai_title=title,
                 ai_description=ai_result.metadata.description,
                 ai_hashtags_json=json.dumps(
                     ai_result.metadata.hashtags, ensure_ascii=False
@@ -258,10 +268,21 @@ async def publish_job_final(
         raise
     except Exception as exc:  # noqa: BLE001 - never block upload on snapshot issues
         logger.warning("drama AI metadata snapshot failed: %s", type(exc).__name__)
+    eff_visibility = visibility if visibility is not None else (destination.get("visibility") or "public")
+    start = job.get("episode_start")
+    end = job.get("episode_end")
+    if start is not None and end is not None:
+        ep_range = f"Tập {start}-{end}" if start != end else f"Tập {start}"
+        if ep_range.lower() not in (title or "").lower():
+            suffix = f" - {ep_range}"
+            if len(title or "") + len(suffix) <= 100:
+                title = f"{title}{suffix}" if title else ep_range
+            else:
+                title = f"{(title or '')[:100 - len(suffix)].rstrip()}{suffix}"
     metadata = build_metadata(
         title=title or f"Drama EP {job.get('episode_start')}-{job.get('episode_end')}",
         description=description, hashtags=hashtags,
-        visibility=destination.get("visibility") or visibility,
+        visibility=eff_visibility,
         publish_at=publish_at,
     )
     credentials = await load_credentials(destination_id)

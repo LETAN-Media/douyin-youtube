@@ -279,6 +279,24 @@ async def resolve_drama_media(
                 download_host=p.netloc,
             )
 
+    # Priority 2.5: CrazyMaple / ReelShort HLS derivation from thumbnail_url or raw_payload
+    thumb_url = ""
+    for k in ("thumbnail_url", "video_pic", "cover_url", "thumb", "snapshots"):
+        val = raw.get(k)
+        if isinstance(val, str) and "crazymaplestudios.com" in val:
+            thumb_url = val.strip()
+            break
+    if thumb_url:
+        m = re.search(r"crazymaplestudios\.com/(?:vod-\d+/)?([a-f0-9]{32})", thumb_url)
+        if m:
+            hls_url = f"https://v-mps.crazymaplestudios.com/{m.group(1)}/h264-ordinary-fd.m3u8"
+            p = urlparse(hls_url)
+            return ResolvedDramaMedia(
+                media_url=hls_url,
+                media_type="HLS",
+                download_host=p.netloc,
+            )
+
     # If source_url is a webpage, attempt extracting HLS from web schema (e.g. ReelShort)
     if source_url and is_supported_drama_url(source_url):
         web_hls = await extract_webpage_hls(source_url, client=client)

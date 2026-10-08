@@ -56,6 +56,7 @@ async def run_series_job(
     translate_text: Callable[..., Any] | None = None,
     synthesize_tts: Callable[..., Any] | None = None,
     upload_video: Callable[..., Any] | None = None,
+    visibility_override: str | None = None,
 ) -> dict[str, Any]:
     """Run one series chunk job to completion. Returns a stage report.
 
@@ -164,7 +165,20 @@ async def run_series_job(
                 return _fail(exc.code, str(exc), "render")
 
         tasks_repo.ensure_tasks(job_id, episodes)
-        downloader = download_episode or _default_not_implemented
+        if download_episode is not None:
+            downloader = download_episode
+        else:
+            async def _default_live_downloader(ep_dict: dict[str, Any], target_path: Path) -> Path:
+                import asyncio
+                from .media.drama_media import resolve_drama_media, download_resolved_media
+
+                resolved = await resolve_drama_media(
+                    source_url=ep_dict.get("source_url"),
+                    raw_payload=ep_dict,
+                )
+                return await asyncio.to_thread(download_resolved_media, resolved, target_path)
+
+            downloader = _default_live_downloader
         _step("download", "running")
         _step("render", "running")
         rendered_numbers: list[int] = []
@@ -262,7 +276,14 @@ async def run_series_job(
             except Exception:
                 pass
             rendered_numbers.append(ep_num)
-            report["episodes"].append({"n": ep_num, "state": "rendered"})
+            report["episodes"].append({
+                "n": ep_num,
+                "state": "rendered",
+                "duration": probe.get("duration"),
+                "bytes": seg.stat().st_size,
+                "resolution": probe.get("resolution"),
+                "codec": probe.get("codec"),
+            })
         _step("download", "done", files=len(rendered_numbers))
         _step("render", "done", segments=len(rendered_numbers))
         if "asr" in active:
@@ -295,6 +316,8 @@ async def run_series_job(
             return _fail(exc.code, str(exc), "merge")
         _step("merge", "done", output=str(final_path))
         report["output"] = str(final_path)
+        report["output_probe"] = probe
+        report["output_bytes"] = final_path.stat().st_size if final_path.exists() else 0
         proc_repo.update_job(job_id, status="merging", output_path=str(final_path))
 
         # ---- upload (idempotent; real publisher by default) ----
@@ -313,9 +336,9 @@ async def run_series_job(
                 start = job.get("episode_start")
                 end = job.get("episode_end")
                 title = (series or {}).get("title") or "Drama"
-                if start is not None and end is not None:
-                    title = f"{title} - Tập {start}-{end}" if start != end else f"{title} - Tập {start}"
-                return await publish_job_final(job, final_path, title=title)
+                return await publish_job_final(
+                    job, final_path, title=title, visibility=visibility_override
+                )
 
         try:
             up_out = await _upload(job, final_path)
