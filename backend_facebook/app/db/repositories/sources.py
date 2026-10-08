@@ -17,7 +17,7 @@ def _is_unique_violation(exc: Exception) -> bool:
 async def get_source_by_page(pipeline_id: str, page_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, pipeline_id, page_id, page_name, reels_url, enabled, initial_scan_completed, crawl_complete, discovered_total, last_scan_at, last_scan_status, last_scan_error, created_at, updated_at FROM facebook_sources WHERE pipeline_id = :pipeline_id AND page_id = :page_id LIMIT 1",
+        "SELECT id, pipeline_id, page_id, page_name, reels_url, source_url, enabled, initial_scan_completed, crawl_complete, discovered_total, last_scan_at, last_scan_status, last_scan_error, created_at, updated_at FROM facebook_sources WHERE pipeline_id = :pipeline_id AND page_id = :page_id LIMIT 1",
         {"pipeline_id": pipeline_id, "page_id": page_id},
     )
     if not rows.rows:
@@ -29,15 +29,16 @@ async def get_source_by_page(pipeline_id: str, page_id: str) -> dict[str, Any] |
         "page_id": r[2],
         "page_name": r[3],
         "reels_url": r[4],
-        "enabled": bool(r[5]),
-        "initial_scan_completed": bool(r[6]),
-        "crawl_complete": bool(r[7]),
-        "discovered_total": r[8],
-        "last_scan_at": r[9],
-        "last_scan_status": r[10],
-        "last_scan_error": r[11],
-        "created_at": r[12],
-        "updated_at": r[13],
+        "source_url": r[5],
+        "enabled": bool(r[6]),
+        "initial_scan_completed": bool(r[7]),
+        "crawl_complete": bool(r[8]),
+        "discovered_total": r[9],
+        "last_scan_at": r[10],
+        "last_scan_status": r[11],
+        "last_scan_error": r[12],
+        "created_at": r[13],
+        "updated_at": r[14],
     }
 
 
@@ -48,6 +49,7 @@ async def create_source(
     page_id: str,
     page_name: str | None = None,
     reels_url: str | None = None,
+    source_url: str | None = None,
     enabled: bool = True,
 ) -> dict[str, Any]:
     # Guard at repository layer: same page_id in the same pipeline is forbidden.
@@ -60,8 +62,8 @@ async def create_source(
     try:
         await client.execute(
             """
-            INSERT INTO facebook_sources (id, pipeline_id, page_id, page_name, reels_url, enabled)
-            VALUES (:id, :pipeline_id, :page_id, :page_name, :reels_url, :enabled)
+            INSERT INTO facebook_sources (id, pipeline_id, page_id, page_name, reels_url, source_url, enabled)
+            VALUES (:id, :pipeline_id, :page_id, :page_name, :reels_url, :source_url, :enabled)
             """,
             {
                 "id": source_id,
@@ -69,6 +71,7 @@ async def create_source(
                 "page_id": page_id,
                 "page_name": page_name,
                 "reels_url": reels_url,
+                "source_url": source_url,
                 "enabled": 1 if enabled else 0,
             },
         )
@@ -87,6 +90,7 @@ async def create_source(
         "page_id": page_id,
         "page_name": page_name,
         "reels_url": reels_url,
+        "source_url": source_url,
         "enabled": enabled,
         "initial_scan_completed": False,
         "crawl_complete": False,
@@ -97,7 +101,7 @@ async def create_source(
 async def get_source(source_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, pipeline_id, page_id, page_name, reels_url, enabled, initial_scan_completed, crawl_complete, discovered_total, last_scan_at, last_scan_status, last_scan_error, created_at, updated_at FROM facebook_sources WHERE id = :id",
+        "SELECT id, pipeline_id, page_id, page_name, reels_url, source_url, enabled, initial_scan_completed, crawl_complete, discovered_total, last_scan_at, last_scan_status, last_scan_error, created_at, updated_at FROM facebook_sources WHERE id = :id",
         {"id": source_id},
     )
     if not rows.rows:
@@ -109,22 +113,23 @@ async def get_source(source_id: str) -> dict[str, Any] | None:
         "page_id": r[2],
         "page_name": r[3],
         "reels_url": r[4],
-        "enabled": bool(r[5]),
-        "initial_scan_completed": bool(r[6]),
-        "crawl_complete": bool(r[7]),
-        "discovered_total": r[8],
-        "last_scan_at": r[9],
-        "last_scan_status": r[10],
-        "last_scan_error": r[11],
-        "created_at": r[12],
-        "updated_at": r[13],
+        "source_url": r[5],
+        "enabled": bool(r[6]),
+        "initial_scan_completed": bool(r[7]),
+        "crawl_complete": bool(r[8]),
+        "discovered_total": r[9],
+        "last_scan_at": r[10],
+        "last_scan_status": r[11],
+        "last_scan_error": r[12],
+        "created_at": r[13],
+        "updated_at": r[14],
     }
 
 
 async def list_sources(pipeline_id: str) -> list[dict[str, Any]]:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, pipeline_id, page_id, page_name, reels_url, enabled, initial_scan_completed, crawl_complete, discovered_total, last_scan_at, last_scan_status, last_scan_error, created_at, updated_at FROM facebook_sources WHERE pipeline_id = :pipeline_id",
+        "SELECT id, pipeline_id, page_id, page_name, reels_url, source_url, enabled, initial_scan_completed, crawl_complete, discovered_total, last_scan_at, last_scan_status, last_scan_error, created_at, updated_at FROM facebook_sources WHERE pipeline_id = :pipeline_id",
         {"pipeline_id": pipeline_id},
     )
     return [
@@ -134,15 +139,16 @@ async def list_sources(pipeline_id: str) -> list[dict[str, Any]]:
             "page_id": r[2],
             "page_name": r[3],
             "reels_url": r[4],
-            "enabled": bool(r[5]),
-            "initial_scan_completed": bool(r[6]),
-            "crawl_complete": bool(r[7]),
-            "discovered_total": r[8],
-            "last_scan_at": r[9],
-            "last_scan_status": r[10],
-            "last_scan_error": r[11],
-            "created_at": r[12],
-            "updated_at": r[13],
+            "source_url": r[5],
+            "enabled": bool(r[6]),
+            "initial_scan_completed": bool(r[7]),
+            "crawl_complete": bool(r[8]),
+            "discovered_total": r[9],
+            "last_scan_at": r[10],
+            "last_scan_status": r[11],
+            "last_scan_error": r[12],
+            "created_at": r[13],
+            "updated_at": r[14],
         }
         for r in rows.rows
     ]

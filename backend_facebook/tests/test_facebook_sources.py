@@ -214,7 +214,17 @@ def test_create_source_invalid_url(db) -> None:
     assert r.json()["error"] == "INVALID_FACEBOOK_URL"
 
 
-def test_create_source_username_gives_page_id_required(db) -> None:
+def test_create_source_username_resolves_or_reports(db, monkeypatch) -> None:
+    # New contract: username URLs resolve via provider instead of 400.
+    # Without network access the resolver must fail with a clear code,
+    # never PAGE_ID_REQUIRED.
+    import app.services.facebook_url as fb_url
+    from app.services.facebook_url import PageResolutionError
+
+    async def fake_fail(raw_url, transport=None):
+        raise PageResolutionError("unreachable in test")
+
+    monkeypatch.setattr(fb_url, "resolve_page_id_from_url", fake_fail)
     client = make_client()
     pipe = _create_pipeline(client)
     r = client.post(
@@ -223,7 +233,7 @@ def test_create_source_username_gives_page_id_required(db) -> None:
         headers=AUTH_HEADERS,
     )
     assert r.status_code == 400
-    assert r.json()["error"] == "PAGE_ID_REQUIRED"
+    assert r.json()["error"] == "PAGE_UNRESOLVABLE"
 
 
 def test_create_source_pipeline_not_found(db) -> None:
@@ -400,3 +410,208 @@ def test_delete_source_with_reels_is_409(db) -> None:
     assert r.json()["error"] == "SOURCE_HAS_VIDEOS"
     # Source still there and toggle still works.
     assert asyncio.run(sources.get_source(src_id)) is not None
+
+
+# ---------- 20. username URL resolution ----------
+
+BEEK_HTML = (
+    '<html><head><title>Beeknoee AI Reels</title></head><body>'
+    '"sectionToken":"eA==","userID":"100064159950207",'
+    '"userVanity":"beeknoee","viewerID":null}'
+    "</body></html>"
+)
+
+
+def test_extract_username_candidate() -> None:
+    from app.services.facebook_url import extract_username_candidate
+
+    assert extract_username_candidate("https://www.facebook.com/beeknoee/reels/") == "beeknoee"
+    assert extract_username_candidate("https://www.facebook.com/beeknoee/") == "beeknoee"
+    assert extract_username_candidate("https://fb.watch/abc123/") is None
+    assert extract_username_candidate("https://www.facebook.com/share/abc123/") is None
+    assert extract_username_candidate("https://facebook.com/people/foo/123/") is None
+    assert extract_username_candidate("https://www.facebook.com/61592409539824/reels/") is None
+    assert extract_username_candidate("https://www.facebook.com/reel/123/") is None
+    assert extract_username_candidate("https://example.com/beeknoee/") is None
+    assert extract_username_candidate("not a url") is None
+    assert extract_username_candidate(None) is None
+
+
+def test_extract_page_id_from_html_verified_pairing() -> None:
+    from app.services.facebook_url import extract_page_id_from_html
+
+    assert extract_page_id_from_html(BEEK_HTML, "beeknoee") == "100064159950207"
+    assert extract_page_id_from_html(BEEK_HTML, "BeekNoee") == "100064159950207"
+    # Vanity mismatch: never trust a stray ID.
+    assert extract_page_id_from_html(BEEK_HTML, "someoneelse") is None
+    assert extract_page_id_from_html("", "beeknoee") is None
+    assert extract_page_id_from_html("<html></html>", "beeknoee") is None
+
+
+def test_resolve_page_id_mock_transport() -> None:
+    import httpx
+
+    from app.services.facebook_url import resolve_page_id_from_url
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=BEEK_HTML)
+
+    async def _go():
+        return await resolve_page_id_from_url(
+            "https://www.facebook.com/beeknoee/reels/",
+            transport=httpx.MockTransport(handler),
+        )
+
+    out = asyncio.run(_go())
+    assert out["page_id"] == "100064159950207"
+    assert out["username"] == "beeknoee"
+    assert out["normalized_url"] == "https://www.facebook.com/100064159950207/reels/"
+
+
+def test_resolve_page_id_wrong_vanity_fails() -> None:
+    import httpx
+
+    from app.services.facebook_url import PageResolutionError, resolve_page_id_from_url
+
+    html = BEEK_HTML.replace('"userVanity":"beeknoee"', '"userVanity":"otherpage"')
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    async def _go():
+        await resolve_page_id_from_url(
+            "https://www.facebook.com/beeknoee/reels/",
+            transport=httpx.MockTransport(handler),
+        )
+
+    try:
+        asyncio.run(_go())
+        raise AssertionError("expected PageResolutionError")
+    except PageResolutionError:
+        pass
+
+
+def test_resolve_share_redirect_follows() -> None:
+    import httpx
+
+    from app.services.facebook_url import resolve_page_id_from_url
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "fb.watch" in str(req.url):
+            return httpx.Response(
+                302, headers={"location": "https://www.facebook.com/beeknoee/reels/"}
+            )
+        return httpx.Response(200, text=BEEK_HTML)
+
+    async def _go():
+        return await resolve_page_id_from_url(
+            "https://fb.watch/abc123/",
+            transport=httpx.MockTransport(handler),
+        )
+
+    out = asyncio.run(_go())
+    assert out["page_id"] == "100064159950207"
+
+
+def test_resolve_http_error_fails() -> None:
+    import httpx
+
+    from app.services.facebook_url import PageResolutionError, resolve_page_id_from_url
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    async def _go():
+        await resolve_page_id_from_url(
+            "https://www.facebook.com/ghostpage/reels/",
+            transport=httpx.MockTransport(handler),
+        )
+
+    try:
+        asyncio.run(_go())
+        raise AssertionError("expected PageResolutionError")
+    except PageResolutionError:
+        pass
+
+
+def _patch_resolver(monkeypatch, page_id="100064159950207"):
+    import app.services.facebook_url as fb_url
+
+    async def fake_resolve(raw_url, transport=None):
+        assert transport is None  # route never injects test transports
+        return {
+            "page_id": page_id,
+            "username": "beeknoee",
+            "normalized_url": f"https://www.facebook.com/{page_id}/reels/",
+        }
+
+    monkeypatch.setattr(fb_url, "resolve_page_id_from_url", fake_resolve)
+
+
+def test_create_source_username_url(db, monkeypatch) -> None:
+    _patch_resolver(monkeypatch)
+    client = make_client()
+    pipe = _create_pipeline(client, name="DEVAI VN")
+    r = client.post(
+        f"/api/facebook/pipelines/{pipe['id']}/sources",
+        json={"url": "https://www.facebook.com/beeknoee/reels/"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["page_id"] == "100064159950207"
+    assert body["source_url"] == "https://www.facebook.com/beeknoee/reels/"
+    assert body["reels_url"] == "https://www.facebook.com/100064159950207/reels/"
+
+
+def test_create_source_duplicate_across_url_forms(db, monkeypatch) -> None:
+    _patch_resolver(monkeypatch)
+    client = make_client()
+    pipe = _create_pipeline(client, name="DEVAI VN 2")
+    first = client.post(
+        f"/api/facebook/pipelines/{pipe['id']}/sources",
+        json={"url": "https://www.facebook.com/beeknoee/"},
+        headers=AUTH_HEADERS,
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        f"/api/facebook/pipelines/{pipe['id']}/sources",
+        json={"url": "https://www.facebook.com/100064159950207/reels/"},
+        headers=AUTH_HEADERS,
+    )
+    assert second.status_code == 409, second.text
+    assert second.json()["error"] == "SOURCE_ALREADY_EXISTS"
+
+
+def test_create_source_unresolvable_username(db, monkeypatch) -> None:
+    import app.services.facebook_url as fb_url
+    from app.services.facebook_url import PageResolutionError
+
+    async def fake_fail(raw_url, transport=None):
+        raise PageResolutionError("Không xác định được Page ID cho 'ghostpage'.")
+
+    monkeypatch.setattr(fb_url, "resolve_page_id_from_url", fake_fail)
+    client = make_client()
+    pipe = _create_pipeline(client, name="DEVAI VN 3")
+    r = client.post(
+        f"/api/facebook/pipelines/{pipe['id']}/sources",
+        json={"url": "https://www.facebook.com/ghostpage/reels/"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"] == "PAGE_UNRESOLVABLE"
+
+
+def test_migration_18_source_url_column(db) -> None:
+    import asyncio
+
+    import app.db.client as client_module
+
+    async def _cols():
+        rows = await client_module._client.execute(
+            "PRAGMA table_info(facebook_sources)"
+        )
+        return [r[1] for r in rows.rows]
+
+    cols = asyncio.run(_cols())
+    assert "source_url" in cols

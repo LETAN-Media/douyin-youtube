@@ -61,6 +61,7 @@ def _source_response(row: dict) -> dict:
         "page_id": row["page_id"],
         "page_name": row.get("page_name"),
         "reels_url": row.get("reels_url"),
+        "source_url": row.get("source_url"),
         "source_type": SOURCE_TYPE,
         "enabled": row.get("enabled", True),
         "initial_scan_completed": row.get("initial_scan_completed", False),
@@ -147,8 +148,20 @@ async def create_source(
 
     try:
         parsed = parse_facebook_reels_url(raw_url)
-    except PageIdRequiredError as exc:
-        raise _err(400, "PAGE_ID_REQUIRED", str(exc))
+        source_url = raw_url
+    except PageIdRequiredError:
+        # Username/profile/share URL: resolve to the authoritative Page ID.
+        from ..services.facebook_url import (
+            PageResolutionError,
+            resolve_page_id_from_url,
+        )
+
+        try:
+            resolved = await resolve_page_id_from_url(raw_url)
+        except PageResolutionError as exc:
+            raise _err(400, "PAGE_UNRESOLVABLE", str(exc))
+        parsed = resolved
+        source_url = raw_url
     except InvalidFacebookUrlError as exc:
         raise _err(400, "INVALID_FACEBOOK_URL", str(exc) or "Invalid Facebook URL")
 
@@ -159,6 +172,7 @@ async def create_source(
             page_id=parsed["page_id"],
             page_name=body.page_name,
             reels_url=parsed["normalized_url"],
+            source_url=source_url,
             enabled=body.enabled,
         )
     except sources.DuplicateSourceError as exc:

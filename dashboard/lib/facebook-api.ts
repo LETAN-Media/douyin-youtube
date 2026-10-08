@@ -81,6 +81,7 @@ export interface FacebookSourceDto {
   page_id: string;
   page_name: string | null;
   reels_url: string | null;
+  source_url?: string | null;
   enabled: boolean;
   initial_scan_completed: boolean;
   crawl_complete: boolean;

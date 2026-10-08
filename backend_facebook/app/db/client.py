@@ -308,6 +308,10 @@ async def migrate() -> None:
     if not await _has_column(client, "facebook_ai_settings", "model"):
         statements_17.append("ALTER TABLE facebook_ai_settings ADD COLUMN model TEXT")
     await _apply_migration(client, applied, "20241005_17", statements_17)
+    statements_18: list[str] = []
+    if not await _has_column(client, "facebook_sources", "source_url"):
+        statements_18.append("ALTER TABLE facebook_sources ADD COLUMN source_url TEXT")
+    await _apply_migration(client, applied, "20241005_18", statements_18)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:
