@@ -115,6 +115,11 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
         duration = audio_extractor.probe_media(audio_path)["duration"]
     except audio_extractor.AudioError as exc:
         return _fail(job_id, exc.code, str(exc), "extracting_audio")
+    # Source MP4 is no longer needed (audio.m4a feeds render/ASR) — free disk.
+    try:
+        source_mp4.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("job %s: could not delete source.mp4: %s", job_id, exc)
 
     # ---- background selection ----
     bg_asset = audio_repo.pick_random_background(pipeline_id)

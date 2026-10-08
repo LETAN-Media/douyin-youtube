@@ -48,24 +48,50 @@ def probe_media(path: Path) -> dict:
 
 def extract_audio(source: Path, dest: Path, normalize: bool = False,
                   threads: int = 2) -> Path:
-    """Extract audio: aac stream-copy to .m4a when possible, else AAC transcode."""
-    info = probe_media(source)
+    """Extract audio to .m4a: AAC stream-copy when possible, else AAC transcode.
+
+    Returns dest. Raises SOURCE_AUDIO_MISSING when the source has no audio,
+    EXTRACT_FAILED on ffmpeg errors. Never produces MP3.
+    """
+    if dest.suffix.lower() != ".m4a":
+        raise AudioError("BAD_DEST_FORMAT", "Intermediate audio must be .m4a.")
+    try:
+        info = probe_media(source)
+    except AudioError as exc:
+        if exc.code == "NO_AUDIO_STREAM":
+            raise AudioError("SOURCE_AUDIO_MISSING",
+                             "Source video has no audio stream.")
+        raise
     dest.parent.mkdir(parents=True, exist_ok=True)
     codec = (info.get("audio_codec") or "").lower()
-    if not normalize and codec == "aac" and dest.suffix.lower() == ".m4a":
-        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(source),
-               "-vn", "-c:a", "copy", str(dest)]
+    if not normalize and codec == "aac":
+        method = "STREAM_COPY"
+        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y",
+               "-i", str(source), "-map", "0:a:0", "-vn", "-c:a", "copy",
+               str(dest)]
     else:
-        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(source),
-               "-vn", "-c:a", "aac", "-b:a", "128k",
-               "-threads", str(threads)]
+        # Filters require decode; non-AAC needs a compatible M4A codec.
+        method = "AAC_TRANSCODE"
+        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y",
+               "-i", str(source), "-map", "0:a:0", "-vn", "-c:a", "aac",
+               "-b:a", "128k", "-threads", str(threads)]
         if normalize:
             cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
         cmd.append(str(dest))
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except subprocess.TimeoutExpired:
+        raise AudioError("EXTRACT_TIMEOUT", "ffmpeg extract exceeded 1h.")
     if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
         raise AudioError("EXTRACT_FAILED", (proc.stderr or "")[-300:])
     out = probe_media(dest)
-    logger.info("audio extracted: %.1fs codec=%s", out["duration"],
-                out.get("audio_codec"))
+    if not out["duration"] or out["duration"] <= 0:
+        raise AudioError("EXTRACT_FAILED", "Extracted audio has no duration.")
+    src_duration = info.get("duration") or 0
+    if src_duration > 0 and abs(out["duration"] - src_duration) > max(
+            2.0, src_duration * 0.05):
+        raise AudioError("EXTRACT_FAILED",
+                         "Extracted duration does not match source.")
+    logger.info("audio extracted: %.1fs codec=%s method=%s", out["duration"],
+                out.get("audio_codec"), method)
     return dest

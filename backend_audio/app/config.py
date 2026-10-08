@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     PHIMTAT_ENABLED: bool = True
     PHIMTAT_API_KEY: str | None = None
     PHIMTAT_API_BASE_URL: str = "https://api.phimtat.vn/json/snapvideo.json"
+    PHIMTAT_REDIRECT_URL: str = "https://api.phimtat.vn/snapvideo/red64.php"
     PHIMTAT_TIMEOUT_SECONDS: float = 60.0
     PHIMTAT_MAX_BYTES: int = 500 * 1024 * 1024
 

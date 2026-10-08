@@ -139,7 +139,7 @@ async def _resolve_phimtat(target: str, transport) -> dict:
     from app.config import settings
 
     base = (settings.PHIMTAT_API_BASE_URL or "").strip()
-    redirect = "https://api.phimtat.vn/snapvideo/red64.php"
+    redirect = (settings.PHIMTAT_REDIRECT_URL or "").strip() or "https://api.phimtat.vn/snapvideo/red64.php"
     key = (settings.PHIMTAT_API_KEY or "").strip()
     try:
         timeout = float(settings.PHIMTAT_TIMEOUT_SECONDS or 60)
