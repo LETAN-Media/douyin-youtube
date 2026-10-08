@@ -239,11 +239,22 @@ function Media({ pipeline }: { pipeline: AudioPipelineDto }) {
             <option value="background">Background</option>
             <option value="logo">Logo</option>
             <option value="srt">SRT có sẵn</option>
+            <option value="template">Template overlay</option>
           </select>
-          <input
-            type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            className="min-h-[44px] flex-1 rounded-xl border border-slate-200 px-2 text-xs"
-          />
+          <label
+            className="inline-flex min-h-[44px] flex-1 cursor-pointer items-center gap-2 overflow-hidden rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 hover:border-slate-300"
+          >
+            <span className="shrink-0 rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
+              Chọn tệp
+            </span>
+            <span className="min-w-0 flex-1 truncate text-xs">
+              {file ? file.name : "Chưa chọn tệp nào"}
+            </span>
+            <input
+              type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              className="sr-only"
+            />
+          </label>
           <button
             type="button" onClick={() => void handleUpload()}
             disabled={!file || uploading}
