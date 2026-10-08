@@ -31,13 +31,27 @@ async def create_pipeline(
         "slug": slug,
         "enabled": enabled,
         "auto_publish": auto_publish,
+        "youtube_upload_mode": "video",
     }
+
+
+YOUTUBE_UPLOAD_MODES = ("video", "shorts")
+
+
+def normalize_upload_mode(value: Any) -> str:
+    """Validate youtube_upload_mode. Unknown values raise ValueError."""
+    mode = str(value or "video").strip().lower()
+    if mode not in YOUTUBE_UPLOAD_MODES:
+        raise ValueError(
+            f"Invalid youtube_upload_mode: {value!r}. Expected one of {YOUTUBE_UPLOAD_MODES}."
+        )
+    return mode
 
 
 async def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, name, slug, enabled, auto_publish, created_at, updated_at FROM facebook_pipelines WHERE id = :id",
+        "SELECT id, name, slug, enabled, auto_publish, youtube_upload_mode, created_at, updated_at FROM facebook_pipelines WHERE id = :id",
         {"id": pipeline_id},
     )
     if not rows.rows:
@@ -49,8 +63,9 @@ async def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
         "slug": r[2],
         "enabled": bool(r[3]),
         "auto_publish": bool(r[4]),
-        "created_at": r[5],
-        "updated_at": r[6],
+        "youtube_upload_mode": r[5] or "video",
+        "created_at": r[6],
+        "updated_at": r[7],
     }
 
 
@@ -60,6 +75,7 @@ async def update_pipeline(
     enabled: bool | None = None,
     auto_publish: bool | None = None,
     name: str | None = None,
+    youtube_upload_mode: Any | None = None,
 ) -> dict[str, Any] | None:
     """Partial update: only the fields explicitly provided are changed.
 
@@ -83,6 +99,9 @@ async def update_pipeline(
             raise ValueError("Pipeline name is too long (max 200).")
         sets.append("name = :name")
         params["name"] = clean
+    if youtube_upload_mode is not None:
+        sets.append("youtube_upload_mode = :youtube_upload_mode")
+        params["youtube_upload_mode"] = normalize_upload_mode(youtube_upload_mode)
     if not sets:
         return await get_pipeline(pipeline_id)
     client = get_client()
@@ -102,7 +121,7 @@ async def update_pipeline(
 async def get_pipeline_by_slug(slug: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, name, slug, enabled, auto_publish, created_at, updated_at FROM facebook_pipelines WHERE slug = :slug",
+        "SELECT id, name, slug, enabled, auto_publish, youtube_upload_mode, created_at, updated_at FROM facebook_pipelines WHERE slug = :slug",
         {"slug": slug},
     )
     if not rows.rows:
@@ -114,8 +133,9 @@ async def get_pipeline_by_slug(slug: str) -> dict[str, Any] | None:
         "slug": r[2],
         "enabled": bool(r[3]),
         "auto_publish": bool(r[4]),
-        "created_at": r[5],
-        "updated_at": r[6],
+        "youtube_upload_mode": r[5] or "video",
+        "created_at": r[6],
+        "updated_at": r[7],
     }
 
 

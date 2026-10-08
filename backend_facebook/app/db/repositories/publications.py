@@ -4,6 +4,52 @@ from datetime import datetime, timezone
 from ..client import get_client
 
 
+def _pub_extra(r: Any) -> dict[str, Any]:
+    """Snapshot columns appended at index 16-18, tolerant of pre-migration rows."""
+    try:
+        mode = r[16]
+    except Exception:
+        mode = None
+    try:
+        eligible = r[17]
+    except Exception:
+        eligible = None
+    try:
+        note = r[18]
+    except Exception:
+        note = None
+    return {
+        "youtube_upload_mode": mode or "video",
+        "shorts_eligible": None if eligible is None else bool(eligible),
+        "shorts_check_note": note,
+    }
+
+
+async def set_upload_snapshot(publication_id: str, mode: str) -> None:
+    """Stamp the requested mode at enqueue time (scheduler snapshot)."""
+    client = get_client()
+    await client.execute(
+        "UPDATE publications SET youtube_upload_mode = :mode WHERE id = :id",
+        {"mode": mode or "video", "id": publication_id},
+    )
+
+
+async def set_shorts_check(
+    publication_id: str, eligible: bool | None, note: str | None
+) -> None:
+    """Record the verified Shorts eligibility of the actual file."""
+    client = get_client()
+    await client.execute(
+        "UPDATE publications SET shorts_eligible = :eligible, shorts_check_note = :note "
+        "WHERE id = :id",
+        {
+            "eligible": None if eligible is None else (1 if eligible else 0),
+            "note": (note or "")[:500] if note else None,
+            "id": publication_id,
+        },
+    )
+
+
 async def create_publication(
     *,
     publication_id: str,
@@ -35,7 +81,7 @@ async def create_publication(
 async def get_publication(publication_id: str) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at FROM publications WHERE id = :id",
+        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at, youtube_upload_mode, shorts_eligible, shorts_check_note FROM publications WHERE id = :id",
         {"id": publication_id},
     )
     if not rows.rows:
@@ -58,6 +104,7 @@ async def get_publication(publication_id: str) -> dict[str, Any] | None:
         "retry_count": r[13],
         "created_at": r[14],
         "updated_at": r[15],
+        **_pub_extra(r),
     }
 
 
@@ -66,7 +113,7 @@ async def get_by_reel_destination(
 ) -> dict[str, Any] | None:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at FROM publications WHERE reel_db_id = :reel_db_id AND destination_id = :destination_id",
+        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at, youtube_upload_mode, shorts_eligible, shorts_check_note FROM publications WHERE reel_db_id = :reel_db_id AND destination_id = :destination_id",
         {"reel_db_id": reel_db_id, "destination_id": destination_id},
     )
     if not rows.rows:
@@ -89,6 +136,7 @@ async def get_by_reel_destination(
         "retry_count": r[13],
         "created_at": r[14],
         "updated_at": r[15],
+        **_pub_extra(r),
     }
 
 
@@ -269,7 +317,7 @@ async def status_counts_for_pipeline(pipeline_id: str) -> dict[str, int]:
 async def list_publications(destination_id: str) -> list[dict[str, Any]]:
     client = get_client()
     rows = await client.execute(
-        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at FROM publications WHERE destination_id = :destination_id",
+        "SELECT id, reel_db_id, destination_id, status, youtube_video_id, youtube_title, youtube_description, youtube_hashtags_json, ai_model, started_at, published_at, scheduled_publish_at, last_error, retry_count, created_at, updated_at, youtube_upload_mode, shorts_eligible, shorts_check_note FROM publications WHERE destination_id = :destination_id",
         {"destination_id": destination_id},
     )
     return [
@@ -290,6 +338,7 @@ async def list_publications(destination_id: str) -> list[dict[str, Any]]:
             "retry_count": r[13],
             "created_at": r[14],
             "updated_at": r[15],
+            **_pub_extra(r),
         }
         for r in rows.rows
     ]
@@ -306,7 +355,8 @@ async def list_publications_for_pipeline(
     rows = await client.execute(
         "SELECT p.id, p.reel_db_id, p.destination_id, p.status, p.youtube_video_id, "
         "p.started_at, p.published_at, p.last_error, p.retry_count, "
-        "r.reel_id, d.channel_name "
+        "r.reel_id, d.channel_name, p.youtube_upload_mode, p.shorts_eligible, "
+        "p.shorts_check_note "
         "FROM publications p "
         "JOIN facebook_reels r ON r.id = p.reel_db_id "
         "JOIN youtube_destinations d ON d.id = p.destination_id "
@@ -335,6 +385,9 @@ async def list_publications_for_pipeline(
                 "retry_count": r[8],
                 "reel_id": r[9],
                 "channel_name": r[10],
+                "youtube_upload_mode": r[11] or "video",
+                "shorts_eligible": None if r[12] is None else bool(r[12]),
+                "shorts_check_note": r[13],
             }
             for r in rows.rows
         ],

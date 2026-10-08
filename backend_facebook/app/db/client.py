@@ -312,6 +312,20 @@ async def migrate() -> None:
     if not await _has_column(client, "facebook_sources", "source_url"):
         statements_18.append("ALTER TABLE facebook_sources ADD COLUMN source_url TEXT")
     await _apply_migration(client, applied, "20241005_18", statements_18)
+    statements_19: list[str] = []
+    if not await _has_column(client, "facebook_pipelines", "youtube_upload_mode"):
+        statements_19.append(
+            "ALTER TABLE facebook_pipelines ADD COLUMN youtube_upload_mode TEXT NOT NULL DEFAULT 'video'"
+        )
+    if not await _has_column(client, "publications", "youtube_upload_mode"):
+        statements_19.append(
+            "ALTER TABLE publications ADD COLUMN youtube_upload_mode TEXT NOT NULL DEFAULT 'video'"
+        )
+    if not await _has_column(client, "publications", "shorts_eligible"):
+        statements_19.append("ALTER TABLE publications ADD COLUMN shorts_eligible INTEGER")
+    if not await _has_column(client, "publications", "shorts_check_note"):
+        statements_19.append("ALTER TABLE publications ADD COLUMN shorts_check_note TEXT")
+    await _apply_migration(client, applied, "20241005_19", statements_19)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

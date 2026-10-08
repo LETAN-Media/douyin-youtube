@@ -29,6 +29,7 @@ import { FacebookDestinations } from "@/components/facebook/FacebookDestinations
 import { FacebookPublications } from "@/components/facebook/FacebookPublications";
 import { FacebookAiProcessing } from "@/components/facebook/FacebookAiProcessing";
 import { FacebookScheduler } from "@/components/facebook/FacebookScheduler";
+import { FacebookUploadMode } from "@/components/facebook/FacebookUploadMode";
 
 const TABS: FacebookTabKey[] = [
   "overview",
@@ -259,12 +260,15 @@ export default async function FacebookPipelinePage({
           ) : null}
           {activeTab === "scheduler" ? (
             scheduleRes.ok ? (
-              <FacebookScheduler
-                pipelineId={pipelineId}
-                initialSchedule={initialSchedule}
-                initialStatus={scheduleRes.v}
-                destinationId={destinationsRes.ok ? destinationsRes.v[0]?.id ?? null : null}
-              />
+              <div className="space-y-3">
+                <FacebookUploadMode pipelineId={pipelineId} />
+                <FacebookScheduler
+                  pipelineId={pipelineId}
+                  initialSchedule={initialSchedule}
+                  initialStatus={scheduleRes.v}
+                  destinationId={destinationsRes.ok ? destinationsRes.v[0]?.id ?? null : null}
+                />
+              </div>
             ) : (
               <TabError message={scheduleRes.e} />
             )

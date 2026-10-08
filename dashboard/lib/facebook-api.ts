@@ -62,6 +62,7 @@ export interface FacebookPipelineDto {
   slug: string;
   enabled: boolean;
   auto_publish: boolean;
+  youtube_upload_mode?: string;
 }
 
 export interface FacebookSummaryDto {
@@ -129,6 +130,9 @@ export interface FacebookPublicationDto {
   retry_count: number;
   reel_id: string;
   channel_name: string | null;
+  youtube_upload_mode?: string;
+  shorts_eligible?: boolean | null;
+  shorts_check_note?: string | null;
 }
 
 function baseUrl(): string {
@@ -230,6 +234,7 @@ export interface UpdateFacebookPipelineDto {
   enabled?: boolean;
   auto_publish?: boolean;
   name?: string;
+  youtube_upload_mode?: string;
 }
 
 export async function updateFacebookPipeline(

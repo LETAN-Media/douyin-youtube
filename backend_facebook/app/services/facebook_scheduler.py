@@ -495,6 +495,18 @@ async def _enqueue_one_video(
         # Persist scheduled_publish_at (utc_publish_at) on the publication.
         await publications.set_scheduled_publish_at(publication["id"], utc_publish_at)
 
+        # Snapshot the requested upload mode at enqueue time: later settings
+        # changes must not rewrite history for already-queued jobs.
+        try:
+            from ..db.repositories import pipelines as pipelines_repo
+
+            pipe = await pipelines_repo.get_pipeline(pipeline_id)
+            await publications.set_upload_snapshot(
+                publication["id"], (pipe or {}).get("youtube_upload_mode") or "video"
+            )
+        except Exception:
+            logger.exception("failed to snapshot upload mode for publication %s", publication["id"])
+
         # Publication stays 'queued'; the global publisher marks it 'processing'.
         # Earlier slots get higher queue priority.
         priority = 1000 - slot_index

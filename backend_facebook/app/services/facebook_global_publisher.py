@@ -234,6 +234,36 @@ async def _process_one_job(
             "UNEXPECTED", type(exc).__name__, **{**base, **ai_info},
         )
 
+    # Shorts verification: only when the job snapshot requests shorts mode.
+    # The snapshot (not live settings) governs running jobs.
+    try:
+        snap = await publications.get_publication(publication_id)
+        requested_mode = (snap or {}).get("youtube_upload_mode") or "video"
+    except Exception:
+        requested_mode = "video"
+    if requested_mode == "shorts":
+        try:
+            await publish_queue.update_job_status(queue_id, "processing", stage="shorts_check")
+            from .facebook_shorts import ShortsCheckError, check_shorts_eligibility
+
+            eligible, note = check_shorts_eligibility(output)
+            await publications.set_shorts_check(publication_id, eligible, note)
+            if not eligible:
+                return await _fail_job(
+                    queue_id, publication_id, target_dir, started,
+                    "SHORTS_INELIGIBLE", f"Video không đủ điều kiện Shorts: {note}",
+                    **{**base, **ai_info},
+                )
+        except ShortsCheckError as exc:
+            try:
+                await publications.set_shorts_check(publication_id, None, str(exc))
+            except Exception:
+                pass
+            return await _fail_job(
+                queue_id, publication_id, target_dir, started,
+                exc.code, str(exc), **{**base, **ai_info},
+            )
+
     try:
         await publish_queue.update_job_status(queue_id, "processing", stage="uploading")
         credentials = await load_destination_credentials_async(destination_id)
