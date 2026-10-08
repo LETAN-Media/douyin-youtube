@@ -7,7 +7,10 @@ export class AudioApiError extends Error {
 }
 
 function baseUrl(): string {
-  return (process.env.AUDIO_API_URL ?? "").trim().replace(/\/+$/, "");
+  return (process.env.AUDIO_API_URL ?? "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/api\/audio$/, "");
 }
 
 function adminToken(): string {

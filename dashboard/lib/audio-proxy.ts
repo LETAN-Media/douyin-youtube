@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 
-const BASE = (process.env.AUDIO_API_URL ?? "").trim().replace(/\/+$/, "");
+const BASE = (process.env.AUDIO_API_URL ?? "")
+  .trim()
+  .replace(/\/+$/, "")
+  .replace(/\/api\/audio$/, "");
 const TOKEN = (process.env.AUDIO_API_TOKEN ?? "").trim();
 
 export async function proxyAudio(
