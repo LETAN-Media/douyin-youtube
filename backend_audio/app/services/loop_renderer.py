@@ -1,0 +1,105 @@
+"""Loop renderer: background x looped to audio duration + logo overlay, ONE ffmpeg pass."""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+from pathlib import Path
+
+logger = logging.getLogger("backend-audio.render")
+
+
+class RenderError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def build_loop_video(
+    *,
+    background: Path,
+    audio: Path,
+    output: Path,
+    duration: float,
+    logo: Path | None = None,
+    logo_scale: float = 0.12,
+    logo_margin: int = 24,
+    logo_position: str = "top-right",
+    orientation: str = "landscape",
+    fps: int = 24,
+    threads: int = 2,
+    still_image: bool = False,
+    preset: str = "veryfast",
+) -> Path:
+    """Render final MP4 matching audio duration.
+
+    - Video looped with -stream_loop -1 + -shortest (no black tail, no overrun).
+    - Logo overlay in the same filter graph (single pass).
+    - H.264 + AAC + yuv420p.
+    """
+    if duration <= 0:
+        raise RenderError("BAD_DURATION", "Audio duration must be positive.")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    size = "1280x720" if orientation == "landscape" else "720x1280"
+    crop = "1280:720" if orientation == "landscape" else "720:1280"
+
+    if still_image:
+        inputs = ["-loop", "1", "-framerate", "2", "-i", str(background)]
+        vfilter = f"scale={size}:force_original_aspect_ratio=increase,crop={crop},fps={fps},format=yuv420p"
+    else:
+        inputs = ["-stream_loop", "-1", "-i", str(background)]
+        vfilter = (
+            f"scale={size}:force_original_aspect_ratio=increase,"
+            f"crop={crop},fps={fps},format=yuv420p"
+        )
+
+    filter_parts = [f"[0:v]{vfilter}[bg]"]
+    overlay: list[str] = []
+    if logo is not None and logo.exists():
+        overlay = ["-i", str(logo)]
+        lw = max(24, int(1280 * logo_scale)) if orientation == "landscape" else max(
+            24, int(720 * logo_scale))
+        pos = {
+            "top-right": f"W-w-{logo_margin}:{logo_margin}",
+            "top-left": f"{logo_margin}:{logo_margin}",
+            "bottom-right": f"W-w-{logo_margin}:H-h-{logo_margin}",
+            "bottom-left": f"{logo_margin}:H-h-{logo_margin}",
+        }.get(logo_position, f"W-w-{logo_margin}:{logo_margin}")
+        filter_parts = [
+            f"[0:v]{vfilter}[bg]",
+            f"[1:v]scale={lw}:-1[lg]",
+            f"[bg][lg]overlay={pos},format=yuv420p[v]",
+        ]
+        vmap = ["-map", "[v]"]
+    else:
+        filter_parts = [f"[0:v]{vfilter},format=yuv420p[v]"]
+        vmap = ["-map", "[v]"]
+
+    cmd = (
+        ["ffmpeg", "-v", "error", "-y", *inputs, "-i", str(audio), *overlay,
+         "-filter_complex", ";".join(filter_parts),
+         *vmap, "-map", "1:a",
+         "-c:v", "libx264", "-preset", preset, "-crf", "21",
+         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+         "-shortest", "-threads", str(threads), str(output)]
+    )
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    except subprocess.TimeoutExpired:
+        raise RenderError("RENDER_TIMEOUT", "ffmpeg render exceeded 2h.")
+    if proc.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+        raise RenderError("RENDER_FAILED", (proc.stderr or "")[-500:])
+    logger.info("rendered %s (%.1fs target)", output.name, duration)
+    return output
+
+
+def make_preview_clip(source: Path, dest: Path, seconds: int = 15) -> Path:
+    """Short preview slice for UI (not the publishable output)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(source),
+         "-t", str(seconds), "-c", "copy", str(dest)],
+        capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        raise RenderError("PREVIEW_FAILED", (proc.stderr or "")[-300:])
+    return dest

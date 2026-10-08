@@ -11,6 +11,7 @@ const nav = [
   { href: "/pipelines/new", label: "New Pipeline", icon: <IconPlus size={17} /> },
   { href: "/facebook", label: "Facebook", icon: <IconFacebook size={17} /> },
   { href: "/drama", label: "Drama", icon: <IconFilm size={17} /> },
+  { href: "/audio", label: "Audio", icon: <IconFilm size={17} /> },
 ];
 
 const adminNav = [
