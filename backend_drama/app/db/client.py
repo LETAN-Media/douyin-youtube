@@ -406,6 +406,32 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "ALTER TABLE drama_series_jobs ADD COLUMN template_id TEXT",
         ],
     ),
+    (
+        "drama_007",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS drama_episode_tasks (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                episode_id TEXT NOT NULL,
+                episode_number INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                render_progress REAL,
+                segment_path TEXT,
+                segment_bytes INTEGER,
+                duration REAL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error_code TEXT,
+                last_error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                UNIQUE(job_id, episode_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ep_tasks_job ON drama_episode_tasks(job_id, status)",
+        ],
+    ),
 ]
 
 

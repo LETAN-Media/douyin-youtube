@@ -3,10 +3,143 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card, CardHeader, btnSmall } from "@/components/ui";
 import type {
+  DramaEpisodeTaskDto,
   DramaProcessingSettingsDto,
   DramaSeriesJobDto,
   DramaTemplateDto,
 } from "@/lib/drama-api";
+
+function JobEpisodes({ jobId }: { jobId: string }) {
+  const [tasks, setTasks] = useState<DramaEpisodeTaskDto[] | null>(null);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [retrying, setRetrying] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const res = await fetch(
+        `/api/drama/series-jobs/${encodeURIComponent(jobId)}/episodes`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.items)) setTasks(data.items);
+      if (data.counts && typeof data.counts === "object") setCounts(data.counts);
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
+
+  async function retry(failedOnly: boolean, episodeNumber?: number) {
+    if (retrying) return;
+    setRetrying(true);
+    setMsg(null);
+    try {
+      const res = await fetch(
+        `/api/drama/series-jobs/${encodeURIComponent(jobId)}/retry`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            episodeNumber !== undefined
+              ? { episode_numbers: [episodeNumber] }
+              : { failed_only: failedOnly },
+          ),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          (typeof data?.message === "string" && data.message) ||
+            (typeof data?.error === "string" && data.error) ||
+            `HTTP ${res.status}`,
+        );
+      }
+      setMsg(`Đã reset ${data.reset ?? 0} tập — chạy lại job để tiếp tục.`);
+      await load();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "Retry thất bại.");
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  if (tasks === null) {
+    return <p className="mt-2 text-[11px] text-slate-400">Đang tải tiến độ tập…</p>;
+  }
+  const rendered = counts.rendered ?? tasks.filter((t) => t.status === "rendered").length;
+  const total = tasks.length;
+  const failed = tasks.filter((t) => t.status === "failed");
+  const current = tasks.find((t) => t.status === "downloading" || t.status === "rendering");
+  return (
+    <div className="mt-2 w-full space-y-1.5">
+      <p className="text-[11px] font-bold text-slate-600">
+        Xử lý video: {rendered} / {total}
+        {current ? ` · Đang làm: Tập ${current.episode_number}` : ""}
+        {total > 0 && rendered === total ? " · Chờ gộp final" : ""}
+      </p>
+      <ul className="max-h-44 space-y-1 overflow-y-auto pr-1">
+        {tasks.map((t) => (
+          <li
+            key={t.id}
+            className="flex items-center justify-between gap-2 rounded-lg bg-white px-2 py-1 ring-1 ring-inset ring-slate-100"
+          >
+            <span className="text-[11px] font-semibold text-slate-600">
+              Tập {t.episode_number}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span
+                className={`text-[11px] font-bold ${
+                  t.status === "rendered"
+                    ? "text-emerald-600"
+                    : t.status === "failed"
+                      ? "text-rose-600"
+                      : t.status === "pending"
+                        ? "text-slate-400"
+                        : "text-indigo-600"
+                }`}
+              >
+                {t.status === "rendered"
+                  ? "✓ Rendered"
+                  : t.status === "failed"
+                    ? `✗ ${t.last_error_code ?? "failed"}`
+                    : t.status === "pending"
+                      ? "Pending"
+                      : "Rendering…"}
+              </span>
+              {t.status === "failed" ? (
+                <button
+                  type="button"
+                  onClick={() => void retry(false, t.episode_number)}
+                  disabled={retrying}
+                  className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 hover:bg-slate-200 disabled:opacity-60"
+                >
+                  Retry
+                </button>
+              ) : null}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {failed.length > 0 ? (
+        <button
+          type="button"
+          onClick={() => void retry(true)}
+          disabled={retrying}
+          className="text-[11px] font-bold text-indigo-600 underline underline-offset-2 hover:text-indigo-800 disabled:opacity-60"
+        >
+          {retrying ? "Đang reset…" : `Retry tất cả failed (${failed.length})`}
+        </button>
+      ) : null}
+      {msg ? <p className="text-[11px] text-slate-500">{msg}</p> : null}
+    </div>
+  );
+}
 
 export type ProcessingMode = "direct_merge" | "translate_sub" | "dub_vi";
 
@@ -448,22 +581,25 @@ export function DramaProcessingSettings({
               {jobs.slice(0, 10).map((j) => (
                 <li
                   key={j.id}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2"
+                  className="rounded-xl bg-slate-50 px-3 py-2"
                 >
-                  <span className="font-mono text-[11px] text-slate-500">
-                    EP {j.episode_start ?? "?"}–{j.episode_end ?? "?"}
-                  </span>
-                  <span className="text-xs font-bold text-slate-700">
-                    {j.status}
-                    {j.stage ? ` · ${j.stage}` : ""}
-                    {typeof j.upload_progress === "number" ? ` · ${Math.round(j.upload_progress * 100)}%` : ""}
-                  </span>
-                  {j.youtube_video_id ? (
-                    <span className="font-mono text-[11px] text-emerald-600">{j.youtube_video_id}</span>
-                  ) : null}
-                  {j.last_error_code ? (
-                    <span className="text-[11px] font-bold text-rose-600">{j.last_error_code}</span>
-                  ) : null}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono text-[11px] text-slate-500">
+                      EP {j.episode_start ?? "?"}–{j.episode_end ?? "?"}
+                    </span>
+                    <span className="text-xs font-bold text-slate-700">
+                      {j.status}
+                      {j.stage ? ` · ${j.stage}` : ""}
+                      {typeof j.upload_progress === "number" ? ` · ${Math.round(j.upload_progress * 100)}%` : ""}
+                    </span>
+                    {j.youtube_video_id ? (
+                      <span className="font-mono text-[11px] text-emerald-600">{j.youtube_video_id}</span>
+                    ) : null}
+                    {j.last_error_code ? (
+                      <span className="text-[11px] font-bold text-rose-600">{j.last_error_code}</span>
+                    ) : null}
+                  </div>
+                  <JobEpisodes jobId={j.id} />
                 </li>
               ))}
             </ul>

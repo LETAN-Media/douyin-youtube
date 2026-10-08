@@ -104,8 +104,9 @@ def test_plan_chunks_counts():
 
 def test_stage_plan_skips():
     active, skipped = stage_plan("direct_merge")
-    assert active == ["download", "merge", "upload", "cleanup"]
+    assert active == ["download", "render", "merge", "upload", "cleanup"]
     assert "asr" in skipped and "translate" in skipped and "tts" in skipped
+    assert "render" in active
     active, skipped = stage_plan("translate_sub")
     assert "asr" in active and "translate" in active and "tts" in skipped
     active, _ = stage_plan("dub_vi")
@@ -172,7 +173,7 @@ def test_direct_merge_skips_asr_translation_tts(db, tmp_path):
         translate_text=_boom, synthesize_tts=_boom, upload_video=fake_upload,
     ))
     assert out["status"] == "completed", out
-    assert out["skipped"] == ["asr", "translate", "tts", "render", "subtitle"]
+    assert out["skipped"] == ["asr", "translate", "tts", "subtitle"]
     assert ("SHOULD_NOT_RUN",) not in calls
     assert sorted(c[1] for c in calls if c[0] == "download") == [1, 2]
     # After successful upload everything local is cleaned, including final.
@@ -189,13 +190,12 @@ def test_translate_sub_invokes_asr_and_translation_not_tts(db, tmp_path):
     async def fake_download(ep, target):
         target.write_bytes(src.read_bytes())
 
-    async def fake_asr(job, paths):
-        calls.append("asr")
+    async def fake_asr(job, ep, src):
+        calls.append(("asr", ep["episode_number"]))
         return {"srt": "x"}
 
-    async def fake_tr(job, asr_out):
-        calls.append("translate")
-        assert asr_out == {"srt": "x"}
+    async def fake_tr(job, ep, asr_out):
+        calls.append(("translate", ep["episode_number"]))
         return {"srt_vi": "y"}
 
     async def fake_upload(job, final_path):
@@ -208,8 +208,7 @@ def test_translate_sub_invokes_asr_and_translation_not_tts(db, tmp_path):
         run_asr=fake_asr, translate_text=fake_tr, upload_video=fake_upload,
     ))
     assert out["status"] == "completed", out
-    assert calls == ["asr", "translate", "upload"]
-    assert out["translation"] == {"srt_vi": "y"}
+    assert calls == [("asr", 1), ("translate", 1), "upload"]
 
 
 def test_dub_vi_invokes_all_stages(db, tmp_path):
@@ -225,13 +224,13 @@ def test_dub_vi_invokes_all_stages(db, tmp_path):
 
     job = proc.create_job(_pipeline_of(series), series["id"], "dub_vi", 0, 1, 1)
 
-    async def _asr(job, paths):
+    async def _asr(job, ep, src):
         calls.append("asr")
 
-    async def _tr(job, asr_out):
+    async def _tr(job, ep, asr_out):
         calls.append("translate")
 
-    async def _tts(job, tr_out):
+    async def _tts(job, ep, tr_out):
         calls.append("tts")
 
     out = run(run_series_job(
@@ -244,17 +243,22 @@ def test_dub_vi_invokes_all_stages(db, tmp_path):
 
 
 def test_resume_skips_downloaded(db, tmp_path):
+    from app.db.repositories import episode_tasks as tasks_repo
+
     _p, series = _seed_series(db, n=2, prefix="resume")
     src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
     job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 2)
-    # Simulate a previous partial run: ep1 file present + recorded.
+    # Simulate a previous partial run: ep1 rendered (segment present).
     from app.db.repositories import drama as _repo
 
     ep1 = _repo.list_episodes(series["id"])[0][0]
+    tasks_repo.ensure_tasks(job["id"], _repo.list_episodes(series["id"])[0])
     wdir = tmp_path / "work" / job["id"]
-    wdir.mkdir(parents=True, exist_ok=True)
-    (wdir / "ep_001.mp4").write_bytes(src.read_bytes())
-    proc.mark_episode_downloaded(job["id"], ep1["id"])
+    (wdir / "segments").mkdir(parents=True, exist_ok=True)
+    (wdir / "segments" / "segment_001.mp4").write_bytes(src.read_bytes())
+    tasks_repo.mark_status(job["id"], ep1["id"], "rendered",
+                           segment_path=str(wdir / "segments" / "segment_001.mp4"),
+                           segment_bytes=100, duration=1.0)
 
     downloaded: list = []
 
@@ -483,7 +487,7 @@ def test_orchestrator_template_stage_end_to_end(db, tmp_path):
         upload_video=fake_upload,
     ))
     assert out["status"] == "completed", out
-    assert out["stages"]["template"]["state"] == "done"
+    assert out["stages"]["render"]["state"] == "done"
     assert seen_final["path"].endswith("final.mp4")
 
 
@@ -624,3 +628,190 @@ def test_svg_temp_files_cleaned(db, tmp_path):
     leftovers = [p.name for p in work.iterdir()
                  if p.suffix == ".svg" or p.name in ("template_frame.png", "template_source.svg")]
     assert leftovers == [], leftovers
+
+
+# ---------- per-episode architecture ----------
+
+
+def test_episode_tasks_created_and_skip_rendered(db, tmp_path):
+    from app.db.repositories import episode_tasks as tasks_repo
+
+    _p, series = _seed_series(db, n=2, prefix="tasks")
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 2)
+    assert tasks_repo.list_tasks(job["id"]) == []
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+
+    async def fake_download(ep, target):
+        target.write_bytes(src.read_bytes())
+
+    async def fake_upload(job, final_path):
+        return {"youtube_video_id": "yt_x"}
+
+    out = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=fake_download,
+        upload_video=fake_upload,
+    ))
+    assert out["status"] == "completed", out
+    tasks = tasks_repo.list_tasks(job["id"])
+    assert [t["episode_number"] for t in tasks] == [1, 2]
+    assert all(t["status"] == "rendered" for t in tasks)
+    assert tasks_repo.count_by_status(job["id"]) == {"rendered": 2}
+    assert [e["n"] for e in out["episodes"]] == [1, 2]
+
+
+def test_failed_episode_isolated_and_retry_single(db, tmp_path):
+    from app.db.repositories import episode_tasks as tasks_repo
+
+    _p, series = _seed_series(db, n=3, prefix="failiso")
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 3)
+
+    async def flaky_download(ep, target):
+        if ep["episode_number"] == 2:
+            raise RuntimeError("network blip")
+        target.write_bytes(src.read_bytes())
+
+    async def fake_upload(job, final_path):
+        return {"youtube_video_id": "yt_x"}
+
+    out = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=flaky_download,
+        upload_video=fake_upload,
+    ))
+    assert out["status"] == "failed", out
+    assert out["error"]["code"] == "DOWNLOAD_FAILED"
+    counts = tasks_repo.count_by_status(job["id"])
+    assert counts.get("failed", 0) == 1
+    ep2 = [t for t in tasks_repo.list_tasks(job["id"]) if t["episode_number"] == 2][0]
+    assert ep2["status"] == "failed"
+    reset = tasks_repo.reset_tasks(job["id"], [ep2["episode_id"]])
+    assert reset == 1
+
+    async def good_download(ep, target):
+        target.write_bytes(src.read_bytes())
+
+    out2 = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=good_download,
+        upload_video=fake_upload,
+    ))
+    assert out2["status"] == "completed", out2
+    assert tasks_repo.count_by_status(job["id"]).get("rendered", 0) == 3
+
+
+def test_retry_all_failed(db, tmp_path):
+    from app.db.repositories import episode_tasks as tasks_repo
+
+    _p, series = _seed_series(db, n=2, prefix="retryall")
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 2)
+
+    async def always_fail(ep, target):
+        raise RuntimeError("down")
+
+    async def fake_upload(job, final_path):
+        return {}
+
+    out = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=always_fail,
+        upload_video=fake_upload,
+    ))
+    assert out["status"] == "failed"
+    assert tasks_repo.reset_tasks(job["id"], only_failed=True) == 1
+    counts = tasks_repo.count_by_status(job["id"])
+    assert counts.get("failed", 0) == 0
+    assert counts.get("pending", 0) == 2
+
+
+def test_segments_share_profile_concat_copy(db, tmp_path):
+    from app.services.merge import compatible_for_copy
+    from app.services.render.episode import render_episode_segment
+
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    segs = []
+    for i in (1, 2):
+        raw = work / f"raw_{i}.mp4"
+        raw.write_bytes(src.read_bytes())
+        out = work / f"seg_{i:03d}.mp4"
+        render_episode_segment(raw, out, template_frame=None,
+                               canvas=(1280, 720, 0, 0, 1280, 720))
+        segs.append(out)
+    assert compatible_for_copy(segs) is True
+    from app.services.media.drama_media import probe_media
+
+    for s in segs:
+        pr = probe_media(s)
+        assert (pr["width"], pr["height"]) == (1280, 720)
+        assert pr["codec"] == "h264"
+
+
+def test_final_duration_matches_segments(db, tmp_path):
+    _p, series = _seed_series(db, n=2, prefix="dursum")
+    src = _fixture_mp4(tmp_path / "fix" / "ep.mp4")
+
+    async def fake_download(ep, target):
+        target.write_bytes(src.read_bytes())
+
+    async def fake_upload(job, final_path):
+        from app.services.media.drama_media import probe_media
+
+        pr = probe_media(final_path)
+        assert abs(pr["duration"] - 2.0) < 1.5
+        return {"youtube_video_id": "yt_d"}
+
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 2)
+    out = run(run_series_job(
+        job["id"], workdir=tmp_path / "work", download_episode=fake_download,
+        upload_video=fake_upload,
+    ))
+    assert out["status"] == "completed", out
+
+
+def test_job_episodes_and_retry_endpoints(db):
+    from fastapi.testclient import TestClient
+
+    from app.db.repositories import episode_tasks as tasks_repo
+    from app.main import create_app
+
+    _p, series = _seed_series(db, n=2, prefix="api")
+    job = proc.create_job(_pipeline_of(series), series["id"], "direct_merge", 0, 1, 2)
+    tasks_repo.ensure_tasks(
+        job["id"],
+        [{"id": "dep_a", "episode_number": 1}, {"id": "dep_b", "episode_number": 2}],
+    )
+    tasks_repo.mark_status(job["id"], "dep_a", "rendered")
+    tasks_repo.mark_status(job["id"], "dep_b", "failed",
+                           last_error_code="X", last_error_message="y")
+    client = TestClient(create_app())
+    r = client.get(
+        f"/api/drama/series-jobs/{job['id']}/episodes",
+        headers={"X-Admin-Token": "test_admin_token"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["counts"].get("rendered") == 1
+    rr = client.post(
+        f"/api/drama/series-jobs/{job['id']}/retry",
+        headers={"X-Admin-Token": "test_admin_token"},
+        json={"failed_only": True},
+    )
+    assert rr.status_code == 200, rr.text
+    assert rr.json()["reset"] == 1
+    rr2 = client.post(
+        f"/api/drama/series-jobs/{job['id']}/retry",
+        headers={"X-Admin-Token": "test_admin_token"},
+        json={"episode_numbers": [1]},
+    )
+    assert rr2.json()["reset"] == 1
+    bad = client.post(
+        f"/api/drama/series-jobs/{job['id']}/retry",
+        headers={"X-Admin-Token": "test_admin_token"},
+        json={},
+    )
+    assert bad.status_code == 400
+    missing = client.post(
+        "/api/drama/series-jobs/djob_nope/retry",
+        headers={"X-Admin-Token": "test_admin_token"},
+        json={"failed_only": True},
+    )
+    assert missing.status_code == 404

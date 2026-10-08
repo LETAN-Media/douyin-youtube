@@ -128,3 +128,45 @@ async def list_pipeline_jobs(
     if repo.get_pipeline(pipeline_id) is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found.")
     return {"items": proc.list_pipeline_jobs(pipeline_id, limit=limit)}
+
+
+class RetryBody(BaseModel):
+    episode_numbers: list[int] | None = None
+    failed_only: bool = False
+
+
+@router.get("/series-jobs/{job_id}/episodes")
+async def list_job_episodes(
+    job_id: str, _: None = Depends(require_admin)
+) -> dict:
+    from ..db.repositories import episode_tasks as tasks_repo
+
+    job = proc.get_job(job_id)
+    if job is None:
+        raise _err(404, "JOB_NOT_FOUND", "Job not found.")
+    tasks = tasks_repo.list_tasks(job_id)
+    return {"items": tasks, "counts": tasks_repo.count_by_status(job_id)}
+
+
+@router.post("/series-jobs/{job_id}/retry")
+async def retry_job_episodes(
+    job_id: str, body: RetryBody, _: None = Depends(require_admin)
+) -> dict:
+    from ..db.repositories import episode_tasks as tasks_repo
+
+    job = proc.get_job(job_id)
+    if job is None:
+        raise _err(404, "JOB_NOT_FOUND", "Job not found.")
+    if body.episode_numbers:
+        tasks = tasks_repo.list_tasks(job_id)
+        wanted = set(body.episode_numbers)
+        episode_ids = [t["episode_id"] for t in tasks if t["episode_number"] in wanted]
+        if not episode_ids:
+            raise _err(404, "EPISODES_NOT_FOUND", "No matching episodes in this job.")
+        reset = tasks_repo.reset_tasks(job_id, episode_ids)
+    elif body.failed_only:
+        reset = tasks_repo.reset_tasks(job_id, only_failed=True)
+    else:
+        raise _err(400, "NOTHING_TO_RETRY", "Provide episode_numbers or failed_only=true.")
+    proc.update_job(job_id, status="queued", stage="queued")
+    return {"ok": True, "job_id": job_id, "reset": reset}

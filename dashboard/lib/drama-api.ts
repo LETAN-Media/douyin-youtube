@@ -435,3 +435,39 @@ export async function listDramaPipelineJobs(
     `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/jobs`,
   );
 }
+
+export interface DramaEpisodeTaskDto {
+  id: string;
+  job_id: string;
+  episode_id: string;
+  episode_number: number;
+  status: string;
+  render_progress: number | null;
+  segment_bytes: number | null;
+  duration: number | null;
+  attempt_count: number;
+  last_error_code: string | null;
+  last_error_message: string | null;
+}
+
+export async function listDramaJobEpisodes(
+  jobId: string,
+): Promise<{ items: DramaEpisodeTaskDto[]; counts: Record<string, number> }> {
+  return dramaFetch<{ items: DramaEpisodeTaskDto[]; counts: Record<string, number> }>(
+    `/api/drama/series-jobs/${encodeURIComponent(jobId)}/episodes`,
+  );
+}
+
+export async function retryDramaJob(
+  jobId: string,
+  payload?: { episode_numbers?: number[]; failed_only?: boolean },
+): Promise<{ ok: boolean; job_id: string; reset: number }> {
+  return dramaFetch<{ ok: boolean; job_id: string; reset: number }>(
+    `/api/drama/series-jobs/${encodeURIComponent(jobId)}/retry`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload ?? { failed_only: true }),
+    },
+  );
+}

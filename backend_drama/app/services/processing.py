@@ -19,8 +19,8 @@ from .merge import MergeError, concat_paths
 logger = logging.getLogger("backend-drama-processing")
 
 STAGES_BY_MODE: dict[str, list[str]] = {
-    "direct_merge": ["download", "merge", "upload", "cleanup"],
-    "translate_sub": ["download", "asr", "translate", "merge", "subtitle", "upload", "cleanup"],
+    "direct_merge": ["download", "render", "merge", "upload", "cleanup"],
+    "translate_sub": ["download", "asr", "translate", "render", "merge", "subtitle", "upload", "cleanup"],
     "dub_vi": ["download", "asr", "translate", "tts", "render", "merge", "subtitle", "upload", "cleanup"],
 }
 
@@ -57,7 +57,20 @@ async def run_series_job(
     synthesize_tts: Callable[..., Any] | None = None,
     upload_video: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Run one series chunk job to completion. Returns a stage report."""
+    """Run one series chunk job to completion. Returns a stage report.
+
+    Per-episode architecture: download -> [asr -> translate -> tts] ->
+    render segment -> validate -> delete source, sequentially per episode
+    in numeric order. Then concat segments (-c copy) -> upload -> cleanup.
+    Resume skips rendered episodes; retry resets failed ones.
+    """
+    from ..db.repositories import episode_tasks as tasks_repo
+    from ..db.repositories import templates as templates_repo
+    from .merge import MergeError, concat_paths
+    from .render.disk import DiskError, check_temp_space, estimate_job_bytes
+    from .render.episode import SegmentError, render_episode_segment, standard_canvas
+    from .render.store import SegmentStore
+
     job = proc_repo.get_job(job_id)
     if job is None:
         raise ValueError(f"Job not found: {job_id}.")
@@ -65,7 +78,7 @@ async def run_series_job(
     active, skipped = stage_plan(mode)
     report: dict[str, Any] = {
         "job_id": job_id, "mode": mode, "active": active, "skipped": skipped,
-        "stages": {}, "output": None,
+        "stages": {}, "output": None, "episodes": [],
     }
     # Upload idempotency: a restarted job that already published must never
     # upload a duplicate — return the recorded completed state.
@@ -91,135 +104,200 @@ async def run_series_job(
 
     try:
         proc_repo.update_job(job_id, status="downloading")
-        # ---- download (sequential, resume-aware) ----
-        _step("download", "running")
         episodes = _episodes_for_job(job)
         if not episodes:
             return _fail("NO_EPISODES", "No episodes in range.", "download")
         job_dir = workdir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        # Disk pre-flight before any byte lands on disk.
-        from .render.disk import DiskError, check_temp_space, estimate_job_bytes
+        store = SegmentStore(job_dir)
+        # Concurrency: sequential per episode (DRAMA_RENDER_CONCURRENCY=1).
+        # Higher values are clamped until parallel rendering is enabled —
+        # shared SQLite + single ffmpeg lane stay safe on small hosts.
+        from ..config import settings as _dj_settings
 
+        try:
+            render_concurrency = max(1, int(_dj_settings.DRAMA_RENDER_CONCURRENCY))
+        except Exception:
+            render_concurrency = 1
+        if render_concurrency != 1:
+            logger.warning(
+                "drama render concurrency=%d requested; running sequential (phase 1)",
+                render_concurrency,
+            )
         try:
             check_temp_space(job_dir, estimate_job_bytes(episodes))
         except DiskError as exc:
             return _fail(exc.code, str(exc), "download")
-        ordered_paths: list[Path] = []
-        downloader = download_episode or _default_not_implemented
-        already = set(job.get("downloaded_episode_ids") or [])
-        for ep in episodes:
-            target = job_dir / f"ep_{ep['episode_number']:03d}.mp4"
-            if ep["id"] in already and target.exists() and target.stat().st_size > 0:
-                ordered_paths.append(target)
-                continue
-            try:
-                await downloader(ep, target)
-            except StageNotImplemented as exc:
-                return _fail(exc.code, str(exc), "download")
-            except Exception as exc:  # noqa: BLE001 - recorded, typed below
-                return _fail("DOWNLOAD_FAILED", f"Episode {ep['episode_number']}: {exc}", "download")
-            if not target.exists() or target.stat().st_size <= 0:
-                return _fail("DOWNLOAD_FAILED", f"Episode {ep['episode_number']} produced no file.", "download")
-            ordered_paths.append(target)
-            proc_repo.mark_episode_downloaded(job_id, ep["id"])
-        _step("download", "done", files=len(ordered_paths))
 
-        # ---- mode-specific middle stages ----
+        settings = proc_repo.get_settings(job.get("pipeline_id") or "")
+        template = None
+        if settings.get("template_enabled") and settings.get("template_id"):
+            template = templates_repo.get_template(settings["template_id"])
+            if template is None:
+                return _fail("TEMPLATE_MISSING", "Pipeline template not found.", "render")
+            proc_repo.update_job(job_id, template_id=template["id"])
+        canvas = standard_canvas(template)
+        # Rasterize template frame ONCE per job (not per episode).
+        frame_path = None
+        if template is not None:
+            from .render.template_renderer import (
+                TemplateError,
+                fetch_template_asset,
+                rasterize_svg,
+                validate_svg,
+            )
+
+            try:
+                fetched = fetch_template_asset(
+                    str(template.get("asset_url") or ""), job_dir / "template_source")
+                if fetched.suffix.lower() == ".svg":
+                    validate_svg(fetched.read_bytes())
+                    frame_path = job_dir / "template_frame.png"
+                    rasterize_svg(
+                        fetched, frame_path,
+                        width=int(template.get("canvas_width") or canvas[0]),
+                        height=int(template.get("canvas_height") or canvas[1]),
+                    )
+                else:
+                    frame_path = fetched
+            except TemplateError as exc:
+                return _fail(exc.code, str(exc), "render")
+
+        tasks_repo.ensure_tasks(job_id, episodes)
+        downloader = download_episode or _default_not_implemented
+        _step("download", "running")
+        _step("render", "running")
+        rendered_numbers: list[int] = []
+        for ep in episodes:
+            ep_id = ep["id"]
+            ep_num = ep["episode_number"]
+            task = tasks_repo.get_task(job_id, ep_id) or {"status": "pending"}
+            seg = store.segment_path(ep_num)
+            if task.get("status") == "rendered" and store.has(ep_num):
+                rendered_numbers.append(ep_num)
+                report["episodes"].append({"n": ep_num, "state": "rendered"})
+                continue
+            # ---- download this episode ----
+            tasks_repo.mark_status(job_id, ep_id, "downloading")
+            src = job_dir / f"ep_{ep_num:03d}.mp4"
+            if not (src.exists() and src.stat().st_size > 0):
+                try:
+                    await downloader(ep, src)
+                except StageNotImplemented as exc:
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code=exc.code, last_error_message=str(exc))
+                    return _fail(exc.code, str(exc), "download")
+                except Exception as exc:  # noqa: BLE001 - recorded, typed below
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code="DOWNLOAD_FAILED",
+                                           last_error_message=str(exc)[:2000])
+                    return _fail("DOWNLOAD_FAILED", f"Episode {ep_num}: {exc}", "download")
+                if not src.exists() or src.stat().st_size <= 0:
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code="DOWNLOAD_FAILED",
+                                           last_error_message="no file produced")
+                    return _fail("DOWNLOAD_FAILED", f"Episode {ep_num} produced no file.", "download")
+            proc_repo.mark_episode_downloaded(job_id, ep_id)
+            # ---- per-episode middle stages ----
+            if "asr" in active:
+                asr_runner = run_asr or _default_not_implemented
+                try:
+                    await asr_runner(job, ep, src)
+                except StageNotImplemented as exc:
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code=exc.code, last_error_message=str(exc))
+                    return _fail(exc.code, str(exc), "asr")
+                except Exception as exc:  # noqa: BLE001
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code="ASR_FAILED",
+                                           last_error_message=str(exc)[:2000])
+                    return _fail("ASR_FAILED", str(exc)[:2000], "asr")
+            if "translate" in active:
+                translator = translate_text or _default_not_implemented
+                try:
+                    await translator(job, ep, None)
+                except StageNotImplemented as exc:
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code=exc.code, last_error_message=str(exc))
+                    return _fail(exc.code, str(exc), "translate")
+                except Exception as exc:  # noqa: BLE001
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code="TRANSLATE_FAILED",
+                                           last_error_message=str(exc)[:2000])
+                    return _fail("TRANSLATE_FAILED", str(exc)[:2000], "translate")
+            if "tts" in active:
+                tts = synthesize_tts or _default_not_implemented
+                try:
+                    await tts(job, ep, None)
+                except StageNotImplemented as exc:
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code=exc.code, last_error_message=str(exc))
+                    return _fail(exc.code, str(exc), "tts")
+                except Exception as exc:  # noqa: BLE001
+                    tasks_repo.mark_status(job_id, ep_id, "failed",
+                                           last_error_code="TTS_FAILED",
+                                           last_error_message=str(exc)[:2000])
+                    return _fail("TTS_FAILED", str(exc)[:2000], "tts")
+            # ---- render this episode ----
+            tasks_repo.mark_status(job_id, ep_id, "rendering")
+            try:
+                render_episode_segment(src, seg, template_frame=frame_path, canvas=canvas)
+                from .media.drama_media import probe_media
+
+                probe = probe_media(seg)
+                if probe.get("duration", 0) <= 0:
+                    raise SegmentError("SEGMENT_RENDER_FAILED", "Segment has no duration.")
+            except SegmentError as exc:
+                tasks_repo.mark_status(job_id, ep_id, "failed",
+                                       last_error_code=exc.code,
+                                       last_error_message=str(exc)[:2000])
+                return _fail(exc.code, str(exc), "render")
+            tasks_repo.mark_status(
+                job_id, ep_id, "rendered", segment_path=str(seg),
+                segment_bytes=seg.stat().st_size,
+                duration=probe.get("duration"),
+            )
+            try:
+                src.unlink(missing_ok=True)
+            except Exception:
+                pass
+            rendered_numbers.append(ep_num)
+            report["episodes"].append({"n": ep_num, "state": "rendered"})
+        _step("download", "done", files=len(rendered_numbers))
+        _step("render", "done", segments=len(rendered_numbers))
         if "asr" in active:
-            asr_runner = run_asr or _default_not_implemented
-            _step("asr", "running")
-            try:
-                asr_out = await asr_runner(job, ordered_paths)
-            except StageNotImplemented as exc:
-                return _fail(exc.code, str(exc), "asr")
-            except Exception as exc:  # noqa: BLE001
-                return _fail("ASR_FAILED", str(exc)[:2000], "asr")
             _step("asr", "done")
-            report["asr"] = asr_out
         if "translate" in active:
-            translator = translate_text or _default_not_implemented
-            _step("translate", "running")
-            try:
-                tr_out = await translator(job, report.get("asr"))
-            except StageNotImplemented as exc:
-                return _fail(exc.code, str(exc), "translate")
-            except Exception as exc:  # noqa: BLE001
-                return _fail("TRANSLATE_FAILED", str(exc)[:2000], "translate")
             _step("translate", "done")
-            report["translation"] = tr_out
         if "tts" in active:
-            tts = synthesize_tts or _default_not_implemented
-            _step("tts", "running")
-            try:
-                tts_out = await tts(job, report.get("translation"))
-            except StageNotImplemented as exc:
-                return _fail(exc.code, str(exc), "tts")
-            except Exception as exc:  # noqa: BLE001
-                return _fail("TTS_FAILED", str(exc)[:2000], "tts")
             _step("tts", "done")
-            report["tts"] = tts_out
-        if "render" in active:
-            _step("render", "done", note="render covered by merge in this phase")
         if "subtitle" in active:
             _step("subtitle", "done", note="subtitle burn uses translation output")
 
-        # ---- merge ----
+        # ---- final concat (stream copy; segments share one profile) ----
         _step("merge", "running")
-        merged_path = job_dir / "merged.mp4"
-        final_path = merged_path
+        ordered = store.ordered_paths(sorted(rendered_numbers))
+        final_path = job_dir / "final.mp4"
         try:
-            concat_paths(ordered_paths, merged_path)
-            from .media.drama_media import probe_media
+            concat_paths(ordered, final_path)
+            from .media.drama_media import probe_media as _probe
 
-            probe = probe_media(final_path)
+            probe = _probe(final_path)
             if probe.get("duration", 0) <= 0:
-                raise MergeError("MERGE_FAILED", "Merged output has no duration.")
+                raise MergeError("MERGE_FAILED", "Final output has no duration.")
+            total_seg = sum(
+                float((tasks_repo.get_task(job_id, ep["id"]) or {}).get("duration") or 0)
+                for ep in episodes
+            )
+            if total_seg > 0 and abs(probe["duration"] - total_seg) > max(5.0, total_seg * 0.05):
+                raise MergeError("MERGE_FAILED", "Final duration mismatches segments.")
         except MergeError as exc:
             return _fail(exc.code, str(exc), "merge")
         _step("merge", "done", output=str(final_path))
         report["output"] = str(final_path)
         proc_repo.update_job(job_id, status="merging", output_path=str(final_path))
 
-        # ---- template (once, on the merged video — never per episode) ----
-        settings = proc_repo.get_settings(job.get("pipeline_id") or "")
-        template = None
-        if settings.get("template_enabled") and settings.get("template_id"):
-            from ..db.repositories import templates as templates_repo
-
-            template = templates_repo.get_template(settings["template_id"])
-            if template is None:
-                return _fail(
-                    "TEMPLATE_MISSING",
-                    "Pipeline template not found.", "template",
-                )
-            proc_repo.update_job(job_id, template_id=template["id"])
-        if template is not None:
-            from .render.template_renderer import TemplateError, render_template
-
-            _step("template", "running")
-            templated_path = job_dir / "final.mp4"
-            try:
-                render_template(final_path, template, templated_path, workdir=job_dir)
-                from .media.drama_media import probe_media as _probe
-
-                probe = _probe(templated_path)
-                if probe.get("duration", 0) <= 0:
-                    raise TemplateError("TEMPLATE_RENDER_FAILED", "Templated output has no duration.")
-            except TemplateError as exc:
-                return _fail(exc.code, str(exc), "template")
-            try:
-                final_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            final_path = templated_path
-            _step("template", "done", output=str(final_path))
-            report["output"] = str(final_path)
-            proc_repo.update_job(job_id, output_path=str(final_path))
-        else:
-            _step("template", "skipped")
-
-        # ---- upload ----
+        # ---- upload (idempotent) ----
         uploader = upload_video or _default_not_implemented
         _step("upload", "running")
         try:
@@ -236,17 +314,13 @@ async def run_series_job(
 
         # ---- cleanup (only after successful upload) ----
         _step("cleanup", "running")
-        for path in ordered_paths:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
-        for extra in ("merged.mp4", "concat.txt", "template_frame.png"):
+        store.cleanup()
+        for extra in ("merged.mp4", "concat.txt", "template_frame.png",
+                      "template_source.svg", "template_source.png", "final.mp4"):
             try:
                 (job_dir / extra).unlink(missing_ok=True)
             except Exception:
                 pass
-        # final.mp4 itself is removed too — Turso keeps job state + video id.
         try:
             final_path.unlink(missing_ok=True)
         except Exception:

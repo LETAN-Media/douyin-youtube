@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     DRAMA_API_KEY: str | None = None
     DRAMA_API_BASE_URL: str = "https://short-drama-pro.p.rapidapi.com"
     DRAMA_API_TIMEOUT_SECONDS: float = 30.0
+    # Episode render concurrency. Default 1 (sequential) for small hosts;
+    # the architecture allows raising later.
+    DRAMA_RENDER_CONCURRENCY: int = 1
     # Provider failover pool: 1 primary + up to 4 fallbacks. Each slot needs
     # HOST + KEY (BASE_URL defaults to https://{HOST}). Optional _PROVIDERS
     # limits the slot to content providers (comma-separated, empty = all).
