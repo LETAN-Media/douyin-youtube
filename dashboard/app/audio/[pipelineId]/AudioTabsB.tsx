@@ -448,25 +448,40 @@ function ManualTab({ pipeline }: { pipeline: AudioPipelineDto }) {
     }
   }
 
+  const isManual = pipeline.pipeline_type === "manual";
+
   return (
     <Card>
-      <div className="space-y-2">
-        <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
-          Đăng thủ công (URL bất kỳ, vẫn chống trùng)
-        </p>
-        <input
-          value={url} onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://www.facebook.com/…/videos/…"
-          className="block min-h-[44px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-        />
-        <input
-          value={title} onChange={(e) => setTitle(e.target.value)}
-          placeholder="Tiêu đề ghi đè (tùy chọn)"
-          className="block min-h-[44px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-        />
-        <button type="button" onClick={() => void submit()} disabled={busy}
-          className="inline-flex min-h-[44px] items-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">
-          {busy ? "Đang tạo…" : "Tạo job thủ công"}
+      <div className="space-y-3">
+        <div>
+          <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+            {isManual ? "Đăng Video" : "Đăng thủ công (URL bất kỳ, vẫn chống trùng)"}
+          </p>
+          {isManual ? (
+            <p className="mt-1 text-xs text-slate-500">
+              Nhập link video Facebook. Video sẽ được xử lý với Kho Media, AI Metadata và đăng lên kênh YouTube đã kết nối của pipeline này.
+            </p>
+          ) : null}
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-slate-700">URL video Facebook</label>
+          <input
+            value={url} onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://www.facebook.com/…/videos/…"
+            className="mt-1 block min-h-[44px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-slate-700">Tiêu đề ghi đè (tùy chọn)</label>
+          <input
+            value={title} onChange={(e) => setTitle(e.target.value)}
+            placeholder="Để trống sẽ tự động dùng tiêu đề AI hoặc caption"
+            className="mt-1 block min-h-[44px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+          />
+        </div>
+        <button type="button" onClick={() => void submit()} disabled={busy || !url.trim()}
+          className="inline-flex min-h-[44px] items-center rounded-xl bg-slate-900 px-5 py-2 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Đang tạo job…" : (isManual ? "Tạo job đăng video" : "Tạo job thủ công")}
         </button>
         {msg ? <p className="text-xs font-semibold text-slate-600">{msg}</p> : null}
       </div>

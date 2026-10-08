@@ -2,8 +2,14 @@ import { Shell } from "@/components/Shell";
 import { AudioApiError, getAudioPipeline, type AudioPipelineDto } from "@/lib/audio-api";
 import { AudioPipelineClient } from "./AudioPipelineClient";
 
-const TABS = ["overview", "sources", "inventory", "media", "processing",
-  "ai", "youtube", "scheduler", "manual", "history"] as const;
+const AUTO_TABS = [
+  "overview", "sources", "inventory", "media", "processing",
+  "ai", "youtube", "scheduler", "manual", "history",
+] as const;
+
+const MANUAL_TABS = [
+  "manual", "media", "processing", "ai", "youtube", "history",
+] as const;
 
 export default async function AudioPipelinePage({
   params, searchParams,
@@ -31,9 +37,17 @@ export default async function AudioPipelinePage({
     );
   }
 
-  const defaultTab = pipeline.pipeline_type === "manual" ? "manual" : "overview";
-  const initialTab = TABS.includes(tab as (typeof TABS)[number])
-    ? (tab as (typeof TABS)[number]) : defaultTab;
+  const isManual = pipeline.pipeline_type === "manual";
+  let initialTab: string;
+  if (isManual) {
+    initialTab = MANUAL_TABS.includes(tab as (typeof MANUAL_TABS)[number])
+      ? (tab as string)
+      : "manual";
+  } else {
+    initialTab = AUTO_TABS.includes(tab as (typeof AUTO_TABS)[number])
+      ? (tab as string)
+      : "overview";
+  }
 
   return (
     <Shell>

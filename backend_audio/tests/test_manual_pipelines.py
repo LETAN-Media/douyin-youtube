@@ -130,3 +130,34 @@ def test_delete_manual_pipeline_preserves_auto(client):
     res_get = client.get(f"/api/audio/pipelines/{pid_auto}")
     assert res_get.status_code == 200
     assert res_get.json()["name"] == "Auto Preserved"
+
+
+def test_manual_pipeline_sources_guard_and_job_creation(client):
+    res_man = client.post("/api/audio/pipelines", json={
+        "name": "Manual Jobs Only",
+        "pipeline_type": "manual",
+    })
+    pid_man = res_man.json()["id"]
+
+    # Attempting to add sources to manual pipeline returns 400
+    res_add_src = client.post(
+        f"/api/audio/pipelines/{pid_man}/sources",
+        json={"urls": "https://www.facebook.com/testpage"},
+    )
+    assert res_add_src.status_code == 400
+    assert res_add_src.json()["error"] == "MANUAL_PIPELINE"
+
+    # Creating a manual job works directly without sources
+    res_job = client.post(
+        f"/api/audio/pipelines/{pid_man}/manual",
+        json={
+            "facebook_url": "https://www.facebook.com/reel/1234567890",
+            "title": "Manual Test Title",
+        },
+    )
+    assert res_job.status_code == 201
+    job_data = res_job.json()
+    assert job_data["mode"] == "manual"
+    assert job_data["pipeline_id"] == pid_man
+    assert job_data["ai_title"] == "Manual Test Title"
+

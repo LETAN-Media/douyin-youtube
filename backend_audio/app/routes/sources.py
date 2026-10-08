@@ -34,8 +34,11 @@ async def list_sources(pipeline_id: str, _: None = Depends(require_admin)):
 @router.post("/pipelines/{pipeline_id}/sources", status_code=201)
 async def add_sources(pipeline_id: str, body: SourcesAdd,
                       _: None = Depends(require_admin)):
-    if pipe_repo.get_pipeline(pipeline_id) is None:
+    pipe = pipe_repo.get_pipeline(pipeline_id)
+    if pipe is None:
         return _err(404, "PIPELINE_NOT_FOUND", "Pipeline không tồn tại.")
+    if pipe.get("pipeline_type") == "manual":
+        return _err(400, "MANUAL_PIPELINE", "Pipeline thủ công không sử dụng nguồn Facebook.")
     lines = [line.strip() for line in (body.urls or "").splitlines()
              if line.strip()]
     if not lines:
@@ -63,6 +66,12 @@ async def scan_now(source_id: str, full: bool = False,
     """Manual scan only. mode=new (default, new videos only) or mode=full."""
     if mode is not None and mode not in ("new", "full"):
         return _err(400, "BAD_MODE", "mode must be 'new' or 'full'.")
+    source = repo.get_source(source_id)
+    if source is None:
+        return _err(404, "SOURCE_NOT_FOUND", "Source không tồn tại.")
+    pipe = pipe_repo.get_pipeline(source["pipeline_id"])
+    if pipe and pipe.get("pipeline_type") == "manual":
+        return _err(400, "MANUAL_PIPELINE", "Pipeline thủ công không hỗ trợ scan nguồn.")
     try:
         state = await scanner.scan_source(
             source_id, full=(mode == "full" or full))
