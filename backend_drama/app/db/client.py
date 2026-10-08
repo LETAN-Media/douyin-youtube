@@ -474,6 +474,58 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_yt_dest_pipeline ON drama_youtube_destinations(pipeline_id, connected)",
         ],
     ),
+    (
+        "drama_009",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS drama_ai_settings (
+                pipeline_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                language TEXT NOT NULL DEFAULT 'vi',
+                generate_title INTEGER NOT NULL DEFAULT 1,
+                generate_description INTEGER NOT NULL DEFAULT 1,
+                generate_hashtags INTEGER NOT NULL DEFAULT 1,
+                system_prompt TEXT,
+                title_template TEXT,
+                description_template TEXT,
+                locked_hashtags_json TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS drama_ai_metadata_cache (
+                id TEXT PRIMARY KEY,
+                pipeline_id TEXT NOT NULL,
+                series_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT 'vi',
+                config_hash TEXT NOT NULL DEFAULT '',
+                source_hash TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                hashtags_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'generated',
+                generated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ai_cache_job ON drama_ai_metadata_cache(job_id, language)",
+            "CREATE INDEX IF NOT EXISTS idx_ai_cache_series ON drama_ai_metadata_cache(pipeline_id, series_id, language)",
+            "ALTER TABLE drama_series_jobs ADD COLUMN ai_title TEXT",
+            "ALTER TABLE drama_series_jobs ADD COLUMN ai_description TEXT",
+            "ALTER TABLE drama_series_jobs ADD COLUMN ai_hashtags_json TEXT",
+            "ALTER TABLE drama_series_jobs ADD COLUMN ai_metadata_status TEXT",
+        ],
+    ),
+    (
+        "drama_010",
+        [
+            "ALTER TABLE drama_ai_settings ADD COLUMN model_override TEXT",
+            "ALTER TABLE drama_ai_settings ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE drama_ai_settings ADD COLUMN created_at TEXT",
+            "UPDATE drama_ai_settings SET created_at = COALESCE(created_at, updated_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+        ],
+    ),
 ]
 
 

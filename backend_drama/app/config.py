@@ -134,5 +134,25 @@ class Settings(BaseSettings):
             return True  # local SQLite fallback
         return url.startswith("file:")
 
+    # ToolNet OpenAI-compatible AI (shared with backend_facebook style).
+    # Read-only from env — never overwritten, never logged, never committed.
+    TOOLNET_BASE_URL: str | None = None
+    TOOLNET_API_KEY: str | None = None
+    TOOLNET_MODEL: str | None = None
+    TOOLNET_AI_ENABLED: bool = True
+    TOOLNET_TIMEOUT: float = 60.0
+    TOOLNET_MAX_REQUESTS_PER_MINUTE: int = 30
+    TOOLNET_MAX_TOKENS_PER_MINUTE: int = 8000
+
+    def require_toolnet(self) -> tuple[str, str, str]:
+        base_url = (self.TOOLNET_BASE_URL or "").strip().rstrip("/")
+        api_key = (self.TOOLNET_API_KEY or "").strip()
+        model = (self.TOOLNET_MODEL or "").strip()
+        if not base_url or not api_key or not model:
+            raise RuntimeError(
+                "TOOLNET_BASE_URL / TOOLNET_API_KEY / TOOLNET_MODEL are not configured."
+            )
+        return base_url, api_key, model
+
 
 settings = Settings()

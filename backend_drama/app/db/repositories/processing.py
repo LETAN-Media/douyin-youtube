@@ -212,6 +212,10 @@ def _row_to_job(r: Any) -> dict[str, Any]:
         "last_error_message": _col("last_error_message", 13),
         "upload_progress": _col("upload_progress", 14),
         "template_id": _col("template_id", 15),
+        "ai_title": _col("ai_title", 16),
+        "ai_description": _col("ai_description", 17),
+        "ai_hashtags_json": _col("ai_hashtags_json", 18),
+        "ai_metadata_status": _col("ai_metadata_status", 19),
     }
 
 
@@ -242,7 +246,8 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         "SELECT id, pipeline_id, series_id, processing_mode, chunk_index, "
         "episode_start, episode_end, status, stage, downloaded_episode_ids_json, "
         "output_path, youtube_video_id, last_error_code, last_error_message, "
-        "upload_progress, template_id "
+        "upload_progress, template_id, ai_title, ai_description, "
+        "ai_hashtags_json, ai_metadata_status "
         "FROM drama_series_jobs WHERE id = ?",
         (job_id,),
     ).fetchone()
@@ -255,7 +260,8 @@ def list_jobs(series_id: str) -> list[dict[str, Any]]:
         "SELECT id, pipeline_id, series_id, processing_mode, chunk_index, "
         "episode_start, episode_end, status, stage, downloaded_episode_ids_json, "
         "output_path, youtube_video_id, last_error_code, last_error_message, "
-        "upload_progress, template_id "
+        "upload_progress, template_id, ai_title, ai_description, "
+        "ai_hashtags_json, ai_metadata_status "
         "FROM drama_series_jobs WHERE series_id = ? ORDER BY chunk_index ASC",
         (series_id,),
     ).fetchall()
@@ -267,6 +273,7 @@ def update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
         "status", "stage", "output_path", "youtube_video_id",
         "last_error_code", "last_error_message",
         "upload_progress", "template_id",
+        "ai_title", "ai_description", "ai_hashtags_json", "ai_metadata_status",
     }
     sets: list[str] = []
     params: list[Any] = []
@@ -305,7 +312,8 @@ def list_pipeline_jobs(pipeline_id: str, limit: int = 50) -> list[dict[str, Any]
         "SELECT id, pipeline_id, series_id, processing_mode, chunk_index, "
         "episode_start, episode_end, status, stage, downloaded_episode_ids_json, "
         "output_path, youtube_video_id, last_error_code, last_error_message, "
-        "upload_progress, template_id "
+        "upload_progress, template_id, ai_title, ai_description, "
+        "ai_hashtags_json, ai_metadata_status "
         "FROM drama_series_jobs WHERE pipeline_id = ? "
         "ORDER BY updated_at DESC, id DESC LIMIT ?",
         (pipeline_id, max(1, min(limit, 200))),

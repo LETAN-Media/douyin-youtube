@@ -149,10 +149,11 @@ function requireEnv(): { base: string; token: string } {
 async function dramaFetch<T>(
   path: string,
   init: RequestInit = {},
+  timeoutMs = 15000,
 ): Promise<T> {
   const { base, token } = requireEnv();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${base}${path}`, {
       ...init,
@@ -373,6 +374,95 @@ export async function updateDramaProcessingSettings(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     },
+  );
+}
+
+export interface DramaAiSettingsDto {
+  pipeline_id: string;
+  enabled: boolean;
+  language: string;
+  generate_title: boolean;
+  generate_description: boolean;
+  generate_hashtags: boolean;
+  system_prompt: string | null;
+  title_template: string | null;
+  description_template: string | null;
+  locked_hashtags: string[];
+  model_override: string | null;
+  config_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export async function getDramaAiSettings(
+  pipelineId: string,
+): Promise<DramaAiSettingsDto> {
+  return dramaFetch<DramaAiSettingsDto>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/ai-settings`,
+  );
+}
+
+export async function updateDramaAiSettings(
+  pipelineId: string,
+  payload: {
+    enabled?: boolean;
+    language?: string;
+    generate_title?: boolean;
+    generate_description?: boolean;
+    generate_hashtags?: boolean;
+    system_prompt?: string | null;
+    title_template?: string | null;
+    description_template?: string | null;
+    locked_hashtags?: string[] | string | null;
+    model_override?: string | null;
+    expected_config_version?: number | null;
+  },
+): Promise<DramaAiSettingsDto> {
+  return dramaFetch<DramaAiSettingsDto>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/ai-settings`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function resetDramaAiSettings(
+  pipelineId: string,
+): Promise<DramaAiSettingsDto> {
+  return dramaFetch<DramaAiSettingsDto>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/ai-settings/reset`,
+    { method: "POST" },
+  );
+}
+
+export interface DramaAiPreviewDto {
+  title: string;
+  description: string;
+  hashtags: string[];
+  language: string;
+  model: string;
+  cached: boolean;
+}
+
+export async function previewDramaAiMetadata(
+  pipelineId: string,
+  payload: {
+    series_id?: string | null;
+    job_id?: string | null;
+    language?: string | null;
+    force_regenerate?: boolean;
+  },
+): Promise<DramaAiPreviewDto> {
+  return dramaFetch<DramaAiPreviewDto>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/ai-metadata/preview`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    120000,
   );
 }
 

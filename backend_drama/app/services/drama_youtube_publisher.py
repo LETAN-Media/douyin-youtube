@@ -14,6 +14,7 @@ credentials/destinations. Blocking calls run in a thread, never the loop.
 
 import logging
 import time
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -218,6 +219,45 @@ async def publish_job_final(
             DESTINATION_REQUIRED,
             "YouTube destination chưa được kết nối.",
         )
+    # ---- AI metadata (one set per final video; snapshot on the job) ----
+    try:
+        from .drama_ai_metadata import (
+            AI_DISABLED_FOR_PIPELINE,
+            CONFIG_MISSING,
+            MetadataError,
+            ensure_drama_ai_metadata,
+        )
+
+        try:
+            ai_result = await ensure_drama_ai_metadata(job)
+        except MetadataError as exc:
+            if exc.code in (AI_DISABLED_FOR_PIPELINE, CONFIG_MISSING):
+                ai_result = None  # AI off -> keep existing manual/default metadata
+            else:
+                proc_repo.update_job(
+                    job_id,
+                    ai_metadata_status="failed",
+                    last_error_code="AI_METADATA_FAILED",
+                    last_error_message=str(exc)[:500],
+                )
+                raise YouTubePublisherError("AI_METADATA_FAILED", str(exc)[:500])
+        if ai_result is not None:
+            title = ai_result.metadata.title
+            description = ai_result.metadata.description
+            hashtags = ai_result.metadata.hashtags
+            proc_repo.update_job(
+                job_id,
+                ai_title=ai_result.metadata.title,
+                ai_description=ai_result.metadata.description,
+                ai_hashtags_json=json.dumps(
+                    ai_result.metadata.hashtags, ensure_ascii=False
+                ),
+                ai_metadata_status="cached" if ai_result.cached else "generated",
+            )
+    except YouTubePublisherError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - never block upload on snapshot issues
+        logger.warning("drama AI metadata snapshot failed: %s", type(exc).__name__)
     metadata = build_metadata(
         title=title or f"Drama EP {job.get('episode_start')}-{job.get('episode_end')}",
         description=description, hashtags=hashtags,

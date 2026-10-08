@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardHeader, btnSmall } from "@/components/ui";
+import { DramaAiMetadata } from "./DramaAiMetadata";
 import type {
   DramaEpisodeTaskDto,
   DramaProcessingSettingsDto,
@@ -363,7 +364,8 @@ export function DramaProcessingSettings({
   }
 
   return (
-    <Card>
+    <>
+      <Card>
       <CardHeader
         title="Chế độ xử lý"
         subtitle="Mỗi pipeline chọn workflow riêng — kênh reupload đi đường ngắn"
@@ -710,5 +712,7 @@ export function DramaProcessingSettings({
         </button>
       </div>
     </Card>
+    <DramaAiMetadata pipelineId={pipelineId} />
+    </>
   );
 }
