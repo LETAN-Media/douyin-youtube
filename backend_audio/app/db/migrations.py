@@ -257,6 +257,12 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_audio_scan_source ON audio_scan_runs(source_id, status, created_at)",
         ],
     ),
+    (
+        "audio_008",
+        [
+            "ALTER TABLE audio_pipelines ADD COLUMN pipeline_type TEXT NOT NULL DEFAULT 'auto'",
+        ],
+    ),
 ]
 
 
@@ -278,7 +284,14 @@ def migrate() -> list[str]:
         if version in have:
             continue
         for sql in statements:
-            client.execute(sql)
+            try:
+                client.execute(sql)
+            except Exception as exc:
+                err_str = str(exc).lower()
+                if "duplicate column" in err_str or "already exists" in err_str:
+                    logger.warning("migration %s statement skipped (already exists): %s", version, exc)
+                else:
+                    raise
         client.commit()
         client.execute(
             f"INSERT INTO {SCHEMA_VERSION_TABLE} (version) VALUES (?)", (version,)

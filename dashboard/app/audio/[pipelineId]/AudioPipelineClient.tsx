@@ -31,10 +31,18 @@ export function AudioPipelineClient({
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Link href="/audio" className="text-xs font-bold text-slate-500">
+        <Link
+          href={pipeline.pipeline_type === "manual" ? "/audio?tab=manual" : "/audio"}
+          className="text-xs font-bold text-slate-500 hover:text-slate-800"
+        >
           ← Audio
         </Link>
         <h1 className="text-lg font-extrabold text-slate-900">{pipeline.name}</h1>
+        {pipeline.pipeline_type === "manual" ? (
+          <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-800">
+            Thủ Công
+          </span>
+        ) : null}
         <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${
           pipeline.enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"
         }`}>

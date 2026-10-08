@@ -1,5 +1,5 @@
 import { Shell } from "@/components/Shell";
-import { AudioApiError, getAudioPipeline } from "@/lib/audio-api";
+import { AudioApiError, getAudioPipeline, type AudioPipelineDto } from "@/lib/audio-api";
 import { AudioPipelineClient } from "./AudioPipelineClient";
 
 const TABS = ["overview", "sources", "inventory", "media", "processing",
@@ -13,22 +13,31 @@ export default async function AudioPipelinePage({
 }) {
   const { pipelineId } = await params;
   const { tab } = await searchParams;
-  const initialTab = TABS.includes(tab as (typeof TABS)[number])
-    ? (tab as (typeof TABS)[number]) : "overview";
+  let pipeline: AudioPipelineDto | null = null;
+  let error: string | null = null;
   try {
-    const pipeline = await getAudioPipeline(pipelineId);
-    return (
-      <Shell>
-        <AudioPipelineClient pipeline={pipeline} initialTab={initialTab} />
-      </Shell>
-    );
+    pipeline = await getAudioPipeline(pipelineId);
   } catch (err) {
+    error = err instanceof AudioApiError ? err.message : "Không tải được pipeline.";
+  }
+
+  if (!pipeline) {
     return (
       <Shell>
         <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
-          {err instanceof AudioApiError ? err.message : "Không tải được pipeline."}
+          {error || "Không tải được pipeline."}
         </p>
       </Shell>
     );
   }
+
+  const defaultTab = pipeline.pipeline_type === "manual" ? "manual" : "overview";
+  const initialTab = TABS.includes(tab as (typeof TABS)[number])
+    ? (tab as (typeof TABS)[number]) : defaultTab;
+
+  return (
+    <Shell>
+      <AudioPipelineClient pipeline={pipeline} initialTab={initialTab} />
+    </Shell>
+  );
 }

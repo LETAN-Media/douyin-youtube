@@ -1,7 +1,8 @@
 import { proxyAudio } from "@/lib/audio-proxy";
 
-export async function GET() {
-  return proxyAudio("/api/audio/pipelines");
+export async function GET(request: Request) {
+  const { search } = new URL(request.url);
+  return proxyAudio(`/api/audio/pipelines${search}`);
 }
 
 export async function POST(request: Request) {

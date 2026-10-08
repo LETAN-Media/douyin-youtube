@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Shell } from "@/components/Shell";
 import { AudioApiError, listAudioPipelines } from "@/lib/audio-api";
 import { AudioPipelineList } from "./AudioClient";
@@ -13,7 +14,9 @@ export default async function AudioPage() {
   }
   return (
     <Shell>
-      <AudioPipelineList pipelines={pipelines} error={error} />
+      <Suspense fallback={<div className="p-4 text-sm text-slate-500">Đang tải…</div>}>
+        <AudioPipelineList pipelines={pipelines} error={error} />
+      </Suspense>
     </Shell>
   );
 }

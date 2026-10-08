@@ -39,9 +39,12 @@ async def get_scheduler(pipeline_id: str, _: None = Depends(require_admin)):
 @router.put("/pipelines/{pipeline_id}/scheduler")
 async def update_scheduler(pipeline_id: str, body: SchedulerUpdate,
                            _: None = Depends(require_admin)):
-    if pipe_repo.get_pipeline(pipeline_id) is None:
+    pipe = pipe_repo.get_pipeline(pipeline_id)
+    if pipe is None:
         return _err(404, "PIPELINE_NOT_FOUND", "Pipeline không tồn tại.")
     data = body.model_dump(exclude_none=True)
+    if pipe.get("pipeline_type") == "manual" and data.get("enabled"):
+        return _err(400, "MANUAL_PIPELINE", "Không thể bật scheduler cho pipeline thủ công.")
     if "destination_id" in data and data["destination_id"]:
         dest = repo.get_destination(data["destination_id"])
         if dest is None or dest.get("pipeline_id") != pipeline_id:
@@ -52,8 +55,11 @@ async def update_scheduler(pipeline_id: str, body: SchedulerUpdate,
 
 @router.post("/pipelines/{pipeline_id}/scheduler/tick")
 async def tick_now(pipeline_id: str, _: None = Depends(require_admin)):
-    if pipe_repo.get_pipeline(pipeline_id) is None:
+    pipe = pipe_repo.get_pipeline(pipeline_id)
+    if pipe is None:
         return _err(404, "PIPELINE_NOT_FOUND", "Pipeline không tồn tại.")
+    if pipe.get("pipeline_type") == "manual":
+        return _err(400, "MANUAL_PIPELINE", "Pipeline thủ công không hỗ trợ scheduler.")
     from app.services.scheduler import tick_pipeline
 
     return tick_pipeline(pipeline_id)

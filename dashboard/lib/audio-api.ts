@@ -69,6 +69,7 @@ export interface AudioPipelineDto {
   slug: string;
   enabled: boolean;
   auto_publish: boolean;
+  pipeline_type?: "auto" | "manual";
   total_sources: number;
   pending_videos: number;
   published_videos: number;
@@ -172,15 +173,25 @@ export interface AudioSchedulerDto {
   due_reason: string;
 }
 
-export async function listAudioPipelines(): Promise<{ items: AudioPipelineDto[] }> {
-  return audioFetch<{ items: AudioPipelineDto[] }>("/api/audio/pipelines");
+export async function listAudioPipelines(
+  type?: "auto" | "manual",
+): Promise<{ items: AudioPipelineDto[] }> {
+  const qs = type ? `?type=${encodeURIComponent(type)}` : "";
+  return audioFetch<{ items: AudioPipelineDto[] }>(`/api/audio/pipelines${qs}`);
 }
 
-export async function createAudioPipeline(name: string): Promise<AudioPipelineDto> {
+export async function createAudioPipeline(
+  name: string,
+  pipeline_type: "auto" | "manual" = "auto",
+): Promise<AudioPipelineDto> {
   return audioFetch<AudioPipelineDto>("/api/audio/pipelines", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({
+      name,
+      pipeline_type,
+      auto_publish: pipeline_type !== "manual",
+    }),
   });
 }
 

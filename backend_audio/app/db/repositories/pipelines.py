@@ -15,15 +15,23 @@ def _row(r: Any) -> dict[str, Any]:
         "slug": r["slug"],
         "enabled": bool(r["enabled"]),
         "auto_publish": bool(r["auto_publish"]),
+        "pipeline_type": r["pipeline_type"] if "pipeline_type" in r and r["pipeline_type"] else "auto",
         "created_at": r["created_at"] if "created_at" in r else None,
         "updated_at": r["updated_at"] if "updated_at" in r else None,
     }
 
 
-def list_pipelines() -> list[dict[str, Any]]:
-    rows = get_client().execute(
-        "SELECT * FROM audio_pipelines ORDER BY created_at DESC"
-    ).fetchall()
+def list_pipelines(pipeline_type: str | None = None) -> list[dict[str, Any]]:
+    client = get_client()
+    if pipeline_type:
+        rows = client.execute(
+            "SELECT * FROM audio_pipelines WHERE pipeline_type = ? ORDER BY created_at DESC",
+            (pipeline_type,),
+        ).fetchall()
+    else:
+        rows = client.execute(
+            "SELECT * FROM audio_pipelines ORDER BY created_at DESC"
+        ).fetchall()
     return [_row(r) for r in rows]
 
 
@@ -37,15 +45,20 @@ def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
 def create_pipeline(name: str, **fields: Any) -> dict[str, Any]:
     pid = new_id("apl")
     slug = slugify(name)
+    pipeline_type = fields.get("pipeline_type", "auto")
+    if pipeline_type not in ("auto", "manual"):
+        pipeline_type = "auto"
+    auto_pub = 0 if pipeline_type == "manual" else (1 if fields.get("auto_publish", True) else 0)
     client = get_client()
     for attempt in range(3):
         try:
             client.execute(
-                "INSERT INTO audio_pipelines (id, name, slug, enabled, auto_publish) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO audio_pipelines (id, name, slug, enabled, auto_publish, pipeline_type) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (pid, name.strip(), slug,
                  1 if fields.get("enabled", True) else 0,
-                 1 if fields.get("auto_publish", True) else 0),
+                 auto_pub,
+                 pipeline_type),
             )
             client.commit()
             break
@@ -60,13 +73,20 @@ def create_pipeline(name: str, **fields: Any) -> dict[str, Any]:
 
 
 def update_pipeline(pipeline_id: str, **fields: Any) -> dict[str, Any] | None:
-    allowed = {"name", "enabled", "auto_publish"}
+    allowed = {"name", "enabled", "auto_publish", "pipeline_type"}
     sets, params = [], []
+    has_auto_publish = "auto_publish" in fields and fields["auto_publish"] is not None
     for key in allowed:
         if key in fields and fields[key] is not None:
             value = fields[key]
             if key in ("enabled", "auto_publish"):
                 value = 1 if value else 0
+            elif key == "pipeline_type":
+                if value not in ("auto", "manual"):
+                    continue
+                if value == "manual" and not has_auto_publish:
+                    sets.append("auto_publish = ?")
+                    params.append(0)
             sets.append(f"{key} = ?")
             params.append(value)
     if not sets:

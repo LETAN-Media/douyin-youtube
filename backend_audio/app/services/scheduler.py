@@ -21,6 +21,17 @@ def _today_str(tz_name: str) -> str:
 def pipeline_due(pipeline_id: str) -> tuple[bool, str]:
     from app.db.client import get_client
     from app.db.repositories import audio as audio_repo
+    from app.db.repositories import pipelines as pipe_repo
+
+    pipe = pipe_repo.get_pipeline(pipeline_id)
+    if not pipe:
+        return False, "pipeline not found"
+    if pipe.get("pipeline_type") == "manual":
+        return False, "manual pipeline"
+    if not pipe.get("enabled"):
+        return False, "pipeline disabled"
+    if not pipe.get("auto_publish"):
+        return False, "pipeline auto_publish disabled"
 
     sched = audio_repo.get_scheduler_settings(pipeline_id)
     if not sched.get("enabled"):

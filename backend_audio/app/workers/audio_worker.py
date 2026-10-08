@@ -46,6 +46,8 @@ async def _loop() -> None:
                                          last_error_message=str(exc)[:500])
                 continue
             for pipe in pipe_repo.list_pipelines():
+                if pipe.get("pipeline_type") == "manual":
+                    continue
                 if not pipe.get("enabled") or not pipe.get("auto_publish"):
                     continue
                 try:
