@@ -471,3 +471,48 @@ export async function retryDramaJob(
     },
   );
 }
+
+export interface DramaYoutubeDestinationDto {
+  id: string;
+  pipeline_id: string;
+  channel_id: string | null;
+  channel_title: string | null;
+  channel_thumbnail: string | null;
+  visibility: string;
+  enabled: boolean;
+  connected: boolean;
+  credentials_present?: boolean;
+}
+
+export async function listDramaPipelineDestinations(
+  pipelineId: string,
+): Promise<DramaYoutubeDestinationDto[]> {
+  return dramaFetch<DramaYoutubeDestinationDto[]>(
+    `/api/drama/pipelines/${encodeURIComponent(pipelineId)}/youtube-destinations`,
+  );
+}
+
+export async function listDramaConnectedChannels(): Promise<DramaYoutubeDestinationDto[]> {
+  return dramaFetch<DramaYoutubeDestinationDto[]>(`/api/drama/youtube/destinations`);
+}
+
+export async function startDramaYoutubeOAuth(
+  pipelineId: string,
+  visibility?: string,
+): Promise<{ authorization_url: string; destination_id: string }> {
+  const qs = new URLSearchParams({ pipeline_id: pipelineId });
+  if (visibility) qs.set("visibility", visibility);
+  qs.set("return_to", `/drama/${pipelineId}?tab=youtube`);
+  return dramaFetch<{ authorization_url: string; destination_id: string }>(
+    `/api/drama/youtube/oauth/start?${qs.toString()}`,
+  );
+}
+
+export async function disconnectDramaDestination(
+  destinationId: string,
+): Promise<{ ok: boolean; destination_id: string; connected: boolean }> {
+  return dramaFetch<{ ok: boolean; destination_id: string; connected: boolean }>(
+    `/api/drama/youtube-destinations/${encodeURIComponent(destinationId)}`,
+    { method: "DELETE" },
+  );
+}

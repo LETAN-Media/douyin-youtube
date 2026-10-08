@@ -46,6 +46,17 @@ export async function PUT(
     }
     if (typeof body.subtitle_enabled === "boolean") payload.subtitle_enabled = body.subtitle_enabled;
     if (typeof body.tts_enabled === "boolean") payload.tts_enabled = body.tts_enabled;
+    if (typeof body.template_enabled === "boolean") payload.template_enabled = body.template_enabled;
+    if (body.template_id === null || typeof body.template_id === "string") {
+      payload.template_id = body.template_id;
+    }
+    if (body.template_mode === null || typeof body.template_mode === "string") {
+      payload.template_mode = body.template_mode;
+    }
+    if (body.youtube_destination_id === null || typeof body.youtube_destination_id === "string") {
+      payload.youtube_destination_id = body.youtube_destination_id;
+    }
+    if (typeof body.auto_publish === "boolean") payload.auto_publish = body.auto_publish;
     return NextResponse.json(await updateDramaProcessingSettings(pipelineId, payload));
   } catch (err: unknown) {
     const status = err instanceof DramaApiError ? err.status : 500;

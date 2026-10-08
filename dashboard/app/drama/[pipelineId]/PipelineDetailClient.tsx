@@ -39,8 +39,9 @@ import type {
 } from "@/lib/drama-api";
 import { DramaProcessingSettings, type ProcessingMode } from "@/components/drama/DramaProcessingSettings";
 import { DramaProcessingFlow } from "@/components/drama/DramaProcessingFlow";
+import { DramaYoutubeTab } from "@/components/drama/DramaYoutubeTab";
 
-export type DramaTabKey = "overview" | "sources" | "series" | "inventory" | "settings";
+export type DramaTabKey = "overview" | "sources" | "series" | "inventory" | "settings" | "youtube";
 
 const TABS: { key: DramaTabKey; label: string }[] = [
   { key: "overview", label: "Overview" },
@@ -48,6 +49,7 @@ const TABS: { key: DramaTabKey; label: string }[] = [
   { key: "series", label: "Series" },
   { key: "inventory", label: "Inventory" },
   { key: "settings", label: "Chế độ xử lý" },
+  { key: "youtube", label: "YouTube" },
 ];
 
 const REGISTERED_PROVIDERS = [
@@ -1076,6 +1078,12 @@ export function PipelineDetailClient({
           series={selectedSeries}
           onClose={() => setSelectedSeries(null)}
         />
+      )}
+
+      {activeTab === "youtube" && (
+        <div className="space-y-4">
+          <DramaYoutubeTab pipelineId={pipeline.id} />
+        </div>
       )}
     </div>
   );

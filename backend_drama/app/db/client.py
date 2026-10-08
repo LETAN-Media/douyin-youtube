@@ -432,6 +432,48 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_ep_tasks_job ON drama_episode_tasks(job_id, status)",
         ],
     ),
+    (
+        "drama_008",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS drama_youtube_destinations (
+                id TEXT PRIMARY KEY,
+                pipeline_id TEXT NOT NULL,
+                channel_id TEXT,
+                channel_title TEXT,
+                channel_thumbnail TEXT,
+                visibility TEXT NOT NULL DEFAULT 'public',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                connected INTEGER NOT NULL DEFAULT 0,
+                connected_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS drama_youtube_credentials (
+                destination_id TEXT PRIMARY KEY,
+                channel_id TEXT,
+                refresh_token_encrypted TEXT,
+                token_uri TEXT NOT NULL DEFAULT 'https://oauth2.googleapis.com/token',
+                status TEXT NOT NULL DEFAULT 'active',
+                connected_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS drama_oauth_states (
+                state TEXT PRIMARY KEY,
+                destination_id TEXT NOT NULL,
+                pipeline_id TEXT NOT NULL,
+                return_to TEXT,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_yt_dest_pipeline ON drama_youtube_destinations(pipeline_id, connected)",
+        ],
+    ),
 ]
 
 

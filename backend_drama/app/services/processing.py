@@ -297,11 +297,28 @@ async def run_series_job(
         report["output"] = str(final_path)
         proc_repo.update_job(job_id, status="merging", output_path=str(final_path))
 
-        # ---- upload (idempotent) ----
-        uploader = upload_video or _default_not_implemented
+        # ---- upload (idempotent; real publisher by default) ----
         _step("upload", "running")
+        if upload_video is not None:
+            run_uploader = upload_video
+
+            async def _upload(job, final_path):
+                return await run_uploader(job, final_path)
+        else:
+            from .drama_youtube_publisher import publish_job_final
+
+            series = drama_repo.get_series(job.get("series_id") or "")
+
+            async def _upload(job, final_path):
+                start = job.get("episode_start")
+                end = job.get("episode_end")
+                title = (series or {}).get("title") or "Drama"
+                if start is not None and end is not None:
+                    title = f"{title} - Tập {start}-{end}" if start != end else f"{title} - Tập {start}"
+                return await publish_job_final(job, final_path, title=title)
+
         try:
-            up_out = await uploader(job, final_path)
+            up_out = await _upload(job, final_path)
         except StageNotImplemented as exc:
             proc_repo.update_job(job_id, status="failed")
             return _fail(exc.code, str(exc), "upload")

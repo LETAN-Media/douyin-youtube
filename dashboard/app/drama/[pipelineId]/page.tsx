@@ -14,7 +14,7 @@ import {
 } from "@/lib/drama-api";
 import { PipelineDetailClient, type DramaTabKey } from "./PipelineDetailClient";
 
-const VALID_TABS: DramaTabKey[] = ["overview", "sources", "series", "inventory", "settings"];
+const VALID_TABS: DramaTabKey[] = ["overview", "sources", "series", "inventory", "settings", "youtube"];
 
 export default async function DramaPipelinePage({
   params,

@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     DRAMA_API_KEY: str | None = None
     DRAMA_API_BASE_URL: str = "https://short-drama-pro.p.rapidapi.com"
     DRAMA_API_TIMEOUT_SECONDS: float = 30.0
+
+    # Google OAuth for YouTube (same account/key style as backend_facebook).
+    GOOGLE_CLIENT_ID: str | None = None
+    GOOGLE_CLIENT_SECRET: str | None = None
+    DRAMA_YOUTUBE_CALLBACK_URL: str = "https://drama-api.toolnet.tech/api/drama/youtube/oauth/callback"
+    # Dashboard origin used only to redirect back after YouTube OAuth.
+    DRAMA_DASHBOARD_URL: str = "https://douyin.toolnet.tech"    # Fernet key (44-char urlsafe base64) for refresh-token encryption.
+    # Never commit; generate with:
+    #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    DRAMA_TOKEN_ENCRYPTION_KEY: str | None = None
     # Episode render concurrency. Default 1 (sequential) for small hosts;
     # the architecture allows raising later.
     DRAMA_RENDER_CONCURRENCY: int = 1
