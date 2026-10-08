@@ -58,9 +58,14 @@ async def add_sources(pipeline_id: str, body: SourcesAdd,
 
 @router.post("/sources/{source_id}/scan")
 async def scan_now(source_id: str, full: bool = False,
+                   mode: str | None = None,
                    _: None = Depends(require_admin)):
+    """Manual scan only. mode=new (default, new videos only) or mode=full."""
+    if mode is not None and mode not in ("new", "full"):
+        return _err(400, "BAD_MODE", "mode must be 'new' or 'full'.")
     try:
-        state = await scanner.scan_source(source_id, full=full)
+        state = await scanner.scan_source(
+            source_id, full=(mode == "full" or full))
     except ValueError:
         return _err(404, "SOURCE_NOT_FOUND", "Source không tồn tại.")
     return state
