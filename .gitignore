@@ -23,3 +23,5 @@ dashboard/.env.local
 backups/
 *.sqlite3
 *.db
+backend_audio/assets/template/
+*.MOV

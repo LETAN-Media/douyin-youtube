@@ -95,8 +95,12 @@ def list_inventory(pipeline_id: str, status: str | None = None,
     if status:
         where += " AND status = ?"
         params.append(status)
-    total = client.execute(
-        f"SELECT COUNT(*) AS n FROM audio_inventory WHERE {where}", params).fetchone()["n"]
+    r_cnt = client.execute(
+        f"SELECT COUNT(*) AS n FROM audio_inventory WHERE {where}", params).fetchone()
+    try:
+        total = int(r_cnt["n"]) if r_cnt and r_cnt.get("n") is not None else 0
+    except (ValueError, TypeError):
+        total = 0
     rows = client.execute(
         f"SELECT * FROM audio_inventory WHERE {where} "
         f"ORDER BY discovered_at DESC LIMIT ? OFFSET ?",

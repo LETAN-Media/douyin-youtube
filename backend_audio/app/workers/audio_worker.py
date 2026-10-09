@@ -44,6 +44,10 @@ async def _loop() -> None:
                     jobs_repo.update_job(job["id"], status="failed",
                                          last_error_code="WORKER_CRASH",
                                          last_error_message=str(exc)[:500])
+                    if job.get("inventory_id"):
+                        from app.services.processing import _handle_failed_inventory
+
+                        _handle_failed_inventory(job["inventory_id"], "WORKER_CRASH")
                 continue
             for pipe in pipe_repo.list_pipelines():
                 if pipe.get("pipeline_type") == "manual":

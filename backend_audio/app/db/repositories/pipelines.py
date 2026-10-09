@@ -125,24 +125,31 @@ def delete_pipeline(pipeline_id: str) -> bool:
 
 def pipeline_stats(pipeline_id: str) -> dict[str, Any]:
     client = get_client()
-    total_sources = client.execute(
+    def _count(query: str, *params: Any) -> int:
+        r = client.execute(query, params).fetchone()
+        try:
+            return int(r["n"]) if r and r.get("n") is not None else 0
+        except (ValueError, TypeError):
+            return 0
+
+    total_sources = _count(
         "SELECT COUNT(*) AS n FROM audio_sources WHERE pipeline_id = ?",
-        (pipeline_id,)).fetchone()["n"]
-    pending = client.execute(
+        pipeline_id)
+    pending = _count(
         "SELECT COUNT(*) AS n FROM audio_inventory "
         "WHERE pipeline_id = ? AND status = 'available'",
-        (pipeline_id,)).fetchone()["n"]
-    published = client.execute(
+        pipeline_id)
+    published = _count(
         "SELECT COUNT(*) AS n FROM audio_publications WHERE pipeline_id = ?",
-        (pipeline_id,)).fetchone()["n"]
-    running = client.execute(
+        pipeline_id)
+    running = _count(
         "SELECT COUNT(*) AS n FROM audio_processing_jobs "
         "WHERE pipeline_id = ? AND status IN ('queued','running')",
-        (pipeline_id,)).fetchone()["n"]
-    failed = client.execute(
+        pipeline_id)
+    failed = _count(
         "SELECT COUNT(*) AS n FROM audio_processing_jobs "
         "WHERE pipeline_id = ? AND status = 'failed'",
-        (pipeline_id,)).fetchone()["n"]
+        pipeline_id)
     last_pub = client.execute(
         "SELECT youtube_url, published_at FROM audio_publications "
         "WHERE pipeline_id = ? ORDER BY published_at DESC LIMIT 1",

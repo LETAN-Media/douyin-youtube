@@ -14,8 +14,14 @@ ACTIVE = ("queued", "running")
 def create_job(pipeline_id: str, *, inventory_id: str | None = None,
                manual_url: str | None = None,
                mode: str = "auto") -> dict[str, Any]:
-    jid = new_id("ajob")
     client = get_client()
+    if inventory_id:
+        existing = client.execute(
+            "SELECT * FROM audio_processing_jobs WHERE inventory_id = ? "
+            "AND status IN ('queued', 'running')", (inventory_id,)).fetchone()
+        if existing:
+            return dict(existing)
+    jid = new_id("ajob")
     client.execute(
         "INSERT INTO audio_processing_jobs (id, pipeline_id, inventory_id, "
         "manual_url, mode, status, stage) VALUES (?, ?, ?, ?, ?, 'queued', 'queued')",
@@ -63,6 +69,11 @@ def claim_next_queued(worker_id: str, lease_seconds: int = 3600) -> dict | None:
 
 
 def update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
+    if fields.get("status") == "completed":
+        if "last_error_code" not in fields:
+            fields["last_error_code"] = None
+        if "last_error_message" not in fields:
+            fields["last_error_message"] = None
     allowed = {"status", "stage", "progress_percent", "background_asset_id",
                "logo_asset_id", "template_asset_id", "srt_object_key", "ai_title", "ai_description",
                "ai_hashtags_json", "ai_metadata_status", "youtube_video_id",

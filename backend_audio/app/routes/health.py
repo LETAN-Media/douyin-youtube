@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.db.client import db_configured
-from app.workers.audio_worker import status as worker_status
+from app.workers import audio_worker
 
 router = APIRouter(tags=["health"])
 
@@ -12,7 +12,7 @@ async def health() -> dict:
     """Liveness: the process is alive. Never fails on DB state."""
     ok, state = db_configured()
     return {"ok": ok, "service": "backend-audio", "db": state,
-            "worker": worker_status()}
+            "worker": audio_worker.status()}
 
 
 @router.get("/ready")
@@ -40,4 +40,8 @@ async def ready(request: Request):
     except Exception:
         return JSONResponse(status_code=503, content={
             "ready": False, "reason": "database unreachable"})
+    ws = audio_worker.status()
+    if not ws.get("running"):
+        return JSONResponse(status_code=503, content={
+            "ready": False, "reason": "worker not running"})
     return {"ready": True}

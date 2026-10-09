@@ -25,13 +25,49 @@ def _step(job_id: str, stage: str, state: str, progress: int,
     jobs_repo.add_event(job_id, stage, state, detail)
 
 
-def _fail(job_id: str, code: str, message: str, stage: str) -> dict[str, Any]:
+def _handle_failed_inventory(inventory_id: str, code: str) -> None:
+    from app.db.client import get_client
+    from app.db.repositories import sources as src_repo
+
+    client = get_client()
+    row = client.execute(
+        "SELECT COUNT(*) AS n FROM audio_processing_jobs WHERE inventory_id = ? "
+        "AND status = 'failed'", (inventory_id,)).fetchone()
+    try:
+        failed_count = int(row["n"]) if row and row.get("n") is not None else 0
+    except (ValueError, TypeError):
+        failed_count = 0
+
+    permanent_codes = {
+        "NO_SOURCE", "INVALID_SOURCE", "NOT_FOUND", "CORRUPTED",
+        "UNSUPPORTED", "UNSUPPORTED_MEDIA", "PRIVATE_VIDEO", "DOWNLOAD_REJECTED"
+    }
+    if code in permanent_codes or failed_count >= 2:
+        src_repo.set_inventory_status(inventory_id, "failed")
+        logger.warning("inventory %s marked failed (code=%s, failed_jobs=%d)",
+                       inventory_id, code, failed_count)
+    else:
+        src_repo.set_inventory_status(inventory_id, "available")
+        logger.info("inventory %s recovered to available (code=%s, failed_jobs=%d)",
+                    inventory_id, code, failed_count)
+
+
+def _fail(job_id: str, code: str, message: str, stage: str,
+          inventory_id: str | None = None) -> dict[str, Any]:
     from app.db.repositories import jobs as jobs_repo
 
     jobs_repo.update_job(job_id, status="failed", stage=f"{stage}:failed",
                          last_error_code=code,
                          last_error_message=message[:2000])
     jobs_repo.add_event(job_id, stage, "failed", f"{code}: {message[:500]}")
+
+    if not inventory_id:
+        j = jobs_repo.get_job(job_id)
+        if j:
+            inventory_id = j.get("inventory_id")
+    if inventory_id:
+        _handle_failed_inventory(inventory_id, code)
+
     return {"job_id": job_id, "status": "failed",
             "error": {"code": code, "message": message}}
 
@@ -287,7 +323,9 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
     # Completion is persisted BEFORE cleanup: progress never decreases again.
     jobs_repo.update_job(job_id, status="completed", stage="completed:done",
                          progress_percent=100,
-                         youtube_url=pub.get("youtube_url"))
+                         youtube_url=pub.get("youtube_url"),
+                         last_error_code=None,
+                         last_error_message=None)
     jobs_repo.add_event(job_id, "completed", "done",
                         pub.get("youtube_url"))
 
