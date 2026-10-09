@@ -139,10 +139,10 @@ async def update_processing(pipeline_id: str, body: ProcessingUpdate,
         "logo_position, normalize_audio, template_enabled, template_asset_id, "
         "template_interval_s, background_source, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(pipeline_id) DO UPDATE SET subtitle_mode=excluded.subtitle_mode, "
-        "srt_auto_generate=excluded.srt_auto_generate, "
-        "srt_required=excluded.srt_required, "
-        "srt_object_key=excluded.srt_object_key, "
+        "ON CONFLICT(pipeline_id) DO UPDATE SET subtitle_mode='none', "
+        "srt_auto_generate=0, "
+        "srt_required=0, "
+        "srt_object_key=NULL, "
         "orientation=excluded.orientation, "
         "logo_position=excluded.logo_position, "
         "normalize_audio=excluded.normalize_audio, "
@@ -151,10 +151,10 @@ async def update_processing(pipeline_id: str, body: ProcessingUpdate,
         "template_interval_s=excluded.template_interval_s, "
         "background_source=excluded.background_source, "
         "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-        (pipeline_id, merged.get("subtitle_mode", "youtube_captions"),
-         1 if merged.get("srt_auto_generate", True) else 0,
-         1 if merged.get("srt_required", True) else 0,
-         merged.get("srt_object_key"), merged.get("orientation", "landscape"),
+        (pipeline_id, "none",
+         0,
+         0,
+         None, merged.get("orientation", "landscape"),
          merged.get("logo_position", "top-right"),
          1 if merged.get("normalize_audio", False) else 0,
          1 if merged.get("template_enabled", False) else 0,

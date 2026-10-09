@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -120,7 +121,7 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
     from app.db.repositories import audio as audio_repo
     from app.db.repositories import sources as src_repo
     from app.services import audio_extractor, r2_storage, snapvideo
-    from app.services import loop_renderer, subtitle_service
+    from app.services import loop_renderer
 
     job_id, pipeline_id = job["id"], job["pipeline_id"]
     threads = int(settings.AUDIO_FFMPEG_THREADS or 2)
@@ -147,144 +148,145 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
     try:
         info = await asyncio.to_thread(audio_extractor.probe_media, source_mp4)
         audio_path = job_dir / "audio.m4a"
-        await asyncio.to_thread(audio_extractor.extract_audio, source_mp4, audio_path, threads=threads)
+        proc_settings = _processing_settings(pipeline_id)
+        normalize_audio = bool(proc_settings.get("normalize_audio", False))
+        await asyncio.to_thread(audio_extractor.extract_audio, source_mp4, audio_path, normalize=normalize_audio, threads=threads)
         probe_res = await asyncio.to_thread(audio_extractor.probe_media, audio_path)
         duration = probe_res["duration"]
     except audio_extractor.AudioError as exc:
         return _fail(job_id, exc.code, str(exc), "extracting_audio")
-    # Source MP4 is no longer needed (audio.m4a feeds render/ASR) — free disk.
+    # Source MP4 is no longer needed (audio.m4a feeds render) — free disk.
     try:
         source_mp4.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning("job %s: could not delete source.mp4: %s", job_id, exc)
 
-    # ---- background selection ----
+    # ---- background & template selection ----
     bg_asset = audio_repo.pick_background_asset(pipeline_id)
     if bg_asset is None:
         return _fail(job_id, "NO_BACKGROUND",
                      "Pipeline media library has no enabled background or template.",
                      "rendering")
-    bg_suffix = Path(bg_asset.get("file_name") or bg_asset.get("object_key") or "bg.mp4").suffix or ".mp4"
-    bg_local = job_dir / f"background{bg_suffix}"
-    try:
-        r2_storage.download_file(bg_asset["object_key"], bg_local)
-    except r2_storage.R2Error as exc:
-        err_code = "BACKGROUND_R2_OBJECT_MISSING" if ("DOWNLOAD_FAILED" in exc.code or "NOT_FOUND" in exc.code or "404" in str(exc)) else exc.code
-        return _fail(job_id, err_code, str(exc), "rendering")
-    try:
-        bg_probe = audio_extractor.probe_video(bg_local)
-        if bg_probe.get("duration", 0) <= 0:
-            return _fail(job_id, "BACKGROUND_INVALID_MEDIA",
-                         "Background video has invalid duration.", "rendering")
-    except audio_extractor.AudioError as exc:
-        return _fail(job_id, "BACKGROUND_INVALID_MEDIA",
-                     f"Background video invalid: {exc}", "rendering")
     jobs_repo.update_job(job_id, background_asset_id=bg_asset["id"])
 
-    # ---- subtitles ----
-    proc_settings = _processing_settings(pipeline_id)
-    subtitle_mode = proc_settings.get("subtitle_mode", "youtube_captions")
-    srt_local: Path | None = None
-    if subtitle_mode in ("youtube_captions", "hardsub"):
-        if proc_settings.get("srt_object_key"):
-            _step(job_id, "subtitles", "running", 35)
-            try:
-                srt_local = job_dir / "subs.srt"
-                r2_storage.download_file(proc_settings["srt_object_key"], srt_local)
-                jobs_repo.update_job(job_id,
-                                     srt_object_key=proc_settings["srt_object_key"])
-            except r2_storage.R2Error as exc:
-                return _fail(job_id, exc.code, str(exc), "subtitles")
-        elif proc_settings.get("srt_auto_generate"):
-            _step(job_id, "generating_srt", "running", 35)
-            try:
-                srt_local = await _generate_srt(job_id, pipeline_id, audio_path,
-                                                duration, job_dir)
-            except subtitle_service.SubtitleError as exc:
-                if proc_settings.get("srt_required"):
-                    return _fail(job_id, exc.code, str(exc), "generating_srt")
-                jobs_repo.add_event(job_id, "generating_srt", "skipped",
-                                    f"{exc.code} (optional)")
-
-    # ---- template overlay (auto random or manual pick) ----
-    template_local: Path | None = None
-    template_len: float | None = None
-    if proc_settings.get("template_enabled"):
-        picked = None
-        manual_tid = proc_settings.get("template_asset_id")
-        if manual_tid:
-            for asset in audio_repo.list_assets(pipeline_id, "template"):
-                if asset["id"] == manual_tid and asset.get("enabled"):
-                    picked = asset
-                    break
-        if picked is None:
-            picked = audio_repo.pick_random_template(
-                pipeline_id, avoid_asset_id=bg_asset["id"] if bg_asset else None)
-        # Requirement 6: Nếu cùng asset đã được chọn làm nền thì không áp dụng asset đó thêm một lần như overlay chu kỳ 600 giây
-        if picked and bg_asset and picked["id"] == bg_asset["id"]:
-            logger.info("job %s: template asset %s matches background asset, skipping overlay",
-                        job_id, picked["id"])
-            picked = None
-        if picked is not None:
-            try:
-                t_suffix = Path(picked.get("file_name") or picked.get("object_key") or "tmpl.mp4").suffix or ".mp4"
-                template_local = job_dir / f"template{t_suffix}"
-                r2_storage.download_file(picked["object_key"], template_local)
-                template_len = audio_extractor.probe_video(
-                    template_local)["duration"]
-                jobs_repo.update_job(job_id, template_asset_id=picked["id"])
-                jobs_repo.add_event(job_id, "rendering", "template",
-                                    f"{picked['id']} ({template_len:.1f}s)")
-            except Exception as exc:
-                jobs_repo.add_event(job_id, "rendering", "template_skipped",
-                                    f"{type(exc).__name__} (non-blocking)")
-                template_local = None
-
-    # ---- rendering ----
-    _step(job_id, "rendering", "running", 60)
+    # Logo selection (if enabled)
     logo_local: Path | None = None
     logos = [a for a in audio_repo.list_assets(pipeline_id, "logo")
              if a.get("enabled")]
-    if logos:
-        try:
-            logo_local = job_dir / "logo.png"
-            r2_storage.download_file(logos[0]["object_key"], logo_local)
-            jobs_repo.update_job(job_id, logo_asset_id=logos[0]["id"])
-        except r2_storage.R2Error:
-            logo_local = None
+    logo_asset = logos[0] if logos else None
+    if logo_asset:
+        jobs_repo.update_job(job_id, logo_asset_id=logo_asset["id"])
+
+    # Template periodic overlay check (only if explicitly enabled AND distinct from background)
+    periodic_overlay_asset = None
+    if proc_settings.get("template_enabled"):
+        manual_tid = proc_settings.get("template_asset_id")
+        picked_overlay = None
+        if manual_tid:
+            for asset in audio_repo.list_assets(pipeline_id, "template"):
+                if asset["id"] == manual_tid and asset.get("enabled"):
+                    picked_overlay = asset
+                    break
+        if picked_overlay is None:
+            picked_overlay = audio_repo.pick_random_template(
+                pipeline_id, avoid_asset_id=bg_asset["id"] if bg_asset else None)
+        if picked_overlay and bg_asset and picked_overlay["id"] == bg_asset["id"]:
+            logger.info("job %s: template asset %s matches background asset, skipping overlay",
+                        job_id, picked_overlay["id"])
+            picked_overlay = None
+        periodic_overlay_asset = picked_overlay
+
+    # ---- rendering / fast mux ----
+    _step(job_id, "rendering", "running", 60)
     final_mp4 = job_dir / "rendered.mp4"
-    hardsub = proc_settings.get("subtitle_mode") == "hardsub"
-    if hardsub and srt_local is None:
-        return _fail(job_id, "HARDSUB_SRT_MISSING",
-                     "subtitle_mode=hardsub but no SRT was produced or provided.",
-                     "rendering")
-    try:
-        render_task = asyncio.to_thread(
-            loop_renderer.build_loop_video,
-            background=bg_local, audio=audio_path, output=final_mp4,
-            duration=duration, logo=logo_local,
-            logo_position=proc_settings.get("logo_position", "top-right"),
-            orientation=proc_settings.get("orientation", "landscape"),
-            threads=threads,
-            template=template_local,
-            template_interval_s=float(
-                proc_settings.get("template_interval_s") or 600),
-            template_duration_s=template_len,
-            srt=srt_local if hardsub else None,
-            hardsub=hardsub)
 
-        async def _heartbeat():
-            while True:
-                await asyncio.sleep(20)
-                jobs_repo.update_job(job_id, stage="rendering:running")
+    if periodic_overlay_asset is None:
+        # Standard Fast Mux flow: template normalized & cached once on R2, then stream copy
+        from app.services import template_cache
 
-        hb_task = asyncio.create_task(_heartbeat())
+        norm_template_path = job_dir / "normalized_template.mp4"
         try:
-            await render_task
-        finally:
-            hb_task.cancel()
-    except loop_renderer.RenderError as exc:
-        return _fail(job_id, exc.code, str(exc), "rendering")
+            norm_template_path, cache_status, norm_elapsed = await asyncio.to_thread(
+                template_cache.get_or_create_optimized_template,
+                pipeline_id=pipeline_id,
+                bg_asset=bg_asset,
+                dest_path=norm_template_path,
+                orientation=proc_settings.get("orientation", "landscape"),
+                logo_asset=logo_asset,
+                logo_position=proc_settings.get("logo_position", "top-right"),
+                threads=threads,
+                temp_dir=job_dir,
+            )
+            jobs_repo.add_event(job_id, "template_cache", cache_status,
+                                f"{cache_status} in {norm_elapsed:.2f}s")
+        except template_cache.TemplateCacheError as exc:
+            return _fail(job_id, exc.code, str(exc), "rendering")
+
+        try:
+            t_mux0 = time.perf_counter()
+            await asyncio.to_thread(
+                loop_renderer.fast_mux_loop_video,
+                normalized_video=norm_template_path,
+                audio=audio_path,
+                output=final_mp4,
+                duration=duration,
+            )
+            mux_elapsed = time.perf_counter() - t_mux0
+            jobs_repo.add_event(job_id, "rendering", "fast_mux",
+                                f"elapsed={mux_elapsed:.2f}s")
+        except loop_renderer.RenderError as exc:
+            return _fail(job_id, exc.code, str(exc), "rendering")
+    else:
+        # Fallback to standard render if periodic overlay is explicitly active
+        bg_suffix = Path(bg_asset.get("file_name") or bg_asset.get("object_key") or "bg.mp4").suffix or ".mp4"
+        bg_local = job_dir / f"background{bg_suffix}"
+        try:
+            r2_storage.download_file(bg_asset["object_key"], bg_local)
+        except r2_storage.R2Error as exc:
+            err_code = "BACKGROUND_R2_OBJECT_MISSING" if ("DOWNLOAD_FAILED" in exc.code or "NOT_FOUND" in exc.code or "404" in str(exc)) else exc.code
+            return _fail(job_id, err_code, str(exc), "rendering")
+
+        tmpl_local = None
+        tmpl_len = None
+        t_suffix = Path(periodic_overlay_asset.get("file_name") or periodic_overlay_asset.get("object_key") or "tmpl.mp4").suffix or ".mp4"
+        tmpl_local = job_dir / f"template{t_suffix}"
+        try:
+            r2_storage.download_file(periodic_overlay_asset["object_key"], tmpl_local)
+            tmpl_len = audio_extractor.probe_video(tmpl_local)["duration"]
+            jobs_repo.update_job(job_id, template_asset_id=periodic_overlay_asset["id"])
+        except Exception:
+            tmpl_local = None
+            tmpl_len = None
+
+        if logo_asset:
+            try:
+                logo_local = job_dir / "logo.png"
+                r2_storage.download_file(logo_asset["object_key"], logo_local)
+            except Exception:
+                logo_local = None
+
+        try:
+            await asyncio.to_thread(
+                loop_renderer.build_loop_video,
+                background=bg_local, audio=audio_path, output=final_mp4,
+                duration=duration, logo=logo_local,
+                logo_position=proc_settings.get("logo_position", "top-right"),
+                orientation=proc_settings.get("orientation", "landscape"),
+                threads=threads,
+                template=tmpl_local,
+                template_interval_s=float(proc_settings.get("template_interval_s") or 600),
+                template_duration_s=tmpl_len,
+            )
+        except loop_renderer.RenderError as exc:
+            return _fail(job_id, exc.code, str(exc), "rendering")
+
+    # Verify final MP4 integrity
+    try:
+        final_probe = await asyncio.to_thread(audio_extractor.probe_video, final_mp4)
+        if final_probe.get("duration", 0) <= 0:
+            return _fail(job_id, "RENDER_INVALID", "Final MP4 duration is invalid.", "rendering")
+    except Exception as exc:
+        return _fail(job_id, "RENDER_INVALID", f"Final MP4 verification failed: {exc}", "rendering")
 
     # ---- AI metadata ----
     ai_cfg = audio_repo.get_ai_settings(pipeline_id)
@@ -316,17 +318,14 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
 
     # ---- uploading ----
     _step(job_id, "uploading", "running", 88)
-    captions_required = (subtitle_mode == "youtube_captions"
-                         and proc_settings.get("srt_required", True)
-                         and srt_local is not None)
     try:
         from app.services import youtube_publisher as publisher
 
         pub = await publisher.publish_final(
             job=job, video_path=final_mp4, title=title,
             description=description, hashtags=hashtags,
-            srt_path=srt_local,
-            captions_required=captions_required)
+            srt_path=None,
+            captions_required=False)
     except publisher.PublisherError as exc:
         return _fail(job_id, exc.code, str(exc), "uploading")
 
@@ -386,29 +385,9 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
 
 async def _generate_srt(job_id: str, pipeline_id: str, audio_path: Path,
                         duration: float, job_dir: Path) -> Path:
-    from app.services import r2_storage, subtitle_service
-
-    chunks_dir = job_dir / "chunks"
-    chunks_dir.mkdir(parents=True, exist_ok=True)
-    plan = subtitle_service.split_plan(duration)
-    done: list[tuple[float, str]] = []
-    for idx, (start, end) in enumerate(plan):
-        chunk_audio = chunks_dir / f"chunk_{idx:03d}.m4a"
-        subtitle_service.slice_audio_for_chunk(audio_path, start, end, chunk_audio)
-        chunk_srt = chunks_dir / f"chunk_{idx:03d}.srt"
-        subtitle_service.transcribe_with_bridge(chunk_audio, chunk_srt)
-        done.append((start, str(chunk_srt)))
-        try:
-            chunk_audio.unlink(missing_ok=True)
-        except Exception:
-            pass
+    """Legacy stub: Subtitles have been removed from audio pipeline."""
     merged = job_dir / "subs.srt"
-    merged.write_text(subtitle_service.merge_chunks(done), encoding="utf-8")
-    key = f"audio/pipelines/{pipeline_id}/srt/{job_id}.srt"
-    r2_storage.upload_file(merged, key, content_type="application/x-subrip")
-    from app.db.repositories import jobs as jobs_repo
-
-    jobs_repo.update_job(job_id, srt_object_key=key)
+    merged.write_text("", encoding="utf-8")
     return merged
 
 
@@ -460,14 +439,20 @@ def _processing_settings(pipeline_id: str) -> dict[str, Any]:
         (pipeline_id,)).fetchone()
     if row is None:
         bg_src = audio_repo.get_background_source(pipeline_id)
-        return {"subtitle_mode": "youtube_captions", "srt_auto_generate": True,
-                "srt_required": True, "logo_position": "top-right",
+        return {"subtitle_mode": "none", "srt_auto_generate": False,
+                "srt_required": False, "srt_object_key": None,
+                "logo_position": "top-right",
                 "orientation": "landscape", "template_enabled": False,
                 "template_asset_id": None, "template_interval_s": 600,
-                "background_source": bg_src}
+                "background_source": bg_src, "normalize_audio": False}
     d = dict(row)
     if "background_source" not in d or not d["background_source"]:
         d["background_source"] = audio_repo.get_background_source(pipeline_id)
+    # Subtitles are disabled across all audio pipelines
+    d["subtitle_mode"] = "none"
+    d["srt_auto_generate"] = False
+    d["srt_required"] = False
+    d["srt_object_key"] = None
     return d
 
 

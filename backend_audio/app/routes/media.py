@@ -12,7 +12,6 @@ router = APIRouter(prefix="/api/audio", tags=["audio-media"])
 ALLOWED = {
     "background": {"image/gif", "video/mp4", "image/jpeg", "image/png"},
     "logo": {"image/png", "image/svg+xml", "image/jpeg"},
-    "srt": {"application/x-subrip", "text/plain"},
     "template": {"video/mp4", "video/quicktime"},
 }
 MAX_UPLOAD_BYTES = 300 * 1024 * 1024
@@ -48,7 +47,7 @@ async def upload_media(pipeline_id: str, kind: str = Form("background"),
     if pipe_repo.get_pipeline(pipeline_id) is None:
         return _err(404, "PIPELINE_NOT_FOUND", "Pipeline không tồn tại.")
     if kind not in ALLOWED:
-        return _err(400, "BAD_KIND", "kind must be background, logo or srt.")
+        return _err(400, "BAD_KIND", "kind must be background, logo or template.")
     from pathlib import Path
     from tempfile import TemporaryDirectory
 

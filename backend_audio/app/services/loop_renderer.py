@@ -165,3 +165,46 @@ def make_preview_clip(source: Path, dest: Path, seconds: int = 15) -> Path:
     if proc.returncode != 0:
         raise RenderError("PREVIEW_FAILED", (proc.stderr or "")[-300:])
     return dest
+
+
+def fast_mux_loop_video(
+    *,
+    normalized_video: Path,
+    audio: Path,
+    output: Path,
+    duration: float,
+) -> Path:
+    """Stream-copy normalized video loop and audio into an MP4 container.
+
+    Zero re-encoding. Completes in ~1-2 seconds regardless of audio duration.
+    """
+    if duration <= 0:
+        raise RenderError("BAD_DURATION", "Audio duration must be positive.")
+    if not normalized_video.exists() or normalized_video.stat().st_size == 0:
+        raise RenderError("NORMALIZED_VIDEO_MISSING", "Normalized video file is missing or empty.")
+    if not audio.exists() or audio.stat().st_size == 0:
+        raise RenderError("AUDIO_FILE_MISSING", "Audio file is missing or empty.")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-v", "error", "-y",
+        "-fflags", "+genpts",
+        "-stream_loop", "-1", "-i", str(normalized_video),
+        "-i", str(audio),
+        "-c:v", "copy",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        "-shortest",
+        "-avoid_negative_ts", "make_zero",
+        str(output),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+    except subprocess.TimeoutExpired:
+        raise RenderError("FAST_MUX_TIMEOUT", "Fast mux timed out.")
+    if proc.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+        raise RenderError("FAST_MUX_FAILED", (proc.stderr or "")[-500:])
+
+    logger.info("fast muxed %s (%.1fs target)", output.name, duration)
+    return output
+

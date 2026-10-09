@@ -229,7 +229,7 @@ function Media({ pipeline }: { pipeline: AudioPipelineDto }) {
     <div className="space-y-3">
       <Card>
         <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
-          Upload media (GIF/MP4 nền, logo PNG/SVG, SRT)
+          Upload media (GIF/MP4 nền, logo PNG/SVG, Template overlay)
         </p>
         <div className="mt-2 flex flex-col gap-2 sm:flex-row">
           <select
@@ -238,7 +238,6 @@ function Media({ pipeline }: { pipeline: AudioPipelineDto }) {
           >
             <option value="background">Background</option>
             <option value="logo">Logo</option>
-            <option value="srt">SRT có sẵn</option>
             <option value="template">Template overlay</option>
           </select>
           <label
@@ -315,24 +314,11 @@ function Processing({ pipeline }: { pipeline: AudioPipelineDto }) {
   return (
     <Card>
       <div className="space-y-3">
-        <div>
-          <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">Phụ đề</p>
-          <div className="mt-2 grid grid-cols-3 gap-2">
-            {[["none", "Không"], ["youtube_captions", "YT Captions"], ["hardsub", "Hardsub"]].map(([v, l]) => (
-              <button key={v} type="button" onClick={() => set("subtitle_mode", v)}
-                className={`min-h-[44px] rounded-xl border px-2 text-xs font-bold ${
-                  form.subtitle_mode === v ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-200 text-slate-600"
-                }`}>{l}</button>
-            ))}
-          </div>
-        </div>
-        {[["srt_auto_generate", "Tự tạo SRT (JianYing)"], ["srt_required", "SRT bắt buộc"], ["normalize_audio", "Chuẩn hóa âm lượng"]].map(([k, l]) => (
-          <label key={k} className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" checked={!!form[k]} onChange={(e) => set(k, e.target.checked)}
-              className="h-4 w-4 rounded border-slate-300 text-indigo-600" />
-            {l}
-          </label>
-        ))}
+        <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" checked={!!form.normalize_audio} onChange={(e) => set("normalize_audio", e.target.checked)}
+            className="h-4 w-4 rounded border-slate-300 text-indigo-600" />
+          Chuẩn hóa âm lượng
+        </label>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div>
             <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">Khung hình</p>
