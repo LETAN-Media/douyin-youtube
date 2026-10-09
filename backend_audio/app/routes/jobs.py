@@ -108,6 +108,7 @@ class ProcessingUpdate(BaseModel):
     template_enabled: bool | None = None
     template_asset_id: str | None = None
     template_interval_s: float | None = None
+    background_source: str | None = None
 
 
 @router.put("/pipelines/{pipeline_id}/processing-settings")
@@ -126,6 +127,9 @@ async def update_processing(pipeline_id: str, body: ProcessingUpdate,
     if "orientation" in data and data["orientation"] not in ("landscape",
                                                              "portrait"):
         return _err(400, "BAD_ORIENTATION", "orientation không hợp lệ.")
+    if "background_source" in data and data["background_source"] not in (
+            "background", "template"):
+        return _err(400, "BAD_BACKGROUND_SOURCE", "background_source phải là 'background' hoặc 'template'.")
     current = _processing_settings(pipeline_id)
     merged = {**current, **data}
     client = get_client()
@@ -133,8 +137,8 @@ async def update_processing(pipeline_id: str, body: ProcessingUpdate,
         "INSERT INTO audio_processing_settings (pipeline_id, subtitle_mode, "
         "srt_auto_generate, srt_required, srt_object_key, orientation, "
         "logo_position, normalize_audio, template_enabled, template_asset_id, "
-        "template_interval_s, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "template_interval_s, background_source, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(pipeline_id) DO UPDATE SET subtitle_mode=excluded.subtitle_mode, "
         "srt_auto_generate=excluded.srt_auto_generate, "
         "srt_required=excluded.srt_required, "
@@ -145,6 +149,7 @@ async def update_processing(pipeline_id: str, body: ProcessingUpdate,
         "template_enabled=excluded.template_enabled, "
         "template_asset_id=excluded.template_asset_id, "
         "template_interval_s=excluded.template_interval_s, "
+        "background_source=excluded.background_source, "
         "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         (pipeline_id, merged.get("subtitle_mode", "youtube_captions"),
          1 if merged.get("srt_auto_generate", True) else 0,
@@ -154,6 +159,7 @@ async def update_processing(pipeline_id: str, body: ProcessingUpdate,
          1 if merged.get("normalize_audio", False) else 0,
          1 if merged.get("template_enabled", False) else 0,
          merged.get("template_asset_id"),
-         float(merged.get("template_interval_s") or 600), now_iso()))
+         float(merged.get("template_interval_s") or 600),
+         merged.get("background_source", "background"), now_iso()))
     client.commit()
     return _processing_settings(pipeline_id)

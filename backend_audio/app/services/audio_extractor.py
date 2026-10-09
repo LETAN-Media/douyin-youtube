@@ -46,6 +46,41 @@ def probe_media(path: Path) -> dict:
     }
 
 
+def probe_video(path: Path) -> dict:
+    """ffprobe: video streams, duration, width, height. Raises AudioError on failure."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-show_streams", "-show_format", str(path)],
+            capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise AudioError("FFMPEG_MISSING", "ffprobe is not installed.")
+    except subprocess.TimeoutExpired:
+        raise AudioError("PROBE_TIMEOUT", "ffprobe timed out.")
+    if proc.returncode != 0:
+        raise AudioError("PROBE_FAILED", (proc.stderr or "")[:300])
+    try:
+        info = json.loads(proc.stdout or "{}")
+    except Exception:
+        raise AudioError("PROBE_FAILED", "ffprobe returned invalid JSON.")
+    streams = info.get("streams") or []
+    video = [s for s in streams if s.get("codec_type") == "video"]
+    if not video:
+        raise AudioError("NO_VIDEO_STREAM", "File has no video stream.")
+    duration = float((info.get("format") or {}).get("duration") or 0)
+    if duration <= 0 and video[0].get("duration"):
+        try:
+            duration = float(video[0]["duration"])
+        except ValueError:
+            pass
+    return {
+        "duration": duration,
+        "width": video[0].get("width"),
+        "height": video[0].get("height"),
+        "video_codec": video[0].get("codec_name"),
+    }
+
+
 def extract_audio(source: Path, dest: Path, normalize: bool = False,
                   threads: int = 2) -> Path:
     """Extract audio to .m4a: AAC stream-copy when possible, else AAC transcode.

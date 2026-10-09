@@ -158,16 +158,26 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
         logger.warning("job %s: could not delete source.mp4: %s", job_id, exc)
 
     # ---- background selection ----
-    bg_asset = audio_repo.pick_random_background(pipeline_id)
-    bg_local = job_dir / "background.mp4"
+    bg_asset = audio_repo.pick_background_asset(pipeline_id)
     if bg_asset is None:
         return _fail(job_id, "NO_BACKGROUND",
-                     "Pipeline media library has no enabled background.",
+                     "Pipeline media library has no enabled background or template.",
                      "rendering")
+    bg_suffix = Path(bg_asset.get("file_name") or bg_asset.get("object_key") or "bg.mp4").suffix or ".mp4"
+    bg_local = job_dir / f"background{bg_suffix}"
     try:
         r2_storage.download_file(bg_asset["object_key"], bg_local)
     except r2_storage.R2Error as exc:
-        return _fail(job_id, exc.code, str(exc), "rendering")
+        err_code = "BACKGROUND_R2_OBJECT_MISSING" if ("DOWNLOAD_FAILED" in exc.code or "NOT_FOUND" in exc.code or "404" in str(exc)) else exc.code
+        return _fail(job_id, err_code, str(exc), "rendering")
+    try:
+        bg_probe = audio_extractor.probe_video(bg_local)
+        if bg_probe.get("duration", 0) <= 0:
+            return _fail(job_id, "BACKGROUND_INVALID_MEDIA",
+                         "Background video has invalid duration.", "rendering")
+    except audio_extractor.AudioError as exc:
+        return _fail(job_id, "BACKGROUND_INVALID_MEDIA",
+                     f"Background video invalid: {exc}", "rendering")
     jobs_repo.update_job(job_id, background_asset_id=bg_asset["id"])
 
     # ---- subtitles ----
@@ -207,12 +217,19 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
                     picked = asset
                     break
         if picked is None:
-            picked = audio_repo.pick_random_template(pipeline_id)
+            picked = audio_repo.pick_random_template(
+                pipeline_id, avoid_asset_id=bg_asset["id"] if bg_asset else None)
+        # Requirement 6: Nếu cùng asset đã được chọn làm nền thì không áp dụng asset đó thêm một lần như overlay chu kỳ 600 giây
+        if picked and bg_asset and picked["id"] == bg_asset["id"]:
+            logger.info("job %s: template asset %s matches background asset, skipping overlay",
+                        job_id, picked["id"])
+            picked = None
         if picked is not None:
             try:
-                template_local = job_dir / "template.mp4"
+                t_suffix = Path(picked.get("file_name") or picked.get("object_key") or "tmpl.mp4").suffix or ".mp4"
+                template_local = job_dir / f"template{t_suffix}"
                 r2_storage.download_file(picked["object_key"], template_local)
-                template_len = audio_extractor.probe_media(
+                template_len = audio_extractor.probe_video(
                     template_local)["duration"]
                 jobs_repo.update_job(job_id, template_asset_id=picked["id"])
                 jobs_repo.add_event(job_id, "rendering", "template",
@@ -331,12 +348,12 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
 
     # ---- cleanup (best-effort; never touches R2 library or stored SRT) ----
     try:
-        for name in ("source.mp4", "audio.m4a", "rendered.mp4",
-                     "background.mp4", "template.mp4", "logo.png", "subs.srt"):
-            try:
-                (job_dir / name).unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning("cleanup %s: %s", name, type(exc).__name__)
+        for p in job_dir.glob("*"):
+            if p.is_file():
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("cleanup %s: %s", p.name, type(exc).__name__)
         chunks = job_dir / "chunks"
         if chunks.exists():
             shutil.rmtree(chunks, ignore_errors=True)
@@ -423,16 +440,22 @@ def resolve_initial_metadata(job: dict[str, Any], resolved: dict[str, Any],
 
 def _processing_settings(pipeline_id: str) -> dict[str, Any]:
     from app.db.client import get_client
+    from app.db.repositories import audio as audio_repo
 
     row = get_client().execute(
         "SELECT * FROM audio_processing_settings WHERE pipeline_id = ?",
         (pipeline_id,)).fetchone()
     if row is None:
+        bg_src = audio_repo.get_background_source(pipeline_id)
         return {"subtitle_mode": "youtube_captions", "srt_auto_generate": True,
                 "srt_required": True, "logo_position": "top-right",
                 "orientation": "landscape", "template_enabled": False,
-                "template_asset_id": None, "template_interval_s": 600}
-    return dict(row)
+                "template_asset_id": None, "template_interval_s": 600,
+                "background_source": bg_src}
+    d = dict(row)
+    if "background_source" not in d or not d["background_source"]:
+        d["background_source"] = audio_repo.get_background_source(pipeline_id)
+    return d
 
 
 def _channel_name(pipeline_id: str) -> str | None:

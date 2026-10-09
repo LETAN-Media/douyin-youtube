@@ -263,6 +263,12 @@ MIGRATIONS: list[tuple[str, list[str]]] = [
             "ALTER TABLE audio_pipelines ADD COLUMN pipeline_type TEXT NOT NULL DEFAULT 'auto'",
         ],
     ),
+    (
+        "audio_009",
+        [
+            "ALTER TABLE audio_processing_settings ADD COLUMN background_source TEXT NOT NULL DEFAULT 'background'",
+        ],
+    ),
 ]
 
 

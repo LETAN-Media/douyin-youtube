@@ -142,23 +142,70 @@ def delete_asset(asset_id: str) -> dict | None:
     return None
 
 
-def pick_random_background(pipeline_id: str,
-                           avoid_asset_id: str | None = None) -> dict | None:
-    """Random enabled background, avoiding immediate repeat when possible."""
+def get_background_source(pipeline_id: str) -> str:
+    """Determines background source kind: 'background' or 'template'.
+    - If explicitly configured in audio_processing_settings.background_source, respect it.
+    - For Audio Truyện (apl_fb648f456bc0 or name.casefold() == 'audio truyện'):
+      prefers 'template' if templates exist or as default; falls back to 'background' if backgrounds exist.
+    - For all other pipelines, preserves legacy default 'background'.
+    """
+    client = get_client()
+    try:
+        row = client.execute(
+            "SELECT background_source FROM audio_processing_settings WHERE pipeline_id = ?",
+            (pipeline_id,)).fetchone()
+        if row and row.get("background_source") in ("template", "background"):
+            return row["background_source"]
+    except Exception:
+        pass
+
+    from app.db.repositories import pipelines as pipe_repo
+
+    p = pipe_repo.get_pipeline(pipeline_id)
+    if p:
+        p_name = (p.get("name") or "").strip().casefold()
+        if p.get("id") == "apl_fb648f456bc0" or p_name == "audio truyện":
+            templates = [a for a in list_assets(pipeline_id, "template") if a.get("enabled")]
+            if templates:
+                return "template"
+            bgs = [a for a in list_assets(pipeline_id, "background") if a.get("enabled")]
+            if bgs:
+                return "background"
+            return "template"
+    return "background"
+
+
+def get_available_background_assets(pipeline_id: str) -> list[dict[str, Any]]:
+    """Returns list of enabled background candidate assets for the pipeline."""
+    kind = get_background_source(pipeline_id)
+    return [a for a in list_assets(pipeline_id, kind) if a.get("enabled")]
+
+
+def pick_background_asset(pipeline_id: str,
+                          avoid_asset_id: str | None = None) -> dict | None:
+    """Random enabled background (or template depending on pipeline configuration)."""
     import random
 
-    assets = [a for a in list_assets(pipeline_id, "background") if a.get("enabled")]
+    assets = get_available_background_assets(pipeline_id)
     if not assets:
         return None
     pool = [a for a in assets if a["id"] != avoid_asset_id] or assets
     return random.choice(pool)
 
 
-def pick_random_template(pipeline_id: str) -> dict | None:
-    """Random enabled template (auto mode). ~10 per pipeline, one per job."""
+def pick_random_background(pipeline_id: str,
+                           avoid_asset_id: str | None = None) -> dict | None:
+    """Backward-compatible alias for pick_background_asset."""
+    return pick_background_asset(pipeline_id, avoid_asset_id)
+
+
+def pick_random_template(pipeline_id: str,
+                         avoid_asset_id: str | None = None) -> dict | None:
+    """Random enabled template (auto mode). Supports avoid_asset_id to exclude background."""
     import random
 
-    assets = [a for a in list_assets(pipeline_id, "template") if a.get("enabled")]
+    assets = [a for a in list_assets(pipeline_id, "template")
+              if a.get("enabled") and a["id"] != avoid_asset_id]
     if not assets:
         return None
     return random.choice(assets)

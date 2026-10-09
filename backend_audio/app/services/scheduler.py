@@ -69,11 +69,26 @@ def pipeline_due(pipeline_id: str) -> tuple[bool, str]:
         if not connected:
             return False, "no connected destination"
 
-    # Requirement 3: Resource check before job creation
-    backgrounds = [a for a in audio_repo.list_assets(pipeline_id, "background")
-                   if a.get("enabled")]
+    # Resource check before job creation
+    backgrounds = audio_repo.get_available_background_assets(pipeline_id)
     if not backgrounds:
         return False, "NO_BACKGROUND"
+
+    from app.services import r2_storage
+
+    has_valid_media = False
+    for bg in backgrounds:
+        key = bg.get("object_key")
+        if not key or (bg.get("bytes") is not None and bg.get("bytes") <= 0):
+            continue
+        try:
+            if r2_storage.object_exists(key):
+                has_valid_media = True
+                break
+        except Exception:
+            continue
+    if not has_valid_media:
+        return False, "BACKGROUND_R2_OBJECT_MISSING"
 
     now_utc = datetime.now(timezone.utc)
     now_utc_str = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")

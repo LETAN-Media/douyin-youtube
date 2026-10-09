@@ -60,6 +60,29 @@ def upload_file(local_path: Path, object_key: str,
     return {"object_key": object_key, "bytes": local_path.stat().st_size}
 
 
+def object_exists(object_key: str) -> bool:
+    from app.config import settings
+
+    if not settings.r2_configured():
+        return bool(object_key)
+    try:
+        _client().head_object(Bucket=_bucket(), Key=object_key)
+        return True
+    except Exception:
+        return False
+
+
+def get_object_metadata(object_key: str) -> dict[str, Any] | None:
+    try:
+        res = _client().head_object(Bucket=_bucket(), Key=object_key)
+        return {
+            "content_length": res.get("ContentLength", 0),
+            "content_type": res.get("ContentType", ""),
+        }
+    except Exception:
+        return None
+
+
 def download_file(object_key: str, dest: Path) -> Path:
     client = _client()
     dest.parent.mkdir(parents=True, exist_ok=True)

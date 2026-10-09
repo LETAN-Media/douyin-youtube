@@ -14,6 +14,13 @@ from app.main import create_app
 ADMIN = {"X-Admin-Token": "test_admin_token"}
 
 
+@pytest.fixture(autouse=True)
+def mock_r2_exists(monkeypatch):
+    from app.services import r2_storage
+
+    monkeypatch.setattr(r2_storage, "object_exists", lambda k: bool(k and not k.startswith("missing_")))
+
+
 @pytest.fixture()
 def client(db):
     return TestClient(create_app())
