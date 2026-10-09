@@ -111,17 +111,20 @@ def job_events(job_id: str) -> list[dict[str, Any]]:
 
 
 def recover_stale_running(lease_grace_seconds: int = 900) -> int:
-    """Jobs stuck running past lease expiry (e.g. restart) go back to queued."""
+    """Jobs stuck running past lease expiry or inactive for > 10m go back to queued."""
     client = get_client()
-    # lease check done in python for portability
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale_thresh = (now_dt - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     count = 0
     for r in client.execute(
-            "SELECT id, lease_expires_at FROM audio_processing_jobs "
+            "SELECT id, lease_expires_at, updated_at FROM audio_processing_jobs "
             "WHERE status = 'running'").fetchall():
-        if not r["lease_expires_at"] or r["lease_expires_at"] < now:
+        is_expired = not r["lease_expires_at"] or r["lease_expires_at"] < now
+        is_stale = r.get("updated_at") and r["updated_at"] < stale_thresh
+        if is_expired or is_stale:
             client.execute(
                 "UPDATE audio_processing_jobs SET status = 'queued', stage = 'requeued', "
                 "lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?",

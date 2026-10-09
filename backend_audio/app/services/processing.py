@@ -145,10 +145,11 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
     # ---- extracting audio ----
     _step(job_id, "extracting_audio", "running", 25)
     try:
-        info = audio_extractor.probe_media(source_mp4)
+        info = await asyncio.to_thread(audio_extractor.probe_media, source_mp4)
         audio_path = job_dir / "audio.m4a"
-        audio_extractor.extract_audio(source_mp4, audio_path, threads=threads)
-        duration = audio_extractor.probe_media(audio_path)["duration"]
+        await asyncio.to_thread(audio_extractor.extract_audio, source_mp4, audio_path, threads=threads)
+        probe_res = await asyncio.to_thread(audio_extractor.probe_media, audio_path)
+        duration = probe_res["duration"]
     except audio_extractor.AudioError as exc:
         return _fail(job_id, exc.code, str(exc), "extracting_audio")
     # Source MP4 is no longer needed (audio.m4a feeds render/ASR) — free disk.
@@ -258,7 +259,8 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
                      "subtitle_mode=hardsub but no SRT was produced or provided.",
                      "rendering")
     try:
-        loop_renderer.build_loop_video(
+        render_task = asyncio.to_thread(
+            loop_renderer.build_loop_video,
             background=bg_local, audio=audio_path, output=final_mp4,
             duration=duration, logo=logo_local,
             logo_position=proc_settings.get("logo_position", "top-right"),
@@ -270,6 +272,17 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
             template_duration_s=template_len,
             srt=srt_local if hardsub else None,
             hardsub=hardsub)
+
+        async def _heartbeat():
+            while True:
+                await asyncio.sleep(20)
+                jobs_repo.update_job(job_id, stage="rendering:running")
+
+        hb_task = asyncio.create_task(_heartbeat())
+        try:
+            await render_task
+        finally:
+            hb_task.cancel()
     except loop_renderer.RenderError as exc:
         return _fail(job_id, exc.code, str(exc), "rendering")
 
