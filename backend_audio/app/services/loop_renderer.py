@@ -81,9 +81,8 @@ def build_loop_video(
     if template_idx is not None:
         marks = _template_marks(duration, template_interval_s,
                                 template_duration_s or 30.0)
-        parts.append(
-            f"[{template_idx}:v]scale={size},fps={fps},format=yuv420p[tmpl]")
         if marks:
+            parts.append(f"[{template_idx}:v]scale={size},fps={fps},format=yuv420p[tmpl]")
             parts.append(f"[{current}][tmpl]overlay=0:0:enable='{marks}'[tbg]")
             current = "tbg"
         else:

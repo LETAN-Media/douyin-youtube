@@ -185,7 +185,7 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
 
     # Template periodic overlay check (only if explicitly enabled AND distinct from background)
     periodic_overlay_asset = None
-    if proc_settings.get("template_enabled"):
+    if proc_settings.get("template_enabled") and (not bg_asset or bg_asset.get("kind") != "template"):
         manual_tid = proc_settings.get("template_asset_id")
         picked_overlay = None
         if manual_tid:
