@@ -9,7 +9,11 @@ export function PipelineFlow({ pipeline }: { pipeline: AudioPipelineDto }) {
 
   useEffect(() => {
     let mounted = true;
+    let isFetching = false;
+
     const fetchStatus = async () => {
+      if (isFetching) return;
+      isFetching = true;
       try {
         const res = await fetch(`/api/audio/pipelines/${encodeURIComponent(pipeline.id)}/flow-status`);
         if (!res.ok) throw new Error("Failed");
@@ -20,6 +24,8 @@ export function PipelineFlow({ pipeline }: { pipeline: AudioPipelineDto }) {
         }
       } catch (err) {
         if (mounted) setError(true);
+      } finally {
+        isFetching = false;
       }
     };
 
