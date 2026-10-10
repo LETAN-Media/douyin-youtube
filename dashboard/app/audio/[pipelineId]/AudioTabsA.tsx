@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { AudioPipelineDto } from "@/lib/audio-api";
+import { PipelineFlow } from "./PipelineFlow";
 
 function Card({ children }: { children: React.ReactNode }) {
   return (
@@ -19,7 +20,7 @@ function Overview({ pipeline }: { pipeline: AudioPipelineDto }) {
     ["Auto publish", pipeline.auto_publish ? "ON" : "OFF"],
   ];
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <Card>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {stats.map(([label, value]) => (
@@ -39,6 +40,9 @@ function Overview({ pipeline }: { pipeline: AudioPipelineDto }) {
           </p>
         ) : null}
       </Card>
+
+      {/* Flow Hoạt Động */}
+      <PipelineFlow pipeline={pipeline} />
     </div>
   );
 }

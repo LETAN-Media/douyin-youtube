@@ -75,3 +75,177 @@ async def delete_pipeline(pipeline_id: str, _: None = Depends(require_admin)):
         return _err(404, "PIPELINE_NOT_FOUND", "Pipeline không tồn tại.")
     repo.delete_pipeline(pipeline_id)
     return {"deleted": True}
+
+
+@router.get("/pipelines/{pipeline_id}/flow-status")
+async def get_flow_status(pipeline_id: str, _: None = Depends(require_admin)):
+    from app.db.client import get_client
+    
+    pipe = repo.get_pipeline(pipeline_id)
+    if not pipe:
+        return _err(404, "PIPELINE_NOT_FOUND", "Pipeline không tồn tại.")
+        
+    client = get_client()
+    stats = repo.pipeline_stats(pipeline_id)
+    
+    # Check if worker is alive
+    import sys
+    from app.workers.audio_worker import status as worker_status
+    worker_alive = worker_status().get("running", False) if "app.workers.audio_worker" in sys.modules else False
+
+    # 1. Current Job
+    curr_job = None
+    curr_job_row = client.execute(
+        "SELECT id, status, stage, progress_percent, youtube_video_id, inventory_id, manual_url, updated_at "
+        "FROM audio_processing_jobs WHERE pipeline_id = ? AND status IN ('queued', 'running') "
+        "ORDER BY updated_at DESC LIMIT 1", 
+        (pipeline_id,)
+    ).fetchone()
+    
+    if curr_job_row:
+        c = dict(curr_job_row)
+        caption = "Unknown"
+        video_id = "Unknown"
+        if c.get("inventory_id"):
+            inv = client.execute("SELECT video_id, caption FROM audio_inventory WHERE id = ?", (c["inventory_id"],)).fetchone()
+            if inv:
+                caption = inv["caption"] or "Không có caption"
+                video_id = inv["video_id"]
+        elif c.get("manual_url"):
+            video_id = c["manual_url"]
+            caption = "Manual Job"
+            
+        curr_job = {
+            "id": c["id"],
+            "stage": c["stage"],
+            "status": c["status"],
+            "progress_percent": c["progress_percent"] or 0,
+            "video_id": video_id,
+            "caption": caption[:50] + "..." if len(caption) > 50 else caption,
+            "updated_at": c["updated_at"]
+        }
+
+    # 2. Steps logic
+    # Default steps for auto pipeline
+    steps = [
+        {"key": "source", "label": "Nguồn Facebook", "state": "idle"},
+        {"key": "queue", "label": "Hàng chờ", "state": "idle"},
+        {"key": "download", "label": "Đang tải", "state": "idle"},
+        {"key": "extract", "label": "Tách audio", "state": "idle"},
+        {"key": "template", "label": "Chọn template", "state": "idle"},
+        {"key": "render", "label": "Fast Mux / Render", "state": "idle"},
+        {"key": "ai", "label": "AI Metadata", "state": "idle"},
+        {"key": "upload", "label": "Upload YouTube", "state": "idle"},
+        {"key": "done", "label": "Hoàn thành", "state": "idle"}
+    ]
+    
+    # If it's manual, we remove 'source' and 'queue'
+    if pipe.get("pipeline_type") == "manual":
+        steps = [s for s in steps if s["key"] not in ("source", "queue")]
+        
+    # Evaluate step states
+    if pipe.get("pipeline_type") != "manual":
+        if stats.get("total_sources", 0) > 0:
+            next(s for s in steps if s["key"] == "source")["state"] = "done"
+        if stats.get("pending_videos", 0) > 0:
+            next(s for s in steps if s["key"] == "queue")["state"] = "done"
+            
+    # Update current step based on job stage
+    if curr_job:
+        stage_str = curr_job.get("stage", "") or ""
+        
+        mapping = {
+            "resolving": "download",
+            "downloading": "download",
+            "extracting": "extract",
+            "rendering": "render",
+            "ai_metadata": "ai",
+            "uploading": "upload",
+            "completed": "done"
+        }
+        
+        current_step_key = None
+        for k, v in mapping.items():
+            if k in stage_str:
+                current_step_key = v
+                break
+        
+        if not current_step_key:
+            if "queued" in stage_str or "claimed" in stage_str:
+                current_step_key = "download" if pipe.get("pipeline_type") == "manual" else "queue"
+            else:
+                current_step_key = "download"
+                
+        passed = True
+        for s in steps:
+            if s["key"] == current_step_key:
+                s["state"] = "running"
+                passed = False
+            elif passed:
+                s["state"] = "done"
+            else:
+                s["state"] = "idle"
+                
+    # 3. Queue preview
+    queue = []
+    if pipe.get("pipeline_type") != "manual":
+        q_rows = client.execute(
+            """SELECT i.id as inventory_id, i.video_id, i.caption, i.status, s.label as source_label
+               FROM audio_inventory i 
+               LEFT JOIN audio_sources s ON i.source_id = s.id
+               WHERE i.pipeline_id = ? AND i.status IN ('available', 'reserved', 'processing')
+               ORDER BY CASE i.status WHEN 'processing' THEN 1 WHEN 'reserved' THEN 2 ELSE 3 END, i.created_at ASC
+               LIMIT 10""",
+            (pipeline_id,)
+        ).fetchall()
+        for row in q_rows:
+            r = dict(row)
+            cap = r.get("caption") or ""
+            queue.append({
+                "inventory_id": r["inventory_id"],
+                "video_id": r["video_id"],
+                "caption": cap[:50] + "..." if len(cap) > 50 else cap,
+                "status": r["status"],
+                "source_label": r.get("source_label") or "Manual"
+            })
+            
+    # 4. Recent failures
+    f_rows = client.execute(
+        "SELECT id as job_id, video_id, last_error_code as error_code, updated_at "
+        "FROM audio_processing_jobs WHERE pipeline_id = ? AND status = 'failed' "
+        "ORDER BY updated_at DESC LIMIT 5",
+        (pipeline_id,)
+    ).fetchall()
+    recent_failures = []
+    for r in f_rows:
+        dr = dict(r)
+        vid = dr.get("video_id") or "Unknown"
+        if not dr.get("video_id"):
+             inv_id = client.execute("SELECT inventory_id FROM audio_processing_jobs WHERE id=?", (dr["job_id"],)).fetchone()
+             if inv_id and inv_id["inventory_id"]:
+                 inv = client.execute("SELECT video_id FROM audio_inventory WHERE id=?", (inv_id["inventory_id"],)).fetchone()
+                 if inv:
+                     vid = inv["video_id"]
+        
+        recent_failures.append({
+            "job_id": dr["job_id"],
+            "video_id": vid,
+            "error_code": dr.get("error_code") or "UNKNOWN",
+            "updated_at": dr["updated_at"]
+        })
+
+    return {
+        "pipeline": pipe,
+        "worker_alive": worker_alive,
+        "current_job": curr_job,
+        "steps": steps,
+        "queue_preview": queue,
+        "recent_failures": recent_failures,
+        "latest_success": stats.get("last_publish"),
+        "counts": {
+            "available": stats.get("pending_videos", 0),
+            "running": stats.get("running_jobs", 0),
+            "failed": stats.get("failed_jobs", 0),
+            "published": stats.get("published_videos", 0)
+        }
+    }
