@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     PHIMTAT_API_BASE_URL: str = "https://api.phimtat.vn/json/snapvideo.json"
     PHIMTAT_REDIRECT_URL: str = "https://api.phimtat.vn/snapvideo/red64.php"
     PHIMTAT_TIMEOUT_SECONDS: int = 60
+    # Snap Video shortcut v8 (Oct 2026) contract. Rollback = "7" via env.
+    PHIMTAT_VER: str = "8"
     FASTSAVER_TIMEOUT: float = 60.0
     FACEBOOK_MEDIA_MAX_BYTES: int = 1_000_000_000
 

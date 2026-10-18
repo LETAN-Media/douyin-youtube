@@ -1,21 +1,28 @@
 """Manual-publish Facebook media resolver (Task 14).
 
-Port of the "Snap Video" Apple Shortcut workflow (iCloud ID
-254e64ee91184f79988aa5099b4dc3d7), audited action-by-action:
+Port of the "Snap Video" Apple Shortcut workflow, audited
+action-by-action against the CURRENT v8 shortcut (Oct 2026):
 
-  GET {base}/json/snapvideo.json?api-key={key}&lang={lang}&ver=7
-      &ask_format=false&show_menu=false&skip_update=true&b64={base64(url)}
+  GET {base}/json/snapvideo.json?api-key={key}&lang={lang}&ver={ver}
+      &ask_format=true&show_menu=true&skip_update={bool}&b64={base64(url)}
+  fetched wrapped through {redirect}/red64.php?url={base64(api_url)}
+  (never the JSON endpoint directly — direct POST/GET returns 405).
 
-Response: {"title", "thumbnail", "source", "medias": {label: file_url}}.
-Entries like "{{open-url}}"/Close/guide images are filtered out; the first
-surviving http(s) URL wins (server-side has no user to pick from a menu).
+Response v8: {"title", "thumbnail", "source", "medias": {label: {"url": ...}}}
+(v7 used plain string values — both shapes are accepted). Entries like
+"{{open-url}}"/"{{open-link}}"/Close/guide/agree-terms are filtered out; the
+first surviving http(s) URL wins (server-side has no user to pick a format
+from a menu). A personal-use terms gate ("✅ Đồng ý" -> agree-terms.php) is
+accepted once in-session (through red64.php) then the resolve is retried;
+an update wall (required_version) maps to a fallback-eligible error.
 
 Used ONLY by manual publish. The auto pipeline keeps using
 facebook_media.py / FastSaver untouched.
 
-Security: the provider API key lives only in MANUAL_FB_PROVIDER_API_KEY
-(env/Northflank). It is never logged, never committed, and never returned
-to the browser. download_url stays server-side only.
+Security: the provider API key lives only in PHIMTAT_API_KEY /
+MANUAL_FB_PROVIDER_API_KEY (env/Northflank). It is never logged, never
+committed, and never returned to the browser. download_url stays
+server-side only.
 """
 
 import base64
@@ -69,7 +76,7 @@ _FALLBACK_ELIGIBLE = frozenset(
     {TIMEOUT, TEMPORARY, RATE_LIMITED, INVALID_RESPONSE, UNSUPPORTED}
 )
 
-# Labels that are UI chrome / guide images, not video files.
+# Labels that are UI chrome / guide images / terms links, not video files.
 _SKIP_LABEL_HINTS = ("close", "guide", "update", "{{open-url}}")
 
 
@@ -126,23 +133,65 @@ def _provider_config() -> tuple[str, str, str, float]:
     return api_base, redirect_url, api_key, timeout
 
 
+def _media_url_of(value: object) -> str | None:
+    """Normalize a medias entry: v8 objects {"url": ..., "ext": ...} and
+    legacy v7 plain strings both reduce to the raw URL string."""
+    if isinstance(value, dict):
+        value = value.get("url")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _is_update_wall(data: object) -> str | None:
+    """Provider demands a newer shortcut/API version (v7 rollback case).
+    Returns a hint for the error message, or None when it is not a wall."""
+    if not isinstance(data, dict):
+        return None
+    labels = data.get("labels")
+    labels_text = " ".join(str(x or "") for x in labels) if isinstance(labels, list) else ""
+    blob = (f"{data.get('title') or ''} {data.get('menu_title') or ''} "
+            f"{labels_text}").lower()
+    if "update shortcuts" in blob or "cập nhật phím tắt" in blob \
+            or "required_version" in data or "update" in data:
+        version = data.get("required_version")
+        return f"ver>={version}" if version is not None else "a newer API version"
+    return None
+
+
+def _find_consent_url(medias: object) -> str | None:
+    """Terms gate: a '✅ Đồng ý/agree' entry pointing at agree-terms.php."""
+    if not isinstance(medias, dict):
+        return None
+    for label, value in medias.items():
+        url = _media_url_of(value)
+        if not url or not url.startswith("http"):
+            continue
+        if "agree-terms.php" in url:
+            return url
+    return None
+
+
 def _pick_media_url(medias: object) -> str | None:
     """The proven client flow: medias["MP4 HD"] first, else any URL with
-    .mp4, else the labeled MP4 entry, else the first surviving http URL."""
+    .mp4, else the labeled MP4 entry, else the first surviving http URL.
+    Accepts v8 {"url": ...} objects and legacy v7 strings."""
     if not isinstance(medias, dict):
         return None
     first_valid: str | None = None
     label_match: str | None = None
-    for label, url in medias.items():
-        if not isinstance(url, str):
+    for label, value in medias.items():
+        url = _media_url_of(value)
+        if not url:
             continue
-        text = url.strip()
+        text = url
         if not text.lower().startswith(("http://", "https://")):
             continue
         lowered_label = str(label or "").lower()
         if any(hint in lowered_label for hint in _SKIP_LABEL_HINTS):
             continue
-        if "{{open-url}}" in text.lower():
+        if "{{open-url}}" in text.lower() or "{{open-link}}" in text.lower() \
+                or "agree-terms.php" in text.lower():
             continue
         if str(label or "") == MP4_HD_LABEL:
             return text
@@ -239,12 +288,17 @@ class ShortcutDerivedFacebookResolver:
         api_key: str,
         timeout: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        version: str | None = None,
     ) -> None:
+        from ..config import settings
+
         self.api_base = api_base
         self.redirect_url = redirect_url
         self._api_key = api_key
         self._timeout = timeout
         self._transport = transport
+        self._version = (version or str(getattr(settings, "PHIMTAT_VER", "8")
+                                        or "8")).strip() or "8"
 
     def _client(self, timeout: float) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -254,50 +308,106 @@ class ShortcutDerivedFacebookResolver:
             follow_redirects=True,
         )
 
+    async def _fetch_wrapped_json(
+        self, client: httpx.AsyncClient, target_url: str
+    ) -> httpx.Response:
+        """GET an arbitrary provider URL wrapped through red64.php, exactly
+        like the shortcut reduces every navigate step to wrapped GETs."""
+        from urllib.parse import quote
+
+        wrapped = base64.b64encode(target_url.encode("utf-8")).decode("ascii")
+        fetch_url = f"{self.redirect_url}?url={quote(wrapped, safe='')}"
+        return await client.get(fetch_url)
+
     async def resolve(self, url: str) -> ManualResolvedMedia:
         if not is_manual_video_url(url):
             raise ManualResolverError(UNSUPPORTED, "Not a supported Facebook video URL.")
-        from urllib.parse import quote
-
         # /share/ links wrap the real URL: unwrap first (iPhone UA), exactly
         # like the proven client flow. Falls back to the original URL.
         target = url.strip()
         if "/share/" in target.lower():
             target = await resolve_share_url(target, transport=self._transport)
         b64url = base64.b64encode(target.encode("utf-8")).decode("ascii")
-        # Build the API URL exactly like the proven client flow, then fetch
+        # Build the API URL exactly like the current shortcut flow, then fetch
         # it wrapped through red64.php (never GET the JSON endpoint directly).
+        # v8 shortcut sends ask_format=true&show_menu=true (verified live).
         api_url = (
             f"{self.api_base}"
-            f"?api-key={self._api_key}&lang=vi&ver=7"
-            f"&ask_format=false&show_menu=false&skip_update=false"
+            f"?api-key={self._api_key}&lang=vi&ver={self._version}"
+            f"&ask_format=true&show_menu=true&skip_update=false"
             f"&b64={b64url}"
         )
-        wrapped = base64.b64encode(api_url.encode("utf-8")).decode("ascii")
-        fetch_url = f"{self.redirect_url}?url={quote(wrapped, safe='')}"
         try:
             async with self._client(self._timeout) as client:
-                resp = await client.get(fetch_url)
+                resp = await self._fetch_wrapped_json(client, api_url)
+                if resp.status_code in (401, 403):
+                    raise ManualResolverError(
+                        AUTH_FAILED, "Manual provider rejected the API key."
+                    )
+                if resp.status_code == 429:
+                    raise ManualResolverError(RATE_LIMITED, "Manual provider rate limited.")
+                if 500 <= resp.status_code <= 599:
+                    raise ManualResolverError(
+                        TEMPORARY, f"Manual provider error ({resp.status_code})."
+                    )
+                if resp.status_code != 200:
+                    raise ManualResolverError(
+                        INVALID_RESPONSE, f"Manual provider returned {resp.status_code}."
+                    )
+                try:
+                    data = resp.json()
+                except ValueError:
+                    raise ManualResolverError(INVALID_RESPONSE, "Manual provider returned invalid JSON.")
+                if not isinstance(data, dict):
+                    raise ManualResolverError(INVALID_RESPONSE, "Manual provider response is not an object.")
+                # One-shot terms gate: accept then retry once, same session.
+                consent = _find_consent_url(data.get("medias"))
+                if consent is not None and _pick_media_url(data.get("medias")) is None:
+                    consent_resp = await self._fetch_wrapped_json(client, consent)
+                    if consent_resp.status_code != 200:
+                        raise ManualResolverError(
+                            TEMPORARY, "Manual provider terms gate failed."
+                        )
+                    acknowledged = False
+                    try:
+                        ack = consent_resp.json()
+                        acknowledged = isinstance(ack, dict) and (
+                            ack.get("agreed") is True or ack.get("ok") is True
+                        )
+                    except ValueError:
+                        acknowledged = False
+                    if not acknowledged:
+                        raise ManualResolverError(
+                            TEMPORARY, "Manual provider terms gate not acknowledged."
+                        )
+                    data = await self._fetch_wrapped_json(client, api_url)
+                    if data.status_code in (401, 403):
+                        raise ManualResolverError(AUTH_FAILED, "Manual provider rejected the API key.")
+                    if data.status_code == 429:
+                        raise ManualResolverError(RATE_LIMITED, "Manual provider rate limited.")
+                    if 500 <= data.status_code <= 599:
+                        raise ManualResolverError(TEMPORARY, f"Manual provider error ({data.status_code}).")
+                    if data.status_code != 200:
+                        raise ManualResolverError(
+                            INVALID_RESPONSE, f"Manual provider returned {data.status_code}."
+                        )
+                    try:
+                        data = data.json()
+                    except ValueError:
+                        raise ManualResolverError(INVALID_RESPONSE, "Manual provider returned invalid JSON.")
+                    if not isinstance(data, dict):
+                        raise ManualResolverError(INVALID_RESPONSE, "Manual provider response is not an object.")
         except httpx.TimeoutException:
             raise ManualResolverError(TIMEOUT, "Manual provider resolve timed out.")
         except (httpx.ConnectError, httpx.NetworkError) as exc:
             raise ManualResolverError(TEMPORARY, f"Manual provider unreachable: {type(exc).__name__}.")
-        if resp.status_code in (401, 403):
-            raise ManualResolverError(AUTH_FAILED, "Manual provider rejected the API key.")
-        if resp.status_code == 429:
-            raise ManualResolverError(RATE_LIMITED, "Manual provider rate limited.")
-        if 500 <= resp.status_code <= 599:
-            raise ManualResolverError(TEMPORARY, f"Manual provider error ({resp.status_code}).")
-        if resp.status_code != 200:
+        wall = _is_update_wall(data)
+        if wall:
+            # Provider demands a newer shortcut/API version → fallback-eligible.
             raise ManualResolverError(
-                INVALID_RESPONSE, f"Manual provider returned {resp.status_code}."
+                UNSUPPORTED,
+                f"Provider answered an update wall ({wall}), not media.",
             )
-        try:
-            data = resp.json()
-        except ValueError:
-            raise ManualResolverError(INVALID_RESPONSE, "Manual provider returned invalid JSON.")
-        if not isinstance(data, dict):
-            raise ManualResolverError(INVALID_RESPONSE, "Manual provider response is not an object.")
         media_url = _pick_media_url(data.get("medias"))
         if not media_url:
             raise ManualResolverError(

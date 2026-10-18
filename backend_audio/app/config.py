@@ -43,15 +43,19 @@ class Settings(BaseSettings):
     AUDIO_FASTSAVER_BASE_URL: str | None = None
     AUDIO_FASTSAVER_API_KEY: str | None = None
 
-    # PHIMTAT resolver. Verified live: snapvideo.json answers ONLY the proven
-    # b64 + red64.php wrapped flow; direct POST/GET returns 405 or a static
-    # shortcut menu and must NOT be used.
+    # PHIMTAT resolver. Verified live (Snap Video shortcut v8, Oct 2026):
+    # snapvideo.json answers ONLY the b64 + red64.php wrapped flow; direct
+    # POST/GET returns 405 or a static shortcut menu and must NOT be used.
+    # ver=8 changed medias values to {"url": ...} objects and added a
+    # personal-use terms gate; ver>=7 replies an update wall (required_version).
     PHIMTAT_ENABLED: bool = True
     PHIMTAT_API_KEY: str | None = None
     PHIMTAT_API_BASE_URL: str = "https://api.phimtat.vn/json/snapvideo.json"
     PHIMTAT_REDIRECT_URL: str = "https://api.phimtat.vn/snapvideo/red64.php"
     PHIMTAT_TIMEOUT_SECONDS: float = 60.0
     PHIMTAT_MAX_BYTES: int = 500 * 1024 * 1024
+    PHIMTAT_VER: str = "8"          # rollback = "7" via env, no code change
+    PHIMTAT_PREFER_SD: bool = True  # audio pipeline: SD is enough, smaller fetch
 
     # ToolNet OpenAI-compatible AI (read-only from env, never logged).
     TOOLNET_BASE_URL: str | None = None

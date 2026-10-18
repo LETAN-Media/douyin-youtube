@@ -310,6 +310,20 @@ def test_provider_missing_credentials(db, client, monkeypatch):
 
 # ---- P1-06/07 resolver + download ----
 
+def _phimtat_placeholder_title():
+    return "⚠️ Chỉ dùng cá nhân. Không reup."
+
+
+def _phimtat_decode(request: httpx.Request) -> str:
+    """Unwrap red64.php?url=<b64(target)> to the target URL."""
+    from urllib.parse import parse_qs, urlparse
+
+    qs = parse_qs(urlparse(str(request.url)).query)
+    import base64 as b64mod
+
+    return b64mod.b64decode(qs["url"][0]).decode()
+
+
 def _phimtat_transport(medias, status=200):
     def handler(request: httpx.Request) -> httpx.Response:
         assert "red64.php" in request.url.path
@@ -320,7 +334,24 @@ def _phimtat_transport(medias, status=200):
     return httpx.MockTransport(handler)
 
 
-def test_phimtat_normalizes_mp4_hd(db):
+@pytest.fixture()
+def phimtat_on(monkeypatch):
+    """Hermetic PHIMTAT settings (local .env must not influence tests)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PHIMTAT_ENABLED", True)
+    monkeypatch.setattr(settings, "PHIMTAT_API_KEY", "phimtat_test_key")
+    monkeypatch.setattr(settings, "PHIMTAT_API_BASE_URL",
+                        "https://api.phimtat.vn/json/snapvideo.json")
+    monkeypatch.setattr(settings, "PHIMTAT_REDIRECT_URL",
+                        "https://api.phimtat.vn/snapvideo/red64.php")
+    monkeypatch.setattr(settings, "PHIMTAT_VER", "8")
+    monkeypatch.setattr(settings, "PHIMTAT_PREFER_SD", False)
+    monkeypatch.setattr(settings, "AUDIO_FASTSAVER_BASE_URL", "")
+    monkeypatch.setattr(settings, "AUDIO_FASTSAVER_API_KEY", "")
+
+
+def test_phimtat_normalizes_mp4_hd(db, phimtat_on):
     import asyncio
 
     from app.services import snapvideo as sv
@@ -334,7 +365,7 @@ def test_phimtat_normalizes_mp4_hd(db):
     assert out["provider"] == "phimtat"
 
 
-def test_phimtat_menu_fallback_is_unresolvable(db):
+def test_phimtat_menu_fallback_is_unresolvable(db, phimtat_on):
     import asyncio
 
     from app.services import snapvideo as sv
@@ -403,7 +434,7 @@ def test_ssrf_guard_rejects_private_hosts(db):
         sv._assert_public_http_url("file:///etc/passwd")
 
 
-def test_phimtat_consent_gate_flow(db):
+def test_phimtat_consent_gate_flow(db, phimtat_on):
     import asyncio
 
     from app.services import snapvideo as sv
@@ -412,12 +443,15 @@ def test_phimtat_consent_gate_flow(db):
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        if "agree-terms.php" in request.url.path:
+        target = _phimtat_decode(request)
+        if "agree-terms.php" in target:
             return httpx.Response(200, json={"ok": True, "agreed": True})
         if calls["n"] == 1:
+            # Terms gate: consent entry + no pickable media. The consent
+            # GET itself must be wrapped through red64.php like the shortcut.
             return httpx.Response(200, json={
-                "title": "terms", "medias": {
-                    "agree": "https://api.snapvideo.co/agree-terms.php?x=1",
+                "title": _phimtat_placeholder_title(), "medias": {
+                    "✅ Đồng ý": "https://api.snapvideo.co/agree-terms.php?x=1",
                     "Close": "{{open-link}}"}})
         return httpx.Response(200, json={
             "title": "Real Title", "thumbnail": "https://img/t.jpg",
