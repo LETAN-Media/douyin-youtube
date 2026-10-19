@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
@@ -70,7 +71,7 @@ def client_config() -> dict:
                 "https://oauth2.googleapis.com/token"
             ),
             "redirect_uris": [
-                settings.youtube_callback_url
+                public_callback_url()
             ],
         }
     }
@@ -111,6 +112,44 @@ def read_setting(
         return None
 
     return row.value
+
+
+def public_callback_url() -> str:
+    """The ONE registered redirect_uri: PUBLIC_BASE_URL + /auth/youtube/callback.
+
+    It MUST be https: oauthlib rejects insecure transports and Google only
+    permits http for loopback redirect URIs. We fail loudly (never set
+    OAUTHLIB_INSECURE_TRANSPORT) when a deployment is misconfigured.
+    """
+    callback = settings.youtube_callback_url
+    parsed = urlsplit(callback)
+    if parsed.scheme.lower() != "https":
+        raise RuntimeError(
+            "PUBLIC_BASE_URL phải là HTTPS để làm OAuth redirect URI "
+            f"(đang nhận {parsed.scheme}://{parsed.netloc}). "
+            "Đặt PUBLIC_BASE_URL=https://<public-domain> và khai báo "
+            f"{callback} trong Google Cloud Console OAuth client."
+        )
+    return callback
+
+
+def canonical_authorization_response(url_or_query: str) -> str:
+    """Rebuild the OAuth authorization response on the public https callback.
+
+    The reverse proxy (Northflank) terminates TLS, so the ASGI request reaches
+    the app as ``http://<internal>:8000/auth/youtube/callback`` and
+    ``str(request.url)`` is http -> oauthlib raises InsecureTransportError.
+    Only the query (code/state/scope) is meaningful; scheme+host are always
+    the configured public callback, exactly matching flow.redirect_uri.
+    """
+    raw = (url_or_query or "").strip()
+    if not raw:
+        raise RuntimeError("Thiếu authorization_response từ Google")
+
+    query = urlsplit(raw).query if "://" in raw else raw.lstrip("?")
+    callback = public_callback_url()
+
+    return f"{callback}?{query}" if query else callback
 
 
 def create_oauth_url(
@@ -178,7 +217,7 @@ def create_oauth_url(
     )
 
     flow.redirect_uri = (
-        settings.youtube_callback_url
+        public_callback_url()
     )
 
     authorization_url, _ = (
@@ -313,7 +352,13 @@ def complete_oauth(
     )
 
     flow.redirect_uri = (
-        settings.youtube_callback_url
+        public_callback_url()
+    )
+
+    # Never hand oauthlib the raw inbound URL: behind the Northflank proxy it
+    # arrives as http even though the public callback is https.
+    authorization_response = canonical_authorization_response(
+        authorization_response
     )
 
     flow.fetch_token(
@@ -479,9 +524,18 @@ def _load_from_json(
                 "YouTube refresh token không tồn tại"
             )
 
-        credentials.refresh(
-            GoogleRequest()
-        )
+        try:
+            credentials.refresh(
+                GoogleRequest()
+            )
+        except Exception as exc:
+            if "invalid_grant" in str(exc).lower():
+                raise RuntimeError(
+                    "YouTube refresh token đã bị thu hồi hoặc hết hạn "
+                    "(invalid_grant). Vui lòng bấm Reconnect OAuth để "
+                    "kết nối lại kênh."
+                ) from exc
+            raise
 
         data["token"] = (
             credentials.token

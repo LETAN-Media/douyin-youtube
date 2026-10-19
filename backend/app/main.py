@@ -115,6 +115,7 @@ from app.worker import (
     worker_loop,
 )
 from app.youtube import (
+    canonical_authorization_response,
     complete_oauth,
     create_oauth_url,
     get_youtube_status,
@@ -2577,7 +2578,12 @@ def youtube_callback(
 ):
     from fastapi.responses import RedirectResponse
 
-    authorization_response = str(request.url)
+    # Rebuild on the configured HTTPS public callback: the reverse proxy
+    # terminates TLS and request.url is http internally, which oauthlib
+    # rejects with InsecureTransportError.
+    authorization_response = canonical_authorization_response(
+        request.url.query
+    )
 
     try:
         oauth_result = complete_oauth(

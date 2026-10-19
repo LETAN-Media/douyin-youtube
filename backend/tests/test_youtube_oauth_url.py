@@ -20,12 +20,16 @@ class TestYoutubeOauthUrl(unittest.TestCase):
         # Fake-but-present Google config (no network is touched by URL gen).
         self._old_id = settings.google_client_id
         self._old_secret = settings.google_client_secret
+        self._old_base = settings.public_base_url
         settings.google_client_id = "test-client-id.apps.googleusercontent.com"
         settings.google_client_secret = "test-secret"
+        # Pin the public HTTPS base: OAuth URLs must never use http.
+        settings.public_base_url = "https://douyin-api.toolnet.tech"
 
     def tearDown(self):
         settings.google_client_id = self._old_id
         settings.google_client_secret = self._old_secret
+        settings.public_base_url = self._old_base
         self.db.close()
         self.engine.dispose()
 
@@ -54,6 +58,10 @@ class TestYoutubeOauthUrl(unittest.TestCase):
         self.assertIn("select_account", q.get("prompt", [""])[0])
         self.assertEqual(q.get("access_type", [""])[0], "offline")
         self.assertTrue(q.get("state", [""])[0], "state must be present")
+        self.assertEqual(
+            q.get("redirect_uri", [""])[0],
+            "https://douyin-api.toolnet.tech/auth/youtube/callback",
+        )
 
     def test_oauth_state_bound_to_destination(self):
         _, dest = self._make_destination()

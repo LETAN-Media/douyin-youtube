@@ -52,4 +52,7 @@ COPY app ./app
 
 COPY prompts ./prompts
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# --proxy-headers: trust the platform reverse proxy (Northflank) so
+# X-Forwarded-Proto=https is honoured platform-wide. OAuth itself no longer
+# depends on this (authorization_response is rebuilt on PUBLIC_BASE_URL).
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
