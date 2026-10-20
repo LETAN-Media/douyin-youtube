@@ -14,7 +14,6 @@ import {
 } from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import { PipelineToggle } from "@/components/pipeline/PipelineToggle";
-import { DouyinOverview } from "@/components/pipeline/DouyinOverview";
 
 export const dynamic = "force-dynamic";
 import { SourcesPanel } from "@/components/pipeline/SourcesPanel";
@@ -100,13 +99,8 @@ export default async function PipelineDetailPage({
   const tFetch0 = Date.now();
 
   if (activeTab === "overview") {
-    apiCalls.push("getFlowState", "listDestinations");
-    const [flow, destinations] = await Promise.all([
-      getFlowState(pipelineId).catch(() => null),
-      listDestinations(pipelineId).catch(() => []),
-    ]);
-    data.flow = flow;
-    data.destinations = destinations;
+    apiCalls.push("getFlowState");
+    data.flow = await getFlowState(pipelineId).catch(() => null);
   } else if (activeTab === "sources") {
     apiCalls.push("listSources");
     data.sources = await listSources(pipelineId).catch(() => []);
@@ -231,13 +225,16 @@ export default async function PipelineDetailPage({
 
       <div className="mt-4">
         {activeTab === "overview" ? (
-          <DouyinOverview
-            pipeline={pipeline}
-            pipelineId={pipelineId}
-            initialFlow={data.flow ?? null}
-            initialDestinations={data.destinations ?? []}
-            flowError={null}
-          />
+          data.flow ? (
+            <PipelineFlowGraph key={pipelineId} pipelineId={pipelineId} initial={data.flow} />
+          ) : (
+            <Card className="p-5">
+              <p className="text-sm font-bold text-rose-700">Không tải được flow state</p>
+              <p className="mt-1 text-sm text-slate-600">
+                Backend không trả dữ liệu graph. Kiểm tra kết nối rồi tải lại trang.
+              </p>
+            </Card>
+          )
         ) : null}
 
         {activeTab === "sources" ? (
