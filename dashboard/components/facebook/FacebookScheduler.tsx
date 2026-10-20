@@ -2,8 +2,15 @@
 
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { Card, CardHeader, Badge, btnSmall, inputCls, labelCls } from "@/components/ui";
-import { IconCalendar, IconCheck, IconPlay } from "@/components/icons";
-import type { FacebookScheduleStatus, FacebookScheduleDto, UpdateFacebookScheduleDto } from "@/lib/facebook-api";
+import { IconCalendar, IconCheck, IconPlay, IconSparkles, IconX, IconAlert } from "@/components/icons";
+import type {
+  FacebookScheduleStatus,
+  FacebookScheduleDto,
+  UpdateFacebookScheduleDto,
+  FacebookScheduleGenerationRequest,
+  FacebookSchedulePreviewResponse,
+} from "@/lib/facebook-api";
+import { previewFacebookSchedule, generateAndSaveFacebookSchedule } from "@/lib/facebook-api";
 
 const WEEKDAY_NAMES = ["Chủ nhật", "Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7"];
 // Backend (Python) weekday: Monday = 0 … Sunday = 6. WEEKDAY_NAMES above is
@@ -34,6 +41,12 @@ const TIMEZONE_OPTIONS = [
   { value: "Asia/Ho_Chi_Minh", label: "Asia/Ho_Chi_Minh (UTC+7)" },
   { value: "Asia/Bangkok", label: "Asia/Bangkok (UTC+7)" },
   { value: "UTC", label: "UTC" },
+];
+
+const DISTRIBUTION_MODES = [
+  { value: "even", label: "Đều trong ngày" },
+  { value: "peak_hours", label: "Ưu tiên giờ cao điểm" },
+  { value: "channel_stats", label: "Theo thống kê kênh (AI)" },
 ];
 
 const MAX_SLOTS_PER_DAY = 1000;
@@ -212,6 +225,25 @@ export function FacebookScheduler({
     String(initialSchedule?.max_daily_publish ?? initialStatus?.daily_limit ?? 5),
   );
 
+  // Auto-generate schedule states
+  const [showGenerateModal, setShowGenerateModal] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [previewData, setPreviewData] = useState<FacebookSchedulePreviewResponse | null>(null);
+  const [genConfig, setGenConfig] = useState<FacebookScheduleGenerationRequest>({
+    max_daily_publish: initialSchedule?.max_daily_publish ?? initialStatus?.daily_limit ?? 5,
+    start_time: "09:00",
+    end_time: "22:00",
+    min_interval_minutes: 60,
+    weekdays: [0, 1, 2, 3, 4, 5, 6],
+    distribution_mode: "even",
+    allow_midnight: false,
+    separate_weekend: false,
+    weekend_start_time: "09:00",
+    weekend_end_time: "21:00",
+    weekend_min_interval_minutes: 60,
+    weekend_max_daily_publish: undefined,
+  });
+
   const scheduleRef = useMemo(
     () =>
       schedule || {
@@ -309,6 +341,60 @@ export function FacebookScheduler({
       setRunningBatch(false);
     }
   }, [pipelineId, destinationId, status, schedule, refreshStatus]);
+
+  // Auto-generate schedule handlers
+  const handleOpenGenerateModal = useCallback(() => {
+    // Pre-fill config with current schedule values
+    setGenConfig(prev => ({
+      ...prev,
+      max_daily_publish: scheduleRef.max_daily_publish,
+    }));
+    setPreviewData(null);
+    setShowGenerateModal(true);
+  }, [scheduleRef]);
+
+  const handleCloseGenerateModal = useCallback(() => {
+    setShowGenerateModal(false);
+    setPreviewData(null);
+  }, []);
+
+  const handleGenConfigChange = useCallback((key: keyof FacebookScheduleGenerationRequest, value: any) => {
+    setGenConfig(prev => ({ ...prev, [key]: value }));
+  }, []);
+
+  const handlePreviewGenerate = useCallback(async () => {
+    setGenerating(true);
+    try {
+      const preview = await previewFacebookSchedule(pipelineId, genConfig);
+      setPreviewData(preview);
+    } catch (err: any) {
+      setRunResult(`Lỗi xem trước: ${err.message || "Không thể tạo lịch"}`);
+      setTimeout(() => setRunResult(null), 5000);
+    } finally {
+      setGenerating(false);
+    }
+  }, [pipelineId, genConfig]);
+
+  const handleSaveGenerated = useCallback(async () => {
+    if (!previewData?.ok) return;
+    setGenerating(true);
+    try {
+      const generated = await generateAndSaveFacebookSchedule(pipelineId, genConfig);
+      setSchedule(generated);
+      setMaxDailyInput(String(generated.max_daily_publish));
+      setEditing(false);
+      setShowGenerateModal(false);
+      setPreviewData(null);
+      setRunResult("Đã tạo và lưu lịch tự động thành công");
+      setTimeout(() => setRunResult(null), 3000);
+      void refreshStatus();
+    } catch (err: any) {
+      setRunResult(`Lỗi lưu lịch: ${err.message || "Không thể lưu lịch"}`);
+      setTimeout(() => setRunResult(null), 5000);
+    } finally {
+      setGenerating(false);
+    }
+  }, [pipelineId, genConfig, previewData, refreshStatus]);
 
   const handleSlotChange = (dayKey: string, times: string[]) => {
     setSchedule(prev => prev ? { ...prev, slots: { ...prev.slots, [dayKey]: times } } : null);
@@ -523,6 +609,14 @@ export function FacebookScheduler({
                 <IconCheck size={14} className="mr-1" />
                 Chỉnh sửa
               </button>
+              <button
+                onClick={handleOpenGenerateModal}
+                className={btnSmall}
+                disabled={saving || runningBatch || generating}
+              >
+                <IconSparkles size={14} className="mr-1" />
+                Tự động tạo lịch
+              </button>
               {destinationId && (
                 <button
                   onClick={() => setShowRunConfirm(true)}
@@ -706,6 +800,315 @@ export function FacebookScheduler({
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {showGenerateModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+            <div className="bg-white rounded-2xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-slate-900">
+                  <IconSparkles size={18} className="inline mr-2" />
+                  Tự động tạo lịch đăng
+                </h3>
+                <button
+                  onClick={handleCloseGenerateModal}
+                  className="text-slate-400 hover:text-slate-600 text-xl"
+                  disabled={generating}
+                >
+                  <IconX size={20} />
+                </button>
+              </div>
+
+              {!previewData ? (
+                // Configuration form
+                <div className="space-y-4">
+                  <p className="text-sm text-slate-600">
+                    Cấu hình tham số để hệ thống tự động sinh lịch đăng cho cả tuần.
+                    Nhấn <strong>Xem trước</strong> để kiểm tra trước khi lưu.
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>Max videos/ngày</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1000}
+                        step={1}
+                        value={genConfig.max_daily_publish}
+                        onChange={(e) => handleGenConfigChange("max_daily_publish", Number(e.target.value))}
+                        className={inputCls}
+                        disabled={generating}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Chế độ phân bổ</label>
+                      <select
+                        value={genConfig.distribution_mode}
+                        onChange={(e) => handleGenConfigChange("distribution_mode", e.target.value)}
+                        className={inputCls}
+                        disabled={generating}
+                      >
+                        {DISTRIBUTION_MODES.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>Giờ bắt đầu</label>
+                      <input
+                        type="time"
+                        value={genConfig.start_time}
+                        onChange={(e) => handleGenConfigChange("start_time", e.target.value)}
+                        className={inputCls}
+                        disabled={generating}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Giờ kết thúc</label>
+                      <input
+                        type="time"
+                        value={genConfig.end_time}
+                        onChange={(e) => handleGenConfigChange("end_time", e.target.value)}
+                        className={inputCls}
+                        disabled={generating}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>Khoảng cách tối thiểu (phút)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1440}
+                        step={5}
+                        value={genConfig.min_interval_minutes}
+                        onChange={(e) => handleGenConfigChange("min_interval_minutes", Number(e.target.value))}
+                        className={inputCls}
+                        disabled={generating}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Cho phép 00:00–06:00</label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={genConfig.allow_midnight}
+                          onChange={(e) => handleGenConfigChange("allow_midnight", e.target.checked)}
+                          className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                          disabled={generating}
+                        />
+                        <span className="text-sm text-slate-700">Cho phép đăng trong khung đêm</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-slate-100 pt-4">
+                    <label className="flex items-center gap-2 cursor-pointer mb-2">
+                      <input
+                        type="checkbox"
+                        checked={genConfig.separate_weekend}
+                        onChange={(e) => handleGenConfigChange("separate_weekend", e.target.checked)}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                        disabled={generating}
+                      />
+                      <span className="text-sm font-medium text-slate-700">Cấu hình riêng cho cuối tuần (Thứ 7, CN)</span>
+                    </label>
+                    {genConfig.separate_weekend && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 ml-6">
+                        <div>
+                          <label className={labelCls}>Giờ bắt đầu (cuối tuần)</label>
+                          <input
+                            type="time"
+                            value={genConfig.weekend_start_time || "09:00"}
+                            onChange={(e) => handleGenConfigChange("weekend_start_time", e.target.value)}
+                            className={inputCls}
+                            disabled={generating}
+                          />
+                        </div>
+                        <div>
+                          <label className={labelCls}>Giờ kết thúc (cuối tuần)</label>
+                          <input
+                            type="time"
+                            value={genConfig.weekend_end_time || "21:00"}
+                            onChange={(e) => handleGenConfigChange("weekend_end_time", e.target.value)}
+                            className={inputCls}
+                            disabled={generating}
+                          />
+                        </div>
+                        <div>
+                          <label className={labelCls}>Khoảng cách (cuối tuần, phút)</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={1440}
+                            step={5}
+                            value={genConfig.weekend_min_interval_minutes || 60}
+                            onChange={(e) => handleGenConfigChange("weekend_min_interval_minutes", Number(e.target.value))}
+                            className={inputCls}
+                            disabled={generating}
+                          />
+                        </div>
+                        <div>
+                          <label className={labelCls}>Max videos/ngày (cuối tuần)</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={1000}
+                            step={1}
+                            value={genConfig.weekend_max_daily_publish || ""}
+                            onChange={(e) => handleGenConfigChange("weekend_max_daily_publish", e.target.value ? Number(e.target.value) : undefined)}
+                            className={inputCls}
+                            disabled={generating}
+                            placeholder="Mặc định dùng max_daily_publish"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className={labelCls}>Ngày trong tuần</label>
+                    <div className="flex flex-wrap gap-2">
+                      {["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "Chủ nhật"].map((name, idx) => (
+                        <label key={idx} className="flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={genConfig.weekdays.includes(idx)}
+                            onChange={(e) => handleGenConfigChange("weekdays", e.target.checked ? [...genConfig.weekdays, idx] : genConfig.weekdays.filter(d => d !== idx))}
+                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            disabled={generating}
+                          />
+                          <span className="text-xs text-slate-700">{name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 pt-2">
+                    <button
+                      onClick={handlePreviewGenerate}
+                      disabled={generating}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {generating ? (
+                        <>
+                          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                          Đang tạo...
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-[10px] mr-1">i</span>
+                          Xem trước
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={handleCloseGenerateModal}
+                      className={btnSmall}
+                      disabled={generating}
+                    >
+                      Hủy
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                // Preview result
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-base font-semibold text-slate-900">Xem trước lịch tuần</h4>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setPreviewData(null)}
+                        className={btnSmall}
+                        disabled={generating}
+                      >
+                        Sửa cấu hình
+                      </button>
+                    </div>
+                  </div>
+
+                  {previewData.warnings && previewData.warnings.length > 0 && (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-800">
+                      <p className="font-medium mb-1">Cảnh báo:</p>
+                      <ul className="list-disc list-inside space-y-1">
+                        {previewData.warnings.map((w, i) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {WEEKDAY_KEYS.map((dayKey, dayIndex) => {
+                      const daySlots = previewData.slots?.[dayKey] || [];
+                      return (
+                        <div key={dayKey} className="flex items-start gap-2 rounded-xl border border-slate-100 bg-white p-2">
+                          <span className="w-20 shrink-0 text-xs font-bold text-slate-600 mt-1">
+                            {WEEKDAY_NAMES[dayIndex]}
+                          </span>
+                          <div className="flex-1 flex flex-wrap gap-1.5">
+                            {daySlots.map((time, tIdx) => (
+                              <span
+                                key={`${dayKey}-${tIdx}`}
+                                className="rounded-lg bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700"
+                              >
+                                {time}
+                              </span>
+                            ))}
+                            {daySlots.length === 0 && (
+                              <span className="text-xs text-slate-400">Không có slot</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {previewData.feasibility_report && (
+                    <details className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
+                      <summary className="text-xs font-medium text-slate-600 cursor-pointer">Chi tiết tính khả thi</summary>
+                      <pre className="mt-2 text-[10px] text-slate-600 overflow-x-auto">
+                        {JSON.stringify(previewData.feasibility_report, null, 2)}
+                      </pre>
+                    </details>
+                  )}
+
+                  <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+                    <button
+                      onClick={() => setPreviewData(null)}
+                      className={btnSmall}
+                      disabled={generating}
+                    >
+                      Sửa cấu hình
+                    </button>
+                    <button
+                      onClick={handleSaveGenerated}
+                      disabled={generating || !previewData?.ok}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {generating ? (
+                        <>
+                          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                          Đang lưu...
+                        </>
+                      ) : (
+                        <>
+                          <IconCheck size={14} />
+                          Lưu lịch
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

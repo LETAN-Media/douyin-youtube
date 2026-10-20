@@ -501,6 +501,59 @@ export async function getFacebookSchedule(pipelineId: string): Promise<FacebookS
   );
 }
 
+export interface FacebookScheduleGenerationRequest {
+  max_daily_publish: number;
+  start_time: string;
+  end_time: string;
+  min_interval_minutes: number;
+  weekdays: number[];
+  distribution_mode?: string;
+  allow_midnight?: boolean;
+  separate_weekend?: boolean;
+  weekend_start_time?: string;
+  weekend_end_time?: string;
+  weekend_min_interval_minutes?: number;
+  weekend_max_daily_publish?: number;
+}
+
+export interface FacebookSchedulePreviewResponse {
+  ok: boolean;
+  slots?: Record<string, string[]>;
+  warnings?: string[];
+  feasibility_report?: Record<string, any>;
+  error?: string;
+  message?: string;
+  details?: Record<string, any>;
+}
+
+export async function previewFacebookSchedule(
+  pipelineId: string,
+  payload: FacebookScheduleGenerationRequest,
+): Promise<FacebookSchedulePreviewResponse> {
+  return fbFetch<FacebookSchedulePreviewResponse>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/schedule/preview`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function generateAndSaveFacebookSchedule(
+  pipelineId: string,
+  payload: FacebookScheduleGenerationRequest,
+): Promise<FacebookScheduleDto> {
+  return fbFetch<FacebookScheduleDto>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/schedule/generate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 export interface UpdateFacebookScheduleDto {
   enabled?: boolean;
   timezone?: string;

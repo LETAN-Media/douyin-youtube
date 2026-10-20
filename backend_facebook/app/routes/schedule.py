@@ -12,6 +12,14 @@ from ..db.repositories import pipelines, publish_queue, schedules
 from ..db.repositories.schedules import MAX_DAILY_PUBLISH
 from ..services.facebook_global_publisher import get_publisher_status, run_publisher_once
 from ..services.facebook_scheduler import describe_schedule_status, run_scheduler_tick
+from ..services.schedule_generator import (
+    DistributionMode,
+    ScheduleGenerationConfig,
+    ScheduleGenerationError,
+    generate_weekly_schedule,
+    preview_generated_schedule,
+    slots_to_dict,
+)
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-schedule"])
 
@@ -43,6 +51,21 @@ class ScheduleUpsert(BaseModel):
     slots: dict[str, list[str]] | None = None
 
 
+class ScheduleGenerationRequest(BaseModel):
+    max_daily_publish: int = Field(ge=1, le=1000)
+    start_time: str = Field(pattern=r"^([01]\d|2[0-3]):([0-5]\d)$")
+    end_time: str = Field(pattern=r"^([01]\d|2[0-3]):([0-5]\d)$")
+    min_interval_minutes: int = Field(ge=1, le=1440)
+    weekdays: list[int] = Field(min_length=1, max_length=7)
+    distribution_mode: str = Field(default="even")
+    allow_midnight: bool = False
+    separate_weekend: bool = False
+    weekend_start_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):([0-5]\d)$")
+    weekend_end_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):([0-5]\d)$")
+    weekend_min_interval_minutes: int | None = Field(default=None, ge=1, le=1440)
+    weekend_max_daily_publish: int | None = Field(default=None, ge=1, le=1000)
+
+
 @router.get("/pipelines/{pipeline_id}/schedule")
 async def get_schedule(pipeline_id: str, _: None = Depends(require_admin)) -> dict:
     if await pipelines.get_pipeline(pipeline_id) is None:
@@ -71,6 +94,103 @@ async def put_schedule(
     except ValueError as exc:
         raise _err(400, "INVALID_SCHEDULE", str(exc) or "Invalid schedule.")
     return _present(schedule)
+
+
+@router.post("/pipelines/{pipeline_id}/schedule/preview")
+async def preview_schedule(
+    pipeline_id: str, body: ScheduleGenerationRequest, _: None = Depends(require_admin)
+) -> dict:
+    """Preview generated schedule without saving."""
+    if await pipelines.get_pipeline(pipeline_id) is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+
+    # Get current schedule to use timezone if not specified
+    current = await schedules.get_schedule(pipeline_id)
+    tz = current.get("timezone") if current else "Asia/Ho_Chi_Minh"
+
+    try:
+        # Validate distribution mode
+        try:
+            dist_mode = DistributionMode(body.distribution_mode)
+        except ValueError:
+            raise _err(400, "INVALID_DISTRIBUTION_MODE", f"Unknown distribution mode: {body.distribution_mode}")
+
+        config = ScheduleGenerationConfig(
+            max_daily_publish=body.max_daily_publish,
+            start_time=body.start_time,
+            end_time=body.end_time,
+            min_interval_minutes=body.min_interval_minutes,
+            weekdays=body.weekdays,
+            distribution_mode=dist_mode,
+            allow_midnight=body.allow_midnight,
+            separate_weekend=body.separate_weekend,
+            weekend_start_time=body.weekend_start_time,
+            weekend_end_time=body.weekend_end_time,
+            weekend_min_interval_minutes=body.weekend_min_interval_minutes,
+            weekend_max_daily_publish=body.weekend_max_daily_publish,
+        )
+        result = generate_weekly_schedule(config)
+        return {
+            "ok": True,
+            "slots": slots_to_dict(result.slots),
+            "warnings": result.warnings,
+            "feasibility_report": result.feasibility_report,
+        }
+    except ScheduleGenerationError as e:
+        return {
+            "ok": False,
+            "error": e.code,
+            "message": e.message,
+            "details": e.details,
+        }
+    except Exception as e:
+        raise _err(400, "GENERATION_FAILED", str(e))
+
+
+@router.post("/pipelines/{pipeline_id}/schedule/generate")
+async def generate_and_save_schedule(
+    pipeline_id: str, body: ScheduleGenerationRequest, _: None = Depends(require_admin)
+) -> dict:
+    """Generate schedule and save to database."""
+    if await pipelines.get_pipeline(pipeline_id) is None:
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+
+    # Preview first
+    preview = await preview_schedule(pipeline_id, body, _)
+    if not preview.get("ok"):
+        raise _err(400, preview.get("error", "GENERATION_FAILED"), preview.get("message", "Schedule generation failed"))
+
+    # Save the generated schedule
+    try:
+        schedule = await schedules.upsert_schedule(
+            pipeline_id,
+            enabled=True,
+            timezone=body.timezone if hasattr(body, 'timezone') and body.timezone else "Asia/Ho_Chi_Minh",
+            max_daily_publish=body.max_daily_publish,
+            slots=preview["slots"],
+            batch_time=body.batch_time if hasattr(body, 'batch_time') and body.batch_time else "06:00",
+        )
+    except ValueError as exc:
+        raise _err(400, "INVALID_SCHEDULE", str(exc) or "Invalid schedule.")
+
+    # Get current schedule to use timezone if not specified
+    current = await schedules.get_schedule(pipeline_id)
+    tz = current.get("timezone") if current else "Asia/Ho_Chi_Minh"
+
+    names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    return {
+        "id": schedule["id"],
+        "pipeline_id": schedule["pipeline_id"],
+        "timezone": schedule["timezone"],
+        "enabled": schedule["enabled"],
+        "max_daily_publish": schedule["max_daily_publish"],
+        "batch_time": schedule.get("batch_time") or "06:00",
+        "slots": {names[day]: schedule["slots"].get(day, []) for day in range(7)},
+        "created_at": schedule.get("created_at"),
+        "updated_at": schedule.get("updated_at"),
+        "warnings": preview.get("warnings", []),
+        "feasibility_report": preview.get("feasibility_report", {}),
+    }
 
 
 @router.get("/pipelines/{pipeline_id}/schedule/status")
