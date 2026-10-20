@@ -19,17 +19,19 @@ send it back as maxCursor for the next page. First page: omit maxCursor
 
 QUOTA
 -----
-One page = one billed request. The BASIC plan is ~20 requests a month, so
-this client never spends a request it has not been allowed to spend:
+One page = one billed request. Each RapidAPI provider (key) has its own quota
+record. This client never spends a request it has not been allowed to spend:
   * before every attempt it asks app.douyin_quota for permission,
   * every response is reconciled against RapidAPI's own rate-limit headers
     (falling back to local accounting when the headers are absent),
-  * a 429 / code 303 is terminal — no retry, the quota record is marked
-    exhausted and a plain request gets one bounded retry ladder.
+  * a 429 / code 303 is terminal — no retry, the provider's quota record is
+    marked exhausted and the pool moves to the next provider.
 
 No Douyin cookie, no browser, no yt-dlp. Media download stays with the
 existing Rcuts flow (download_video) using share_url/aweme_id.
 """
+
+from __future__ import annotations
 
 import logging
 import time
@@ -38,17 +40,19 @@ from typing import Any
 import httpx
 
 from app import douyin_quota
-from app.config import settings
+from app.integrations.rapidapi.provider_config import (
+    RapidApiProviderConfig,
+    _primary_config,
+)
 
 logger = logging.getLogger("justone-douyin-client")
 
 RETRYABLE_BUSINESS = {301, 302, 500, 503}
 RETRYABLE_STATUS = {500, 502, 503, 504}
 
-#: Bounded retry ladder (seconds) used for the documented cold-cache 301.
-#: Five attempts maximum: the endpoint's own message asks the caller to
-#: re-send, but every attempt is a billed request, so the ladder is short
-#: and stops immediately when the quota floor is reached.
+#: Bounded retry ladder (seconds). Each attempt is a billed request, so the
+#: ladder is short and stops immediately when the provider's quota floor is
+#: reached. Providers can lower this with `..._MAX_RETRIES`.
 RETRY_BACKOFF_SECONDS = (0, 2, 4, 6, 10)
 
 # Rate-limit headers RapidAPI exposes on this API.
@@ -59,188 +63,295 @@ RATELIMIT_HEADERS = (
 )
 
 
-def get_last_rate_limit() -> dict[str, Any] | None:
-    """Last observed RapidAPI quota snapshot (single source of truth)."""
-    try:
-        return douyin_quota.snapshot()
-    except Exception:  # pragma: no cover - defensive, quota must never crash a scan
-        return None
-
-
 class JustOneError(RuntimeError):
-    pass
+    kind = "provider"
+    retryable = False
 
 
 class JustOneAuthError(JustOneError):
-    pass
+    kind = "auth"
 
 
 class JustOneQuotaError(JustOneError):
-    pass
+    kind = "quota"
 
 
 class JustOneRateLimitError(JustOneError):
-    pass
+    kind = "rate_limit"
+    retryable = True
 
 
-def _config() -> tuple[str, str]:
-    base = (settings.douyin_rapidapi_base_url or "").strip().rstrip("/")
-    host = (settings.douyin_rapidapi_host or "").strip()
-    if not base and host:
-        base = f"https://{host}"
-    return base, host
+class JustOneTimeoutError(JustOneError):
+    kind = "timeout"
+    retryable = True
 
 
-def _user_posts_path() -> str:
-    path = (getattr(settings, "douyin_rapidapi_user_posts_path", "") or "").strip()
-    return path or "/api/douyin/get-user-video-list/v3"
+class JustOneUnavailableError(JustOneError):
+    kind = "unavailable"
+    retryable = True
 
 
-def _record_quota(headers: Any) -> None:
-    """Reconcile one response against the quota record.
+class JustOneSchemaError(JustOneError):
+    kind = "schema"
+
+
+class JustOneInvalidRequestError(JustOneError):
+    kind = "invalid_request"
+
+
+def _config_or_default(
+    config: RapidApiProviderConfig | None,
+) -> RapidApiProviderConfig:
+    return config if config is not None else _primary_config()
+
+
+def get_last_rate_limit(
+    provider_id: str = douyin_quota.DEFAULT_PROVIDER_ID,
+) -> dict[str, Any] | None:
+    """Last observed quota snapshot for one provider (no secrets)."""
+    try:
+        return douyin_quota.snapshot(provider_id)
+    except Exception:  # pragma: no cover - quota must never crash a scan
+        return None
+
+
+def _record_quota(
+    headers: Any,
+    config: RapidApiProviderConfig,
+) -> None:
+    """Reconcile one response against this provider's quota record.
 
     Headers are authoritative when RapidAPI sends them. When it does not, the
     request is still billed, so it is counted locally — under-counting is the
     one error that would let a scan walk past the limit.
     """
     try:
-        snap = douyin_quota.record_headers(headers)
+        default_limit = config.monthly_request_limit or None
+        snap = douyin_quota.record_headers(
+            headers,
+            provider_id=config.provider_id,
+            default_limit=default_limit,
+        )
         if snap is None:
-            douyin_quota.note_local_spend(1)
+            douyin_quota.note_local_spend(
+                1,
+                provider_id=config.provider_id,
+                default_limit=default_limit,
+            )
     except Exception:  # pragma: no cover - never break a scan over bookkeeping
-        logger.warning("Quota bookkeeping failed for a RapidAPI response")
+        logger.warning("Quota bookkeeping failed for provider %s", config.provider_id)
 
 
-def fetch_user_videos(
+def _can_spend(config: RapidApiProviderConfig) -> bool:
+    return douyin_quota.can_spend(
+        1,
+        provider_id=config.provider_id,
+        default_limit=config.monthly_request_limit or None,
+    )
+
+
+def _raise_for_code(
+    code: Any,
+    message: Any,
+    *,
+    config: RapidApiProviderConfig,
+    attempt: int,
+    attempts: int,
+) -> None:
+    text = str(message or "")
+    if code in (100, 101, 202):
+        raise JustOneAuthError(
+            f"RAPIDAPI_AUTH_ERROR: code={code} {text[:300]}"
+        )
+    if code == 303:
+        quota_message = f"RAPIDAPI_QUOTA_EXCEEDED: {text[:300]}"
+        douyin_quota.mark_exhausted(
+            quota_message,
+            provider_id=config.provider_id,
+            default_limit=config.monthly_request_limit or None,
+        )
+        raise JustOneQuotaError(quota_message)
+    if code == 302:
+        raise JustOneRateLimitError(
+            f"RAPIDAPI_RATE_LIMIT: {text[:300]}"
+        )
+    if code == 301:
+        if attempt < attempts - 1 and _can_spend(config):
+            return
+        raise JustOneUnavailableError(
+            f"RAPIDAPI_UNAVAILABLE: code=301 {text[:300]}"
+        )
+    if code == 400:
+        raise JustOneInvalidRequestError(
+            f"DOUYIN_SOURCE_INVALID: {text[:300]}"
+        )
+    if code in (600, 601):
+        raise JustOneAuthError(
+            f"RAPIDAPI_AUTH_ERROR: code={code} {text[:300]}"
+        )
+    if code == 602:
+        quota_message = f"RAPIDAPI_QUOTA_EXCEEDED: {text[:300]}"
+        douyin_quota.mark_exhausted(
+            quota_message,
+            provider_id=config.provider_id,
+            default_limit=config.monthly_request_limit or None,
+        )
+        raise JustOneQuotaError(quota_message)
+    if code not in (0, None):
+        raise JustOneError(f"code={code}: {text[:400]}")
+
+
+def fetch_page(
+    config: RapidApiProviderConfig,
     sec_uid: str,
-    max_cursor: str | None = None,
+    cursor: str | None = None,
+    *,
     count: int = 20,
 ) -> dict[str, Any]:
-    """Fetch ONE page of creator videos.
+    """Fetch ONE page using one explicitly configured provider.
 
     Returns normalized
     {items:[{aweme_id, caption, create_time, share_url, cover_url}],
-     next_cursor, has_more, quota}.
+     next_cursor, has_more, quota, provider_id}.
 
     `count` is accepted for interface compat; the v3 endpoint does not take a
     count parameter (server returns a full page of ~20-23 items).
-
-    Raises JustOneQuotaError without spending anything when the remaining
-    quota is at the configured safety floor.
     """
     sec_uid = (sec_uid or "").strip()
     if not sec_uid:
-        raise JustOneError("DOUYIN_SOURCE_INVALID: empty secUid")
+        raise JustOneInvalidRequestError("DOUYIN_SOURCE_INVALID: empty secUid")
 
-    key = (settings.rapidapi_key or "").strip()
-    if not key:
-        raise JustOneAuthError("RAPIDAPI_KEY not configured")
+    if not config.api_key:
+        raise JustOneAuthError(
+            f"RAPIDAPI_KEY not configured for {config.provider_id}"
+        )
+    if not config.base_url or not config.host:
+        raise JustOneUnavailableError(
+            f"RAPIDAPI_HOST/BASE_URL not configured for {config.provider_id}"
+        )
+    if not config.path:
+        raise JustOneUnavailableError(
+            f"RAPIDAPI endpoint path not configured for {config.provider_id}"
+        )
 
-    base, host = _config()
-    if not base or not host:
-        raise JustOneError("DOUYIN_RAPIDAPI_HOST/BASE_URL not configured")
-
-    url = base.rstrip("/") + _user_posts_path()
+    url = config.base_url.rstrip("/") + config.path
     params: dict[str, Any] = {"secUid": sec_uid}
-    if max_cursor not in (None, ""):
-        params["maxCursor"] = max_cursor
-    headers = {"x-rapidapi-key": key, "x-rapidapi-host": host}
+    if cursor not in (None, ""):
+        params["maxCursor"] = cursor
+    headers = {
+        "x-rapidapi-key": config.api_key,
+        "x-rapidapi-host": config.host,
+    }
 
+    attempts = max(1, min(int(config.max_retries), 4) + 1)
     last_exc: Exception | None = None
-    for attempt, backoff in enumerate(RETRY_BACKOFF_SECONDS):
+
+    for attempt in range(attempts):
+        backoff = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
         if backoff:
             time.sleep(backoff)
 
         # Quota gate: refuse before spending, not after.
         try:
-            douyin_quota.ensure_can_spend(1)
+            douyin_quota.ensure_can_spend(
+                1,
+                provider_id=config.provider_id,
+                default_limit=config.monthly_request_limit or None,
+            )
         except douyin_quota.QuotaExhausted as exc:
             raise JustOneQuotaError(str(exc)) from exc
 
         try:
-            with httpx.Client(timeout=90) as client:
+            with httpx.Client(timeout=float(config.timeout_seconds)) as client:
                 resp = client.get(url, params=params, headers=headers)
         except Exception as exc:
-            last_exc = JustOneError(f"JUSTONE_TIMEOUT: {exc}")
-            if attempt < len(RETRY_BACKOFF_SECONDS) - 1 and (
-                "timeout" in str(exc).lower() or "connect" in str(exc).lower()
-            ):
-                logger.warning("JustOne retry %s: %s", attempt + 1, exc)
+            text = str(exc)
+            is_timeout = "timeout" in text.lower() or "timed out" in text.lower()
+            last_exc = (
+                JustOneTimeoutError(f"JUSTONE_TIMEOUT: {text[:300]}")
+                if is_timeout
+                else JustOneUnavailableError(f"JUSTONE_CONNECTION_ERROR: {text[:300]}")
+            )
+            if attempt < attempts - 1 and _can_spend(config):
+                logger.warning(
+                    "Provider %s attempt %s failed: %s",
+                    config.provider_id,
+                    attempt + 1,
+                    text[:200],
+                )
                 continue
-            raise
+            raise last_exc
 
-        _record_quota(resp.headers)
+        _record_quota(resp.headers, config)
 
         if resp.status_code in (401, 403):
             raise JustOneAuthError(
                 f"RAPIDAPI_AUTH_ERROR: HTTP {resp.status_code} {resp.text[:300]}"
             )
         if resp.status_code == 429:
-            # Terminal: this is the monthly subscription limit, not a blip.
-            # Retrying only burns the window and hides the real state.
+            # Terminal for this provider: monthly subscription limit, not a
+            # blip. The pool will move to the next provider.
             message = f"RAPIDAPI_QUOTA_EXCEEDED: {resp.text[:300]}"
-            douyin_quota.mark_exhausted(message)
+            douyin_quota.mark_exhausted(
+                message,
+                provider_id=config.provider_id,
+                default_limit=config.monthly_request_limit or None,
+            )
             raise JustOneQuotaError(message)
+        if resp.status_code in (400, 422):
+            raise JustOneInvalidRequestError(
+                f"DOUYIN_SOURCE_INVALID: HTTP {resp.status_code} {resp.text[:300]}"
+            )
         if resp.status_code in RETRYABLE_STATUS:
-            last_exc = JustOneError(
+            last_exc = JustOneUnavailableError(
                 f"RETRYABLE HTTP {resp.status_code}: {resp.text[:300]}"
             )
-            if attempt < len(RETRY_BACKOFF_SECONDS) - 1 and douyin_quota.can_spend(1):
+            if attempt < attempts - 1 and _can_spend(config):
                 continue
             raise last_exc
         if resp.status_code != 200:
-            raise JustOneError(f"HTTP {resp.status_code}: {resp.text[:400]}")
+            raise JustOneUnavailableError(
+                f"HTTP {resp.status_code}: {resp.text[:400]}"
+            )
 
         try:
             data = resp.json()
         except Exception as exc:
-            raise JustOneError(f"Invalid JSON: {exc} body={resp.text[:300]}") from exc
+            raise JustOneSchemaError(
+                f"Invalid JSON: {exc} body={resp.text[:300]}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise JustOneSchemaError("Invalid schema: response is not an object")
 
         code = data.get("code")
-        if code in (100, 101, 202):
-            raise JustOneAuthError(
-                f"RAPIDAPI_AUTH_ERROR: code={code} {data.get('message')}"
+        _raise_for_code(
+            code,
+            data.get("message"),
+            config=config,
+            attempt=attempt,
+            attempts=attempts,
+        )
+        if code == 301 and attempt < attempts - 1:
+            # _raise_for_code returns only when this attempt is retryable.
+            logger.warning(
+                "Provider %s cold-cache 301, retry %s/%s",
+                config.provider_id,
+                attempt + 1,
+                attempts,
             )
-        if code == 303:
-            message = f"RAPIDAPI_QUOTA_EXCEEDED: {data.get('message')}"
-            douyin_quota.mark_exhausted(message)
-            raise JustOneQuotaError(message)
-        if code == 302:
-            last_exc = JustOneRateLimitError(
-                f"RAPIDAPI_RATE_LIMIT: {data.get('message')}"
-            )
-            if attempt < len(RETRY_BACKOFF_SECONDS) - 1 and douyin_quota.can_spend(1):
-                continue
-            raise last_exc
-        if code == 301:
-            last_exc = JustOneError(f"RETRYABLE code=301: {data.get('message')}")
-            if attempt < len(RETRY_BACKOFF_SECONDS) - 1:
-                if not douyin_quota.can_spend(1):
-                    # Cold cache would need more attempts than the quota can
-                    # afford; stop and report instead of draining the month.
-                    douyin_quota.note_provider_error(
-                        "RapidAPI 301 repeated and quota is at the safety floor"
-                    )
-                    raise JustOneQuotaError(
-                        "RAPIDAPI_QUOTA_GUARD: cold-cache 301 retries stopped — "
-                        "remaining quota is at the safety floor"
-                    ) from None
-                logger.warning(
-                    "JustOne 301 (cold cache), retry %s/%s",
-                    attempt + 1,
-                    len(RETRY_BACKOFF_SECONDS),
-                )
-                continue
-            raise last_exc
-        if code == 400:
-            raise JustOneError(f"DOUYIN_SOURCE_INVALID: {data.get('message')}")
-        if code not in (0, None):
-            raise JustOneError(f"code={code}: {str(data.get('message'))[:400]}")
+            continue
 
-        payload = data.get("data") or {}
-        aweme_list = payload.get("aweme_list") or payload.get("awemeList") or []
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            raise JustOneSchemaError("Invalid schema: missing data object")
+        aweme_list = payload.get("aweme_list")
+        if aweme_list is None:
+            aweme_list = payload.get("awemeList")
         if not isinstance(aweme_list, list):
-            aweme_list = []
+            raise JustOneSchemaError(
+                "Invalid schema: data.aweme_list is not a list"
+            )
 
         items: list[dict[str, Any]] = []
         for v in aweme_list:
@@ -282,33 +393,60 @@ def fetch_user_videos(
             has_more = int(payload.get("has_more", payload.get("hasMore", 0)) or 0) != 0
         except (TypeError, ValueError):
             has_more = False
-        next_cursor = str(payload.get("max_cursor", payload.get("maxCursor", "")) or "")
+        next_cursor = str(
+            payload.get("max_cursor", payload.get("maxCursor", "")) or ""
+        )
         return {
             "items": items,
             "next_cursor": next_cursor,
             "has_more": has_more,
-            "quota": get_last_rate_limit(),
+            "quota": get_last_rate_limit(config.provider_id),
+            "provider_id": config.provider_id,
         }
 
     raise JustOneError(f"JustOne fetch failed after retries: {last_exc}")
 
 
+def fetch_user_videos(
+    sec_uid: str,
+    max_cursor: str | None = None,
+    count: int = 20,
+    *,
+    config: RapidApiProviderConfig | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible entrypoint for the primary/legacy config."""
+    return fetch_page(
+        _config_or_default(config),
+        sec_uid,
+        max_cursor,
+        count=count,
+    )
+
+
 def fetch_user_posts(
     sec_user_id: str,
     cursor: str | None = None,
+    *,
+    config: RapidApiProviderConfig | None = None,
 ) -> dict[str, Any]:
     """Task-spec entrypoint: fetch_user_posts(sec_user_id, cursor)."""
-    return fetch_user_videos(sec_user_id, max_cursor=cursor)
+    return fetch_user_videos(sec_user_id, max_cursor=cursor, config=config)
 
 
 __all__ = [
     "JustOneAuthError",
     "JustOneError",
+    "JustOneInvalidRequestError",
     "JustOneQuotaError",
     "JustOneRateLimitError",
+    "JustOneSchemaError",
+    "JustOneTimeoutError",
+    "JustOneUnavailableError",
     "RATELIMIT_HEADERS",
     "RETRY_BACKOFF_SECONDS",
     "RETRYABLE_BUSINESS",
+    "RETRYABLE_STATUS",
+    "fetch_page",
     "fetch_user_posts",
     "fetch_user_videos",
     "get_last_rate_limit",

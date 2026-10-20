@@ -427,6 +427,14 @@ export interface WorkspaceSourceItem extends ChannelSourceItem {
   last_refresh_at?: string | null;
   provider_status?: string | null;
   provider_status_detail?: string | null;
+  last_scan_stats?: {
+    provider?: string;
+    pages?: number;
+    found?: number;
+    new?: number;
+    duplicates?: number;
+    status?: string;
+  } | null;
   total_found?: number | null;
   saved_count?: number | null;
   new_count?: number | null;
@@ -450,6 +458,21 @@ export interface DouyinQuotaStatus {
   source?: string | null;
   last_error?: string | null;
   updated_at?: string | null;
+  configured?: boolean;
+  config_error?: string | null;
+  providers?: Array<{
+    provider_id: string;
+    name: string;
+    configured: boolean;
+    available: boolean;
+    quota?: {
+      limit: number;
+      remaining: number;
+      used: number;
+      exhausted: boolean;
+    };
+    last_error?: string | null;
+  }>;
 }
 
 export interface SourceImportResult {
@@ -461,6 +484,7 @@ export interface SourceImportResult {
   videos: number;
   cursor?: string | null;
   error?: string | null;
+  provider?: string | null;
   quota?: DouyinQuotaStatus | null;
 }
 

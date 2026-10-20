@@ -652,6 +652,13 @@ class DouyinSource(Base):
         nullable=True,
     )
 
+    # JSON summary of the last import/refresh: provider, pages, found, new,
+    # duplicates. Kept as TEXT for SQLite/Turso portability.
+    last_scan_stats: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,

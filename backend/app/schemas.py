@@ -1,9 +1,10 @@
 from datetime import date, datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
+import json
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PipelineBase(BaseModel):
@@ -242,6 +243,18 @@ class DouyinSourceOut(DouyinSourceBase):
     last_refresh_at: datetime | None = None
     provider_status: str = "ok"
     provider_status_detail: str | None = None
+    last_scan_stats: dict[str, Any] | None = None
+
+    @field_validator("last_scan_stats", mode="before")
+    @classmethod
+    def _parse_last_scan_stats(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        return value
 
 
 class SourceWithCookieOut(DouyinSourceOut):
@@ -791,6 +804,9 @@ class DouyinQuotaOut(BaseModel):
     source: str | None = None
     last_error: str | None = None
     updated_at: str | None = None
+    configured: bool = True
+    config_error: str | None = None
+    providers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SourceImportResponse(BaseModel):
@@ -804,6 +820,7 @@ class SourceImportResponse(BaseModel):
     videos: int = 0
     cursor: str | None = None
     error: str | None = None
+    provider: str | None = None
     quota: DouyinQuotaOut | None = None
 
 

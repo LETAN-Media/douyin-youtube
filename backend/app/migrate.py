@@ -1148,6 +1148,23 @@ def _apply_016(cache: SchemaCache, engine: Any) -> None:
             cache.add_column("douyin_videos", "duration")
 
 
+# --- Migration 017: Douyin source last scan stats ---
+def _verify_017(cache: SchemaCache, engine: Any) -> bool:
+    return cache.column_exists("douyin_sources", "last_scan_stats")
+
+
+def _apply_017(cache: SchemaCache, engine: Any) -> None:
+    if not cache.table_exists("douyin_sources"):
+        return
+    if not cache.column_exists("douyin_sources", "last_scan_stats"):
+        with log_step("add_col_douyin_sources_last_scan_stats"):
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE douyin_sources ADD COLUMN last_scan_stats TEXT")
+                )
+            cache.add_column("douyin_sources", "last_scan_stats")
+
+
 # Registry of all migrations in chronological order
 MIGRATIONS = [
     MigrationDefinition("20240101_001_core_tables", "Core base tables", _verify_001, _apply_001),
@@ -1166,6 +1183,7 @@ MIGRATIONS = [
     MigrationDefinition("20240114_014_destination_sync", "Legacy YouTube OAuth migration & job assignment", _verify_014, _apply_014),
     MigrationDefinition("20240115_015_performance_indexes", "Channel workspace performance indexes", _verify_015, _apply_015),
     MigrationDefinition("20240116_016_douyin_video_duration", "Douyin video duration seconds", _verify_016, _apply_016),
+    MigrationDefinition("20240117_017_douyin_source_scan_stats", "Douyin source last scan stats", _verify_017, _apply_017),
 ]
 
 

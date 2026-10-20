@@ -20,6 +20,7 @@ Nothing here schedules itself.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -32,7 +33,11 @@ from sqlalchemy.orm import Session
 from app import douyin_quota
 from app.config import settings
 from app.db import SessionLocal
-from app.douyin_inventory_providers import get_primary_provider
+from app.douyin_inventory_providers import (
+    get_default_provider_id,
+    get_primary_provider,
+)
+from app.integrations.rapidapi.errors import RapidApiPoolError
 from app.inventory import _upsert_videos
 from app.models import DouyinSource, DouyinVideo, Pipeline
 
@@ -49,7 +54,6 @@ PROVIDER_OK = "ok"
 PROVIDER_QUOTA = "quota_exhausted"
 PROVIDER_ERROR = "provider_error"
 PROVIDER_INVALID = "invalid"
-PROVIDER_RISK_CONTROL = "risk_control"
 
 #: Sources with an import/refresh in flight *in this process*, so two button
 #: clicks cannot spend the same page twice.
@@ -84,6 +88,7 @@ def _summary(
     videos: int = 0,
     cursor: str | None = None,
     error: str | None = None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     return {
         "source_id": source_id,
@@ -94,6 +99,7 @@ def _summary(
         "videos": videos,
         "cursor": cursor,
         "error": error,
+        "provider": provider,
         "quota": quota_status(),
     }
 
@@ -102,7 +108,7 @@ def _provider_uses_quota(provider: Any) -> bool:
     """True only for providers billed through the RapidAPI quota.
 
     Test doubles and legacy providers may omit the attribute, so the provider
-    name is also checked; self_hosted/revid never consume RapidAPI quota.
+    name is also checked; only rapidapi_justone consumes RapidAPI quota.
     """
     explicit = getattr(provider, "uses_rapidapi_quota", None)
     if explicit is not None:
@@ -112,15 +118,22 @@ def _provider_uses_quota(provider: Any) -> bool:
 
 def quota_status() -> dict[str, Any]:
     """Public quota view for the API/UI. Contains no secrets."""
-    snap = douyin_quota.snapshot()
-    snap["safety_margin"] = douyin_quota.safety_margin()
     try:
         provider = get_primary_provider()
-        snap["provider"] = getattr(provider, "name", None)
-        snap["required"] = _provider_uses_quota(provider)
     except Exception:
-        snap["provider"] = None
-        snap["required"] = True
+        provider = None
+    if provider is not None and hasattr(provider, "quota_status"):
+        try:
+            snap = provider.quota_status()
+            snap.setdefault("safety_margin", douyin_quota.safety_margin())
+            snap.setdefault("required", True)
+            return snap
+        except Exception:
+            pass
+    snap = douyin_quota.snapshot()
+    snap["safety_margin"] = douyin_quota.safety_margin()
+    snap["provider"] = getattr(provider, "name", None) if provider else None
+    snap["required"] = _provider_uses_quota(provider) if provider else True
     return snap
 
 
@@ -130,17 +143,17 @@ def can_start_import() -> bool:
         provider = get_primary_provider()
     except Exception:
         return False
+    if hasattr(provider, "has_available_provider"):
+        try:
+            return bool(provider.has_available_provider())
+        except Exception:
+            return False
     if not _provider_uses_quota(provider):
         return True
     try:
         return bool(douyin_quota.can_spend(1))
     except Exception:
         return True
-
-
-def _is_page_limit_error(exc: Exception) -> bool:
-    """Deeper-page upstream risk control is resumable, not a failure."""
-    return exc.__class__.__name__ == "DouyinFeedPageLimitError"
 
 
 def _fetch_page(
@@ -184,6 +197,52 @@ def _provider():
     return get_primary_provider()
 
 
+class _PageSource:
+    """Adapter over either a pool scan session or a legacy provider."""
+
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        sec_uid: str,
+        profile_url: str,
+        source_id: str,
+        preferred_provider_id: str | None = None,
+    ) -> None:
+        self.provider = provider
+        self.sec_uid = sec_uid
+        self.profile_url = profile_url
+        self.source_id = source_id
+        self.pool_managed = hasattr(provider, "open_scan")
+        self.session = (
+            provider.open_scan(
+                sec_uid,
+                preferred_provider_id=preferred_provider_id,
+            )
+            if self.pool_managed
+            else None
+        )
+        self.provider_id = (
+            preferred_provider_id
+            or getattr(provider, "name", None)
+            or "rapidapi_justone"
+        )
+
+    def fetch_page(self, cursor: str | None) -> dict[str, Any]:
+        if self.session is not None:
+            page = self.session.fetch_page(cursor)
+            if getattr(self.session, "provider_id", None):
+                self.provider_id = str(self.session.provider_id)
+            return page
+        return _fetch_page(
+            self.provider,
+            sec_uid=self.sec_uid,
+            profile_url=self.profile_url,
+            source_id=self.source_id,
+            cursor=cursor,
+        )
+
+
 def _recount(db: Session, source_id: str) -> int:
     total = db.execute(
         select(func.count(DouyinVideo.id)).where(DouyinVideo.source_id == source_id)
@@ -199,6 +258,7 @@ def _persist_page(
     cursor: str | None,
     count_videos: int | None = None,
     import_pages_delta: int = 0,
+    provider_id: str | None = None,
 ) -> tuple[int, int]:
     """Upsert one fetched page inside its own short transaction.
 
@@ -225,6 +285,8 @@ def _persist_page(
             source.initial_import_pages = int(source.initial_import_pages or 0) + import_pages_delta
         if count_videos:
             source.initial_import_videos = int(source.initial_import_videos or 0) + count_videos
+        if provider_id:
+            source.feed_provider = provider_id
         source.inventory_count = _recount(db, source_id)
         if items:
             first = str(items[0].get("video_id") or "").strip()
@@ -240,6 +302,8 @@ def _finish(
     provider_status: str,
     detail: str | None,
     completed: bool = False,
+    provider_id: str | None = None,
+    scan_stats: dict[str, Any] | None = None,
 ) -> None:
     with SessionLocal.begin() as db:
         source = db.get(DouyinSource, source_id)
@@ -255,6 +319,10 @@ def _finish(
         source.initial_import_last_error = detail
         source.provider_status = provider_status
         source.provider_status_detail = detail
+        if provider_id:
+            source.feed_provider = provider_id
+        if scan_stats is not None:
+            source.last_scan_stats = json.dumps(scan_stats, ensure_ascii=False)
         if completed:
             source.initial_import_cursor = None
             source.initial_import_completed_at = utcnow()
@@ -290,6 +358,9 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                     error="DOUYIN_SOURCE_INVALID: thiếu secUid/profile_url",
                 )
             profile_url = source.profile_url or ""
+            preferred_provider_id = (
+                (source.feed_provider or None) if resume else None
+            )
             cursor = (source.initial_import_cursor or None) if resume else None
             if not resume:
                 source.initial_import_cursor = None
@@ -301,12 +372,47 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
             source.initial_import_started_at = utcnow()
             source.inventory_sync_status = "running"
             source.inventory_sync_error = None
-            provider_name = _provider().name
-            source.feed_provider = provider_name
+            if not resume:
+                source.feed_provider = get_default_provider_id()
             db.commit()
 
         try:
             provider = _provider()
+            page_source = _PageSource(
+                provider,
+                sec_uid=sec_uid,
+                profile_url=profile_url,
+                source_id=source_id,
+                preferred_provider_id=preferred_provider_id,
+            )
+        except RapidApiPoolError as exc:
+            error = exc.summary()
+            _finish(
+                source_id,
+                STATUS_PAUSED_QUOTA if exc.quota_exhausted else STATUS_FAILED,
+                provider_status=(
+                    PROVIDER_QUOTA if exc.quota_exhausted else PROVIDER_ERROR
+                ),
+                detail=error,
+                scan_stats={
+                    "provider": preferred_provider_id,
+                    "pages": 0,
+                    "found": 0,
+                    "new": 0,
+                    "duplicates": 0,
+                    "status": (
+                        STATUS_PAUSED_QUOTA
+                        if exc.quota_exhausted
+                        else STATUS_FAILED
+                    ),
+                },
+            )
+            return _summary(
+                source_id,
+                STATUS_PAUSED_QUOTA if exc.quota_exhausted else STATUS_FAILED,
+                error=error,
+                provider=preferred_provider_id,
+            )
         except Exception as exc:
             _finish(
                 source_id, STATUS_FAILED,
@@ -322,6 +428,7 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
 
         new_total = 0
         updated_total = 0
+        found_total = 0
         pages = 0
         seen: set[str] = set()
         status = STATUS_COMPLETED
@@ -329,7 +436,7 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
         provider_status = PROVIDER_OK
 
         while pages < max_pages:
-            if uses_quota and not douyin_quota.can_spend(1):
+            if not page_source.pool_managed and uses_quota and not douyin_quota.can_spend(1):
                 status = STATUS_PAUSED_QUOTA
                 provider_status = PROVIDER_QUOTA
                 error = (
@@ -339,13 +446,18 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                 break
 
             try:
-                page = _fetch_page(
-                    provider,
-                    sec_uid=sec_uid,
-                    profile_url=profile_url,
-                    source_id=source_id,
-                    cursor=cursor,
+                page = page_source.fetch_page(cursor)
+            except RapidApiPoolError as exc:
+                status = (
+                    STATUS_PAUSED_QUOTA
+                    if exc.quota_exhausted
+                    else STATUS_FAILED
                 )
+                provider_status = (
+                    PROVIDER_QUOTA if exc.quota_exhausted else PROVIDER_ERROR
+                )
+                error = exc.summary()[:2000]
+                break
             except douyin_quota.QuotaExhausted as exc:  # defensive
                 status = STATUS_PAUSED_QUOTA
                 provider_status = PROVIDER_QUOTA
@@ -353,10 +465,7 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                 break
             except Exception as exc:
                 text = str(exc)
-                if _is_page_limit_error(exc):
-                    status = STATUS_PAUSED
-                    provider_status = PROVIDER_RISK_CONTROL
-                elif uses_quota and (
+                if uses_quota and (
                     "QUOTA" in text.upper()
                     or isinstance(exc, douyin_quota.QuotaExhausted)
                 ):
@@ -369,6 +478,14 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                 break
 
             items = list(page.get("items") or [])
+            found_total += len(items)
+            if page.get("provider_switched"):
+                logger.warning(
+                    "Initial import provider switched to %s for source=%s; "
+                    "cursor reset and duplicates will be skipped",
+                    page_source.provider_id,
+                    source_id,
+                )
             fresh = [it for it in items if str(it.get("video_id") or "") not in seen]
             seen.update(str(it.get("video_id") or "") for it in items)
             new_count, updated_count = _persist_page(
@@ -378,13 +495,16 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                 cursor=cursor,
                 count_videos=len([it for it in fresh if it.get("video_id")]),
                 import_pages_delta=1,
+                provider_id=page_source.provider_id,
             )
             new_total += new_count
             updated_total += updated_count
             pages += 1
             logger.info(
-                "Initial import page %s for source=%s: %s items, %s new, %s updated",
-                pages, source_id, len(items), new_count, updated_count,
+                "Initial import page %s for source=%s provider=%s: %s items, "
+                "%s new, %s updated",
+                pages, source_id, page_source.provider_id,
+                len(items), new_count, updated_count,
             )
 
             if not page.get("has_more"):
@@ -408,21 +528,34 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                 "chạy lại để tiếp tục."
             )
 
+        scan_stats = {
+            "provider": page_source.provider_id,
+            "pages": pages,
+            "found": found_total,
+            "new": new_total,
+            "duplicates": max(0, found_total - new_total),
+            "status": status,
+        }
         if status == STATUS_COMPLETED:
             _finish(
                 source_id, STATUS_COMPLETED,
                 provider_status=PROVIDER_OK, detail=None, completed=True,
+                provider_id=page_source.provider_id,
+                scan_stats=scan_stats,
             )
         else:
             _finish(
                 source_id, status,
                 provider_status=provider_status, detail=error,
+                provider_id=page_source.provider_id,
+                scan_stats=scan_stats,
             )
 
         return _summary(
             source_id, status,
             new=new_total, updated=updated_total, pages=pages,
             videos=len(seen), cursor=cursor, error=error,
+            provider=page_source.provider_id,
         )
     finally:
         _release(source_id)
@@ -458,6 +591,39 @@ def refresh_source(source_id: str) -> dict[str, Any]:
 
         try:
             provider = _provider()
+            page_source = _PageSource(
+                provider,
+                sec_uid=sec_uid,
+                profile_url=profile_url,
+                source_id=source_id,
+            )
+        except RapidApiPoolError as exc:
+            error = exc.summary()
+            _finish(
+                source_id,
+                STATUS_PAUSED_QUOTA if exc.quota_exhausted else STATUS_FAILED,
+                provider_status=(
+                    PROVIDER_QUOTA if exc.quota_exhausted else PROVIDER_ERROR
+                ),
+                detail=error,
+                scan_stats={
+                    "provider": None,
+                    "pages": 0,
+                    "found": 0,
+                    "new": 0,
+                    "duplicates": 0,
+                    "status": (
+                        STATUS_PAUSED_QUOTA
+                        if exc.quota_exhausted
+                        else STATUS_FAILED
+                    ),
+                },
+            )
+            return _summary(
+                source_id,
+                STATUS_PAUSED_QUOTA if exc.quota_exhausted else STATUS_FAILED,
+                error=error,
+            )
         except Exception as exc:
             _finish(
                 source_id, STATUS_FAILED,
@@ -473,13 +639,14 @@ def refresh_source(source_id: str) -> dict[str, Any]:
         pages = 0
         new_total = 0
         updated_total = 0
+        found_total = 0
         seen: set[str] = set()
         status = STATUS_COMPLETED
         error: str | None = None
         provider_status = PROVIDER_OK
 
         while pages < max_pages:
-            if uses_quota and not douyin_quota.can_spend(1):
+            if not page_source.pool_managed and uses_quota and not douyin_quota.can_spend(1):
                 status = STATUS_PAUSED_QUOTA
                 provider_status = PROVIDER_QUOTA
                 error = (
@@ -487,19 +654,21 @@ def refresh_source(source_id: str) -> dict[str, Any]:
                 )
                 break
             try:
-                page = _fetch_page(
-                    provider,
-                    sec_uid=sec_uid,
-                    profile_url=profile_url,
-                    source_id=source_id,
-                    cursor=cursor,
+                page = page_source.fetch_page(cursor)
+            except RapidApiPoolError as exc:
+                status = (
+                    STATUS_PAUSED_QUOTA
+                    if exc.quota_exhausted
+                    else STATUS_FAILED
                 )
+                provider_status = (
+                    PROVIDER_QUOTA if exc.quota_exhausted else PROVIDER_ERROR
+                )
+                error = exc.summary()[:2000]
+                break
             except Exception as exc:
                 text = str(exc)
-                if _is_page_limit_error(exc):
-                    status = STATUS_PAUSED
-                    provider_status = PROVIDER_RISK_CONTROL
-                elif uses_quota and "QUOTA" in text.upper():
+                if uses_quota and "QUOTA" in text.upper():
                     status = STATUS_PAUSED_QUOTA
                     provider_status = PROVIDER_QUOTA
                 else:
@@ -509,6 +678,7 @@ def refresh_source(source_id: str) -> dict[str, Any]:
                 break
 
             items = list(page.get("items") or [])
+            found_total += len(items)
             pages += 1
             if not items:
                 break
@@ -531,6 +701,7 @@ def refresh_source(source_id: str) -> dict[str, Any]:
                     items=batch,
                     backfill=False,
                     cursor=None,
+                    provider_id=page_source.provider_id,
                 )
                 new_total += new_count
                 updated_total += updated_count
@@ -542,12 +713,22 @@ def refresh_source(source_id: str) -> dict[str, Any]:
                 break
             cursor = next_cursor
 
+        scan_stats = {
+            "provider": page_source.provider_id,
+            "pages": pages,
+            "found": found_total,
+            "new": new_total,
+            "duplicates": max(0, found_total - new_total),
+            "status": status,
+        }
         with SessionLocal.begin() as db:
             source = db.get(DouyinSource, source_id)
             if source is not None:
                 source.last_refresh_at = utcnow()
                 source.provider_status = provider_status
                 source.provider_status_detail = error
+                source.feed_provider = page_source.provider_id
+                source.last_scan_stats = json.dumps(scan_stats, ensure_ascii=False)
                 if status == STATUS_COMPLETED:
                     source.inventory_sync_status = "completed"
                     source.inventory_sync_error = None
@@ -569,6 +750,7 @@ def refresh_source(source_id: str) -> dict[str, Any]:
             source_id, status,
             new=new_total, updated=updated_total, pages=pages,
             videos=len(seen), error=error,
+            provider=page_source.provider_id,
         )
     finally:
         _release(source_id)
@@ -625,7 +807,6 @@ __all__ = [
     "PROVIDER_INVALID",
     "PROVIDER_OK",
     "PROVIDER_QUOTA",
-    "PROVIDER_RISK_CONTROL",
     "STATUS_COMPLETED",
     "STATUS_FAILED",
     "STATUS_PAUSED",

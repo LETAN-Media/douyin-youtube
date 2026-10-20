@@ -75,8 +75,6 @@
 | `DOUYIN_RAPIDAPI_HOST` | backend/.env | `douyin-china-tiktok-all-api.p.rapidapi.com` |
 | `DOUYIN_RAPIDAPI_BASE_URL` | backend/.env | `https://douyin-china-tiktok-all-api.p.rapidapi.com` |
 | `DOUYIN_RAPIDAPI_USER_POSTS_PATH` | backend/.env | `/api/douyin/get-user-video-list/v3` |
-| `DOUYIN_RAPIDAPI_ENABLED` | backend/.env | `true` |
-| `DOUYIN_CREATOR_PROVIDER` | backend/.env | `rapidapi_justone` |
 | `RAPIDAPI_MONTHLY_REQUEST_LIMIT` | backend/.env | `20` |
 | `RAPIDAPI_QUOTA_SAFETY_MARGIN` | backend/.env | `1` |
 | `DOUYIN_INITIAL_IMPORT_MAX_PAGES` | backend/.env | `50` |
@@ -84,13 +82,10 @@
 | `DOUYIN_REFRESH_MAX_PAGES` | backend/.env | `3` |
 | `DOUYIN_AUTO_SCAN_ENABLED` | backend/.env | `false` (critical: no scheduled scanning) |
 
-### Douyin Feed API (OPTIONAL - self-hosted fallback)
+### Douyin scan limits (OPTIONAL)
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| `DOUYIN_FEED_API_BASE_URL` | backend/.env | Self-hosted Evil0ctal API |
-| `DOUYIN_FEED_API_KEY` | backend/.env | API key for self-hosted |
-| `DOUYIN_FEED_API_ENABLED` | backend/.env | `false` (default) |
 | `DOUYIN_MAX_PAGES_PER_SCAN` | backend/.env | `3` |
 
 ### Encryption / Security (REQUIRED)

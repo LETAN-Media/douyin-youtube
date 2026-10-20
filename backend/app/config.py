@@ -176,12 +176,29 @@ class Settings(BaseSettings):
     # month) and every PAGE costs one request, so Douyin discovery is
     # admin-driven only: one Initial Import for the backlog, then manual
     # "new videos" refreshes. See DOUYIN_AUTO_SCAN_ENABLED below.
-    douyin_creator_provider: str = "rapidapi_justone"
+    # Backward-compatible primary settings (existing deployment).
     rapidapi_key: str = ""
     douyin_rapidapi_host: str = ""
     douyin_rapidapi_base_url: str = ""
     douyin_rapidapi_user_posts_path: str = "/api/douyin/get-user-video-list/v3"
-    douyin_rapidapi_enabled: bool = True
+    douyin_rapidapi_timeout_seconds: float = 30.0
+    douyin_rapidapi_max_retries: int = 2
+
+    # Explicit primary provider (new structure). Empty values fall back to the
+    # legacy RAPIDAPI_KEY / DOUYIN_RAPIDAPI_HOST fields above.
+    douyin_rapidapi_primary_name: str = "RapidAPI Primary"
+    douyin_rapidapi_primary_key: str = ""
+    douyin_rapidapi_primary_host: str = ""
+    douyin_rapidapi_primary_base_url: str = ""
+    douyin_rapidapi_primary_user_posts_path: str = ""
+    douyin_rapidapi_primary_schema: str = "justone_v3"
+    douyin_rapidapi_primary_timeout_seconds: float = 30.0
+    douyin_rapidapi_primary_max_retries: int = 2
+    douyin_rapidapi_primary_monthly_request_limit: int = 20
+
+    # Optional DOUYIN_RAPIDAPI_FALLBACK_N_* providers (N = 1, 2, 3, ...) are
+    # discovered dynamically from ENV by app.integrations.rapidapi.provider_config.
+    # A slot with an empty HOST or KEY is skipped; the backend still starts.
 
     # RapidAPI quota guard. The BASIC plan bills per request and each feed
     # page is one request, so a full backlog import is N requests, never one.
@@ -202,12 +219,8 @@ class Settings(BaseSettings):
     # reads Inventory. Set true only for a deliberate one-off backfill.
     douyin_auto_scan_enabled: bool = False
 
-    # OPTIONAL fallbacks, default OFF (kept for manual/one-off use only):
-    # self-hosted Evil0ctal feed service and the generic http/playwright/yt-dlp
-    # providers are no longer part of the production creator scan path.
-    douyin_feed_api_base_url: str = ""
-    douyin_feed_api_key: str = ""
-    douyin_feed_api_enabled: bool = False
+    # Bounded page cap for providers that expose fetch_all instead of
+    # page-by-page inventory imports.
     douyin_max_pages_per_scan: int = 3
 
     # Failover providers (http_feed / playwright / yt-dlp). Default OFF: in

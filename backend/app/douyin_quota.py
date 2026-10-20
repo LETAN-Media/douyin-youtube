@@ -34,8 +34,9 @@ from app.models import AppSetting
 
 logger = logging.getLogger("douyin-youtube-quota")
 
-#: app_settings key holding the running quota record.
+#: app_settings key holding the running quota record for the primary provider.
 QUOTA_KEY = "rapidapi_quota_state"
+DEFAULT_PROVIDER_ID = "rapidapi_justone"
 
 STATUS_OK = "ok"
 STATUS_LOW = "low"
@@ -73,8 +74,18 @@ def safety_margin() -> int:
     return _int_setting("rapidapi_quota_safety_margin", 1)
 
 
-def _blank_state() -> dict[str, Any]:
-    limit = monthly_limit()
+def _quota_key(provider_id: str) -> str:
+    provider_id = (provider_id or DEFAULT_PROVIDER_ID).strip() or DEFAULT_PROVIDER_ID
+    if provider_id == DEFAULT_PROVIDER_ID:
+        return QUOTA_KEY
+    return f"{QUOTA_KEY}:{provider_id}"
+
+
+def _blank_state(
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> dict[str, Any]:
+    limit = int(default_limit) if default_limit and default_limit > 0 else monthly_limit()
     return {
         "month": month_key(),
         "limit": limit,
@@ -85,54 +96,76 @@ def _blank_state() -> dict[str, Any]:
         "source": "local",
         "last_error": None,
         "updated_at": utcnow().isoformat(),
+        "provider_id": provider_id,
     }
 
 
-def _load() -> dict[str, Any]:
+def _load(
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> dict[str, Any]:
     """Read the stored record, rolling it over when the month changes."""
+    key = _quota_key(provider_id)
     with SessionLocal() as db:
-        row = db.get(AppSetting, QUOTA_KEY)
+        row = db.get(AppSetting, key)
         raw = row.value if row is not None else None
 
     state: dict[str, Any]
     if not raw:
-        state = _blank_state()
+        state = _blank_state(provider_id, default_limit)
     else:
         try:
             parsed = json.loads(raw)
-            state = parsed if isinstance(parsed, dict) else _blank_state()
+            state = (
+                parsed
+                if isinstance(parsed, dict)
+                else _blank_state(provider_id, default_limit)
+            )
         except (TypeError, ValueError):
-            state = _blank_state()
+            state = _blank_state(provider_id, default_limit)
 
     if state.get("month") != month_key():
         # A new billing window: RapidAPI resets the counter, so we do too.
         previous = state.get("month")
-        state = _blank_state()
+        state = _blank_state(provider_id, default_limit)
         logger.info("RapidAPI quota window rolled over from %s", previous)
-        _save(state)
+        _save(state, provider_id)
 
+    if default_limit and default_limit > 0 and not raw:
+        state["limit"] = int(default_limit)
+        state["remaining"] = int(default_limit)
     state.setdefault("limit", monthly_limit())
     state.setdefault("remaining", state["limit"])
     state.setdefault("used", max(0, int(state["limit"]) - int(state["remaining"])))
+    state.setdefault("provider_id", provider_id)
     return state
 
 
-def _save(state: dict[str, Any]) -> dict[str, Any]:
+def _save(
+    state: dict[str, Any],
+    provider_id: str = DEFAULT_PROVIDER_ID,
+) -> dict[str, Any]:
     state["updated_at"] = utcnow().isoformat()
+    state.setdefault("provider_id", provider_id)
     payload = json.dumps(state)
+    key = _quota_key(provider_id)
     with SessionLocal() as db:
-        row = db.get(AppSetting, QUOTA_KEY)
+        row = db.get(AppSetting, key)
         if row is None:
-            db.add(AppSetting(key=QUOTA_KEY, value=payload))
+            db.add(AppSetting(key=key, value=payload))
         else:
             row.value = payload
         db.commit()
     return state
 
 
-def snapshot() -> dict[str, Any]:
-    """Public view for the UI. Contains no secrets."""
-    state = _load()
+def snapshot(
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    *,
+    default_limit: int | None = None,
+) -> dict[str, Any]:
+    """Public view for one provider. Contains no secrets."""
+    state = _load(provider_id, default_limit)
     limit = int(state.get("limit") or 0)
     remaining = int(state.get("remaining") or 0)
     if limit <= 0:
@@ -154,27 +187,38 @@ def snapshot() -> dict[str, Any]:
         "source": state.get("source"),
         "last_error": state.get("last_error"),
         "updated_at": state.get("updated_at"),
+        "provider_id": provider_id,
     }
 
 
-def can_spend(requests: int = 1) -> bool:
+def can_spend(
+    requests: int = 1,
+    *,
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> bool:
     """True when `requests` more calls stay above the safety floor.
 
     `requests` is the number of pages a caller is about to walk, so a refresh
     that might page twice can ask about 2 up front and be refused rather than
     stopping half-way.
     """
-    snap = snapshot()
+    snap = snapshot(provider_id, default_limit=default_limit)
     if snap["limit"] <= 0:
         return True
     return snap["remaining"] - max(1, int(requests)) >= safety_margin()
 
 
-def ensure_can_spend(requests: int = 1) -> None:
+def ensure_can_spend(
+    requests: int = 1,
+    *,
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> None:
     """Raise QuotaExhausted instead of spending past the floor."""
-    if can_spend(requests):
+    if can_spend(requests, provider_id=provider_id, default_limit=default_limit):
         return
-    snap = snapshot()
+    snap = snapshot(provider_id, default_limit=default_limit)
     raise QuotaExhausted(
         "RAPIDAPI_QUOTA_EXHAUSTED: "
         f"remaining={snap['remaining']}/{snap['limit']} "
@@ -183,17 +227,27 @@ def ensure_can_spend(requests: int = 1) -> None:
     )
 
 
-def note_local_spend(requests: int = 1) -> dict[str, Any]:
+def note_local_spend(
+    requests: int = 1,
+    *,
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> dict[str, Any]:
     """Account for requests the API did not report headers for."""
-    state = _load()
+    state = _load(provider_id, default_limit)
     state["used"] = int(state.get("used") or 0) + max(1, int(requests))
     if state.get("limit"):
         state["remaining"] = max(0, int(state["limit"]) - int(state["used"]))
     state["source"] = "local"
-    return _save(state)
+    return _save(state, provider_id)
 
 
-def record_headers(headers: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def record_headers(
+    headers: Mapping[str, Any] | None,
+    *,
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> dict[str, Any] | None:
     """Reconcile with RapidAPI's authoritative rate-limit headers.
 
     Returns the updated snapshot, or None when the response carried no quota
@@ -207,7 +261,7 @@ def record_headers(headers: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if limit_raw is None and remaining_raw is None:
         return None
 
-    state = _load()
+    state = _load(provider_id, default_limit)
 
     def _as_int(value: Any) -> int | None:
         try:
@@ -232,39 +286,50 @@ def record_headers(headers: Mapping[str, Any] | None) -> dict[str, Any] | None:
     state["exhausted"] = resolved_limit > 0 and resolved_remaining <= 0
     if state["exhausted"]:
         state["last_error"] = "RapidAPI monthly quota exhausted"
-    _save(state)
-    return snapshot()
+    _save(state, provider_id)
+    return snapshot(provider_id, default_limit=default_limit)
 
 
-def mark_exhausted(message: str | None = None) -> dict[str, Any]:
+def mark_exhausted(
+    message: str | None = None,
+    *,
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> dict[str, Any]:
     """Record a hard 429 / code 303 without retrying."""
-    state = _load()
+    state = _load(provider_id, default_limit)
     state["remaining"] = 0
     state["used"] = int(state.get("limit") or state.get("used") or 0)
     state["exhausted"] = True
     state["source"] = "header"
     state["last_error"] = (message or "RapidAPI monthly quota exhausted")[:500]
-    _save(state)
-    return snapshot()
+    _save(state, provider_id)
+    return snapshot(provider_id, default_limit=default_limit)
 
 
-def note_provider_error(message: str | None = None) -> None:
+def note_provider_error(
+    message: str | None = None,
+    *,
+    provider_id: str = DEFAULT_PROVIDER_ID,
+    default_limit: int | None = None,
+) -> None:
     """Record a non-quota failure so the UI can show why a scan stopped."""
-    state = _load()
+    state = _load(provider_id, default_limit)
     state["last_error"] = (message or "")[:500]
-    _save(state)
+    _save(state, provider_id)
 
 
-def reset_for_tests() -> None:
-    """Clear the stored record (used by tests only)."""
+def reset_for_tests(provider_id: str = DEFAULT_PROVIDER_ID) -> None:
+    """Clear the stored record for one provider (used by tests only)."""
     with SessionLocal() as db:
-        row = db.get(AppSetting, QUOTA_KEY)
+        row = db.get(AppSetting, _quota_key(provider_id))
         if row is not None:
             db.delete(row)
             db.commit()
 
 
 __all__ = [
+    "DEFAULT_PROVIDER_ID",
     "QUOTA_KEY",
     "STATUS_EXHAUSTED",
     "STATUS_LOW",

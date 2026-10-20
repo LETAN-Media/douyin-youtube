@@ -157,32 +157,6 @@ class TestInitialImport(_ImportTestBase):
             self.assertEqual(video.thumbnail_url, "https://cover.example/1.jpg")
             self.assertEqual(video.duration, 15)
 
-    def test_page_limit_pauses_with_resume_cursor(self):
-        class DouyinFeedPageLimitError(RuntimeError):
-            pass
-
-        provider = _FakeProvider([
-            {"items": [_video("1")], "has_more": True, "next_cursor": "100"},
-        ])
-        provider.name = "self_hosted"
-        real_fetch = provider.fetch_page
-
-        def fetch_page(sec_uid_or_url, cursor=None):
-            if len(provider.calls) >= 1:
-                raise DouyinFeedPageLimitError("UPSTREAM_RISK_CONTROL")
-            return real_fetch(sec_uid_or_url, cursor)
-
-        provider.fetch_page = fetch_page
-        with patch.object(douyin_import, "get_primary_provider", return_value=provider):
-            result = douyin_import.initial_import(self.source_id)
-
-        self.assertEqual(result["status"], douyin_import.STATUS_PAUSED)
-        self.assertEqual(result["cursor"], "100")
-        source = self._status()
-        self.assertEqual(source.initial_import_status, douyin_import.STATUS_PAUSED)
-        self.assertEqual(source.initial_import_cursor, "100")
-        self.assertEqual(source.provider_status, douyin_import.PROVIDER_RISK_CONTROL)
-
     def test_imported_backlog_stays_available(self):
         # Videos older than the pipeline backlog threshold become backlog,
         # not baseline: a manual import must feed the publish queue.
@@ -205,11 +179,11 @@ class TestInitialImport(_ImportTestBase):
 
 
 class TestResumeAndQuota(_ImportTestBase):
-    def test_self_hosted_import_ignores_rapidapi_quota_floor(self):
+    def test_non_rapidapi_import_ignores_rapidapi_quota_floor(self):
         provider = _FakeProvider([
             {"items": [_video("1")], "has_more": False, "next_cursor": ""},
         ])
-        provider.name = "self_hosted"
+        provider.name = "revid"
         with patch.object(douyin_import, "get_primary_provider", return_value=provider), \
              patch.object(douyin_quota, "can_spend", return_value=False):
             result = douyin_import.initial_import(self.source_id)

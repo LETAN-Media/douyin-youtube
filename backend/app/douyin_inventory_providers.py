@@ -1086,152 +1086,6 @@ class RevidDouyinFeedProvider(DouyinInventoryProvider):
         return text
 
 
-class SelfHostedDouyinFeedProvider(DouyinInventoryProvider):
-    """PRIMARY creator feed via the separate self-hosted Douyin Feed API
-    (Evil0ctal dtk v5 deployed independently, e.g. Northflank).
-
-    HTTP only — see app.integrations.douyin_feed.client. No Douyin cookie,
-    no browser, no embedded signing code in this repo. Discovery only;
-    downloading stays with download_video (Rcuts).
-    """
-
-    name = "self_hosted"
-
-    def fetch_page(
-        self,
-        sec_uid_or_url: str,
-        cursor: str | None = None,
-    ) -> dict[str, Any]:
-        """Fetch exactly one creator-feed page for resumable imports."""
-        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
-        if not sec_uid:
-            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
-        if not getattr(settings, "douyin_feed_api_enabled", True):
-            raise DouyinInventoryError("self_hosted provider disabled")
-
-        from app.integrations.douyin_feed.client import DouyinFeedClient
-
-        result = DouyinFeedClient().fetch_user_posts(
-            sec_uid,
-            cursor=cursor,
-            count=20,
-        )
-        next_cursor = str(result.get("next_cursor") or "")
-        if next_cursor in ("", "0"):
-            next_cursor = ""
-        return {
-            "items": [
-                self._normalize_feed_item(item)
-                for item in result.get("items", [])
-            ],
-            "has_more": bool(result.get("has_more")) and bool(next_cursor),
-            "next_cursor": next_cursor,
-        }
-
-    def fetch_all(
-        self,
-        profile_url: str,
-        sec_uid: str,
-        source_id: str,
-        cookie_jar: list[dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
-        return self._fetch(sec_uid or profile_url, full=True)
-
-    def fetch_latest(
-        self,
-        profile_url: str,
-        sec_uid: str,
-        source_id: str,
-        limit: int = 30,
-        cookie_jar: list[dict[str, Any]] | None = None,
-        only_cookies: bool = False,
-    ) -> list[dict[str, Any]]:
-        vids = self._fetch(sec_uid or profile_url, full=False)
-        return vids[:limit]
-
-    def _fetch(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
-        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
-        if not sec_uid:
-            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
-        if not getattr(settings, "douyin_feed_api_enabled", True):
-            raise DouyinInventoryError("self_hosted provider disabled")
-
-        from app.integrations.douyin_feed.client import DouyinFeedClient
-
-        client = DouyinFeedClient()
-        # scan_creator_posts keeps last-good-page on transient upstream risk
-        # flags (guest-identity pool reality) and never fails a whole scan for
-        # a deeper page.
-        raw_items = client.scan_creator_posts(
-            sec_uid,
-            max_pages=max(
-                1,
-                min(int(getattr(settings, "douyin_max_pages_per_scan", 3) or 3), 3),
-            ),
-            count=20,
-        )
-
-        ordered = [self._normalize_feed_item(item) for item in raw_items]
-
-        logger.info(
-            "self_hosted douyin_feed collected %s videos for secUid=%s",
-            len(ordered),
-            sec_uid[:12],
-        )
-        return ordered
-
-    @staticmethod
-    def _normalize_feed_item(item: dict[str, Any]) -> dict[str, Any]:
-        aweme_id = str(item.get("aweme_id") or "").strip()
-        share_url = str(
-            item.get("share_url")
-            or f"https://www.douyin.com/video/{aweme_id}"
-        )
-        caption = str(item.get("caption") or "")
-        try:
-            ts = int(item.get("create_time") or 0)
-        except (TypeError, ValueError):
-            ts = 0
-        douyin_created_at = (
-            datetime.fromtimestamp(ts, tz=timezone.utc) if ts > 0 else None
-        )
-        try:
-            duration = int(item.get("duration") or 0) or None
-        except (TypeError, ValueError):
-            duration = None
-        return {
-            "video_id": aweme_id,
-            "aweme_id": aweme_id,
-            "title": caption[:200] if caption else aweme_id,
-            "description": caption[:1000],
-            "url": share_url,
-            "douyin_created_at": douyin_created_at,
-            "author": "",
-            "cover": str(item.get("cover_url") or ""),
-            "duration": duration,
-            "share_url": share_url,
-            "create_time": ts,
-        }
-
-    @staticmethod
-    def _resolve_sec_uid(value: str) -> str:
-        text = (value or "").strip()
-        if not text:
-            return ""
-        if text.startswith("http"):
-            try:
-                from app.douyin_url import parse_douyin_profile_url
-
-                parsed = parse_douyin_profile_url(text)
-                if parsed is not None:
-                    return parsed.sec_uid
-            except Exception:
-                pass
-            cleaned = text.rstrip("/").split("?")[0]
-            return cleaned.rsplit("/", 1)[-1]
-        return text
-
-
 class JustOneRapidApiProvider(DouyinInventoryProvider):
     """PRIMARY creator feed via JustOneAPI (RapidAPI gateway, no cookie).
 
@@ -1282,8 +1136,6 @@ class JustOneRapidApiProvider(DouyinInventoryProvider):
         sec_uid = self._resolve_sec_uid(sec_uid_or_url)
         if not sec_uid:
             raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
-        if not getattr(settings, "douyin_rapidapi_enabled", True):
-            raise DouyinInventoryError("rapidapi_justone disabled")
 
         from app.integrations.rapidapi.justone import fetch_user_posts
 
@@ -1332,8 +1184,6 @@ class JustOneRapidApiProvider(DouyinInventoryProvider):
         sec_uid = self._resolve_sec_uid(sec_uid_or_url)
         if not sec_uid:
             raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
-        if not getattr(settings, "douyin_rapidapi_enabled", True):
-            raise DouyinInventoryError("rapidapi_justone disabled")
 
         collected: dict[str, dict[str, Any]] = {}
         max_cursor: str | None = None
@@ -1405,40 +1255,157 @@ class JustOneRapidApiProvider(DouyinInventoryProvider):
         return text
 
 
-def get_primary_provider() -> DouyinInventoryProvider:
-    """Primary creator feed.
+class RapidApiPoolProvider(DouyinInventoryProvider):
+    """Primary creator feed backed by an ordered RapidAPI provider pool.
 
-    Manual-inventory mode: rapidapi_justone is the default and is the ONLY
-    provider in the production discovery path. Every page costs one billed
-    RapidAPI request, so nothing auto-polls it. self_hosted / revid are kept as
-    optional, explicit opt-ins (default OFF) and are never reached implicitly.
+    The pool handles 429/quota/timeout/5xx/auth/schema failover. Pagination is
+    sticky per provider; a switch resets the provider cursor and the import
+    engine deduplicates by video ID.
     """
-    provider_setting = (getattr(settings, "douyin_creator_provider", "") or "").strip()
-    if provider_setting in ("rapidapi_justone", ""):
-        if (settings.rapidapi_key or "").strip() and (
-            (settings.douyin_rapidapi_host or "").strip()
-            or (settings.douyin_rapidapi_base_url or "").strip()
-        ):
-            return JustOneRapidApiProvider()
-    # Self-hosted feed API only when explicitly selected AND enabled.
-    if provider_setting == "self_hosted" and getattr(settings, "douyin_feed_api_enabled", False):
-        if (settings.douyin_feed_api_base_url or "").strip():
-            return SelfHostedDouyinFeedProvider()
-    # Revid only when explicitly selected AND enabled.
-    if provider_setting == "revid" and getattr(settings, "revid_scan_enabled", False):
-        if (settings.revid_api_key or "").strip():
-            return RevidDouyinFeedProvider()
-    # No free anonymous/browser fallback in the manual-inventory path.
-    return JustOneRapidApiProvider()
+
+    name = "rapidapi_pool"
+    uses_rapidapi_quota = True
+
+    @staticmethod
+    def _pool():
+        from app.integrations.rapidapi.pool import get_rapidapi_pool
+
+        return get_rapidapi_pool()
+
+    def default_provider_id(self) -> str:
+        return self._pool().default_provider_id()
+
+    def has_available_provider(self) -> bool:
+        return self._pool().has_available_provider()
+
+    def quota_status(self) -> dict[str, Any]:
+        return self._pool().quota_status()
+
+    def open_scan(
+        self,
+        sec_uid: str,
+        preferred_provider_id: str | None = None,
+    ):
+        return self._pool().open_session(
+            sec_uid,
+            preferred_provider_id=preferred_provider_id,
+        )
+
+    def fetch_page(
+        self,
+        sec_uid_or_url: str,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
+        if not sec_uid:
+            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
+        session = self._pool().open_session(sec_uid)
+        page = session.fetch_page(cursor)
+        return {
+            "items": [
+                self._normalize_item(item) for item in page.get("items", [])
+            ],
+            "has_more": bool(page.get("has_more")),
+            "next_cursor": str(page.get("next_cursor") or ""),
+            "provider_id": page.get("provider_id"),
+            "provider_name": page.get("provider_name"),
+            "provider_switched": bool(page.get("provider_switched")),
+        }
+
+    def fetch_all_with_provider(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        *,
+        preferred_provider_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str]:
+        sec_uid = sec_uid or self._resolve_sec_uid(profile_url)
+        if not sec_uid:
+            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
+        session = self._pool().open_session(
+            sec_uid,
+            preferred_provider_id=preferred_provider_id,
+        )
+        max_pages = max(
+            1,
+            min(int(getattr(settings, "douyin_max_pages_per_scan", 3) or 3), 6),
+        )
+        collected: dict[str, dict[str, Any]] = {}
+        cursor: str | None = None
+        for _ in range(max_pages):
+            page = session.fetch_page(cursor)
+            for item in page.get("items", []):
+                normalized = self._normalize_item(item)
+                vid = normalized.get("video_id")
+                if vid:
+                    collected.setdefault(str(vid), normalized)
+            if not page.get("has_more"):
+                break
+            next_cursor = str(page.get("next_cursor") or "")
+            if next_cursor in ("", "0"):
+                break
+            cursor = next_cursor
+        ordered = list(collected.values())
+        ordered.sort(key=lambda v: int(v.get("create_time") or 0), reverse=True)
+        return ordered, session.provider_id or self.default_provider_id()
+
+    def fetch_all(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        videos, _ = self.fetch_all_with_provider(
+            profile_url, sec_uid, source_id, cookie_jar
+        )
+        return videos
+
+    def fetch_latest(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self.fetch_all(profile_url, sec_uid, source_id, cookie_jar)[:limit]
+
+    @staticmethod
+    def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
+        return JustOneRapidApiProvider._normalize_justone_item(item)
+
+    @staticmethod
+    def _resolve_sec_uid(value: str) -> str:
+        return JustOneRapidApiProvider._resolve_sec_uid(value)
+
+
+def get_primary_provider() -> DouyinInventoryProvider:
+    """Primary creator feed: ordered RapidAPI provider pool.
+
+    Discovery is admin-driven and every page costs one billed request. Each
+    provider has its own quota record; the pool skips exhausted/cooling
+    providers and falls through to the next one.
+    """
+    return RapidApiPoolProvider()
+
+
+def get_default_provider_id() -> str:
+    """Provider id recorded on a new source before its first page is fetched."""
+    try:
+        return RapidApiPoolProvider().default_provider_id()
+    except Exception:
+        return "rapidapi_justone"
 
 
 def get_secondary_provider() -> DouyinInventoryProvider | None:
-    """Optional failover. OFF unless DOUYIN_CREATOR_FALLBACKS_ENABLED=true."""
+    """Optional non-RapidAPI failover, OFF by default."""
     if not getattr(settings, "douyin_creator_fallbacks_enabled", False):
         return None
-    if isinstance(get_primary_provider(), JustOneRapidApiProvider):
-        return HttpDouyinFeedProvider()
-    return PlaywrightDouyinInventoryProvider()
+    return HttpDouyinFeedProvider()
 
 
 def get_fallback_provider() -> DouyinInventoryProvider | None:
@@ -1458,18 +1425,35 @@ def discover_profile_videos(
 ) -> tuple[list[dict[str, Any]], str]:
     """Run the primary provider, then optional failovers if enabled.
 
-    In manual-inventory mode the primary (rapidapi_justone) is the only
-    provider that runs; get_secondary_provider()/get_fallback_provider()
-    return None unless DOUYIN_CREATOR_FALLBACKS_ENABLED=true.
+    The RapidAPI pool is tried first, including its own ordered fallbacks.
+    Non-RapidAPI providers run only when DOUYIN_CREATOR_FALLBACKS_ENABLED=true.
 
     Returns (videos, provider_name). Auth-required is never silently
     converted to an empty completed result by the caller.
     """
     last_auth_exc: Exception | None = None
+    primary = get_primary_provider()
+
+    if isinstance(primary, RapidApiPoolProvider):
+        try:
+            videos, provider_name = primary.fetch_all_with_provider(
+                profile_url, sec_uid, source_id, cookie_jar
+            )
+            if not full:
+                videos = videos[:30]
+            return videos, provider_name
+        except Exception as exc:
+            if not getattr(settings, "douyin_creator_fallbacks_enabled", False):
+                raise
+            logger.warning("RapidAPI pool failed, trying legacy fallbacks: %s", exc)
+            if isinstance(exc, DouyinAuthRequiredError):
+                last_auth_exc = exc
+            primary = None
+
     chain = [
         provider
         for provider in (
-            get_primary_provider(),
+            primary,
             get_secondary_provider(),
             get_fallback_provider(),
         )
@@ -1481,7 +1465,7 @@ def discover_profile_videos(
                 videos = provider.fetch_all(profile_url, sec_uid, source_id, cookie_jar)
             else:
                 if provider.name in (
-                    "http_feed", "playwright", "revid", "rapidapi_justone", "self_hosted",
+                    "http_feed", "playwright", "revid", "rapidapi_justone",
                 ):
                     videos = provider.fetch_latest(
                         profile_url, sec_uid, source_id,

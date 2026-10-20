@@ -1680,14 +1680,14 @@ def create_pipeline_source(
         inventory_sync_status="idle",
         inventory_count=0,
         inventory_sync_error=None,
-        feed_provider=getattr(settings, "douyin_creator_provider", "rapidapi_justone") or "rapidapi_justone",
+        feed_provider="rapidapi_justone",
         initial_import_status="pending",
     )
 
     try:
-        from app.douyin_inventory_providers import get_primary_provider
+        from app.douyin_inventory_providers import get_default_provider_id
 
-        source.feed_provider = get_primary_provider().name
+        source.feed_provider = get_default_provider_id()
     except Exception:
         pass
 
@@ -5312,9 +5312,9 @@ def add_channel_source_endpoint(
         order=payload.order,
     )
     try:
-        from app.douyin_inventory_providers import get_primary_provider
+        from app.douyin_inventory_providers import get_default_provider_id
 
-        source.feed_provider = get_primary_provider().name
+        source.feed_provider = get_default_provider_id()
     except Exception:
         pass
     db.add(source)
