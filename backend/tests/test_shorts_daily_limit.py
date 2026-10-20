@@ -949,3 +949,19 @@ def test_10_day_rollover_resets_quota_queue_continues(tclient, db):
     )
     assert res.status_code == 202
 
+
+
+def test_scheduler_status_endpoint_uses_loaded_pipeline(db, tclient):
+    pipe = make_pipeline(db)
+    make_destination(db, pipe)
+    video = make_video(db, pipe)
+    video.status = "new"
+    db.commit()
+
+    resp = tclient.get(f"/api/pipelines/{pipe.id}/scheduler-status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pipeline_enabled"] is True
+    assert body["inventory_available"] >= 1
+    assert body["destinations_total"] == 1

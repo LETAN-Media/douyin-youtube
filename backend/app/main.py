@@ -3712,7 +3712,7 @@ def pipeline_scheduler_status(
         get_slots_between,
     )
 
-    require_pipeline(db, pipeline_id)
+    pipeline = require_pipeline(db, pipeline_id)
 
     now = _utcnow()
     destinations = list(
