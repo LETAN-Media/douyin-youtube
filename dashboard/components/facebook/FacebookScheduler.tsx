@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { Card, CardHeader, Badge, btnSmall, inputCls, labelCls } from "@/components/ui";
-import { IconCalendar, IconCheck, IconPlay, IconClock } from "@/components/icons";
+import { IconCalendar, IconCheck, IconPlay } from "@/components/icons";
 import type { FacebookScheduleStatus, FacebookScheduleDto, UpdateFacebookScheduleDto } from "@/lib/facebook-api";
 
 const WEEKDAY_NAMES = ["Chủ nhật", "Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7"];
@@ -36,13 +36,57 @@ const TIMEZONE_OPTIONS = [
   { value: "UTC", label: "UTC" },
 ];
 
-const MAX_DAILY_OPTIONS = [
-  { value: "1", label: "1" },
-  { value: "2", label: "2" },
-  { value: "3", label: "3" },
-  { value: "4", label: "4" },
-  { value: "5", label: "5" },
-];
+const MAX_SLOTS_PER_DAY = 1000;
+
+function parseMaxDailyInput(raw: string): { value: number | null; error: string | null } {
+  const text = raw.trim();
+  if (!text) return { value: null, error: "Vui lòng nhập Max videos/day." };
+  if (!/^\d+$/.test(text)) {
+    return { value: null, error: "Max videos/day phải là số nguyên dương." };
+  }
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    return { value: null, error: "Max videos/day phải là số nguyên từ 1 trở lên." };
+  }
+  if (value > MAX_SLOTS_PER_DAY) {
+    return {
+      value: null,
+      error: `Max videos/day tối đa ${MAX_SLOTS_PER_DAY} (giới hạn an toàn của hệ thống).`,
+    };
+  }
+  return { value, error: null };
+}
+
+function schedulerStateLabel(state: FacebookScheduleStatus["scheduler_state"]): string {
+  switch (state) {
+    case "running":
+      return "Running";
+    case "daily_limit_reached":
+      return "Daily limit reached";
+    case "quota_paused":
+      return "Quota paused";
+    case "no_inventory":
+      return "No inventory";
+    default:
+      return "Waiting";
+  }
+}
+
+function schedulerStateTone(
+  state: FacebookScheduleStatus["scheduler_state"],
+): "green" | "amber" | "red" | "slate" {
+  switch (state) {
+    case "running":
+      return "green";
+    case "quota_paused":
+    case "daily_limit_reached":
+      return "amber";
+    case "no_inventory":
+      return "red";
+    default:
+      return "slate";
+  }
+}
 
 async function fetchSchedule(pipelineId: string): Promise<FacebookScheduleDto> {
   const res = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}`, {
@@ -75,6 +119,10 @@ type BatchRunResult = {
   videos_enqueued: number;
   reason: string | null;
   message: string;
+  warning?: string | null;
+  capacity_limited?: boolean;
+  daily_limit?: number | null;
+  slot_capacity?: number | null;
 };
 
 function describeBatchResult(
@@ -89,16 +137,24 @@ function describeBatchResult(
       : "";
   // A positive enqueue count is always reported as such — never fall back
   // to "no video" wording when videos were actually scheduled.
-  if (n > 0 && !reason) return `Đã xếp ${n} video vào hàng đợi`;
+  if (n > 0 && !reason) {
+    return result.warning
+      ? `Đã xếp ${n} video vào hàng đợi. ${result.warning}`
+      : `Đã xếp ${n} video vào hàng đợi`;
+  }
   switch (reason) {
     case "BATCH_ALREADY_COMPLETED":
       return (
-        `Batch hôm nay đã chạy xong · ${n} video đã được xếp lịch.` + invSuffix
+        `Batch hôm nay đã chạy xong · ${n} video đã được xếp lịch.` +
+        (result.warning ? ` ${result.warning}` : "") +
+        invSuffix
       );
     case "BATCH_IN_PROGRESS":
       return "Batch hôm nay đang chạy.";
     case "DAILY_LIMIT_REACHED":
       return `Đã đạt giới hạn phát hành hôm nay (${ctx.dailyLimit} video).`;
+    case "QUOTA_PAUSED":
+      return "YouTube đang tạm dừng do quota/rate limit. Hệ thống sẽ tự thử lại sau.";
     case "NO_FUTURE_SLOTS":
       return "Hôm nay không còn khung giờ đăng nào ở tương lai.";
     case "AUTO_PUBLISH_DISABLED":
@@ -152,43 +208,83 @@ export function FacebookScheduler({
   const [runningBatch, setRunningBatch] = useState(false);
   const [showRunConfirm, setShowRunConfirm] = useState(false);
   const [runResult, setRunResult] = useState<string | null>(null);
+  const [maxDailyInput, setMaxDailyInput] = useState(
+    String(initialSchedule?.max_daily_publish ?? initialStatus?.daily_limit ?? 5),
+  );
 
-  const scheduleRef = schedule || {
-    id: "",
-    pipeline_id: pipelineId,
-    timezone: "Asia/Ho_Chi_Minh",
-    enabled: false, // Default false, will be overridden by user when creating
-    max_daily_publish: 5,
-    batch_time: "06:00",
-    slots: DEFAULT_SLOTS,
-    created_at: null,
-    updated_at: null,
-  };
+  const scheduleRef = useMemo(
+    () =>
+      schedule || {
+        id: "",
+        pipeline_id: pipelineId,
+        timezone: "Asia/Ho_Chi_Minh",
+        enabled: false, // Default false, will be overridden by user when creating
+        max_daily_publish: 5,
+        batch_time: "06:00",
+        slots: DEFAULT_SLOTS,
+        created_at: null,
+        updated_at: null,
+      },
+    [schedule, pipelineId],
+  );
+
+  const parsedMaxDaily = parseMaxDailyInput(maxDailyInput);
+  const slotLimit = Math.min(
+    MAX_SLOTS_PER_DAY,
+    Math.max(5, parsedMaxDaily.value ?? scheduleRef.max_daily_publish),
+  );
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/facebook/scheduler/${encodeURIComponent(pipelineId)}/status`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as FacebookScheduleStatus | null;
+      if (data) setStatus(data);
+    } catch {
+      // Non-fatal: progress display keeps the last known backend snapshot.
+    }
+  }, [pipelineId]);
+
+  useEffect(() => {
+    const timer = setInterval(refreshStatus, 30000);
+    return () => clearInterval(timer);
+  }, [refreshStatus]);
 
   const handleSave = useCallback(async () => {
     // Allow saving even when schedule is null (creating new)
     const toSave = schedule || scheduleRef;
+    const parsed = parseMaxDailyInput(maxDailyInput);
+    if (parsed.value === null) {
+      setRunResult(`Lỗi: ${parsed.error}`);
+      setTimeout(() => setRunResult(null), 5000);
+      return;
+    }
     setSaving(true);
     try {
       const payload: UpdateFacebookScheduleDto = {
         enabled: toSave.enabled,
         timezone: toSave.timezone,
-        max_daily_publish: toSave.max_daily_publish,
+        max_daily_publish: parsed.value,
         batch_time: toSave.batch_time,
         slots: toSave.slots,
       };
       const updated = await saveSchedule(pipelineId, payload);
       setSchedule(updated);
+      setMaxDailyInput(String(updated.max_daily_publish));
       setEditing(false);
       setRunResult("Đã lưu lịch thành công");
       setTimeout(() => setRunResult(null), 3000);
+      void refreshStatus();
     } catch (err: any) {
       setRunResult(`Lỗi: ${err.message || "Không thể lưu lịch"}`);
       setTimeout(() => setRunResult(null), 5000);
     } finally {
       setSaving(false);
     }
-  }, [pipelineId, schedule]);
+  }, [pipelineId, schedule, scheduleRef, maxDailyInput, refreshStatus]);
 
   const handleRunBatch = useCallback(async () => {
     if (!destinationId) return;
@@ -199,28 +295,20 @@ export function FacebookScheduler({
         describeBatchResult(result, {
           inventoryTotal: status?.inventory_total ?? null,
           aiReady: status?.ai_ready ?? null,
-          dailyLimit: status?.daily_limit ?? 5,
+          dailyLimit: schedule?.max_daily_publish ?? status?.daily_limit ?? 5,
         }),
       );
       setTimeout(() => setRunResult(null), result.videos_enqueued > 0 && !result.reason ? 5000 : 8000);
       setShowRunConfirm(false);
       // Refresh counters so the UI reflects any newly queued work.
-      try {
-        const fresh = await fetch(`/api/facebook/scheduler/${encodeURIComponent(pipelineId)}`);
-        if (fresh.ok) {
-          const data = await fresh.json().catch(() => null);
-          if (data?.status) setStatus(data.status);
-        }
-      } catch {
-        // Non-fatal: the batch result above is the source of truth.
-      }
+      void refreshStatus();
     } catch (err: any) {
       setRunResult(`Lỗi: ${err.message || "Không thể chạy batch"}`);
       setTimeout(() => setRunResult(null), 5000);
     } finally {
       setRunningBatch(false);
     }
-  }, [pipelineId, destinationId, status]);
+  }, [pipelineId, destinationId, status, schedule, refreshStatus]);
 
   const handleSlotChange = (dayKey: string, times: string[]) => {
     setSchedule(prev => prev ? { ...prev, slots: { ...prev.slots, [dayKey]: times } } : null);
@@ -228,7 +316,7 @@ export function FacebookScheduler({
 
   const handleAddSlot = (dayKey: string) => {
     const current = scheduleRef.slots[dayKey] || [];
-    if (current.length >= 5) return;
+    if (current.length >= slotLimit) return;
     const newTime = "00:00";
     handleSlotChange(dayKey, [...current, newTime]);
   };
@@ -245,9 +333,14 @@ export function FacebookScheduler({
     handleSlotChange(dayKey, updated);
   };
 
-  const batchStatus = status?.batch_status || "idle";
   const scheduledToday = status?.scheduled_today ?? 0;
-  const dailyLimit = status?.daily_limit ?? 5;
+  const dailyLimit = status?.daily_limit ?? scheduleRef.max_daily_publish ?? 5;
+  const publishedToday = status?.published_today ?? 0;
+  const committedToday = status?.committed_today ?? scheduledToday;
+  const remainingToday = status?.remaining_today ?? Math.max(0, dailyLimit - committedToday);
+  const schedulerState = status?.scheduler_state ?? "waiting";
+  const nextPublishAt = status?.next_publish_at || status?.next_batch_at || null;
+  const capacityWarning = status?.capacity_warning ?? null;
   const slots = status?.slots || [];
   const invTotal = status?.inventory_total ?? null;
   const aiReady = status?.ai_ready ?? null;
@@ -288,47 +381,51 @@ export function FacebookScheduler({
                 Batch: {scheduleRef.batch_time || "06:00"}
               </span>
               <span className="text-xs text-slate-500">
-                Max/day: {scheduleRef.max_daily_publish}
+                Max videos/day: {scheduleRef.max_daily_publish}
               </span>
             </div>
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
-                <p className="text-xs text-slate-500">Hôm nay</p>
+                <p className="text-xs text-slate-500">Scheduler</p>
                 <p className="text-sm font-bold text-slate-900">
-                  {WEEKDAY_NAMES_MONDAY_FIRST[
-                    Math.min(Math.max(status?.weekday ?? 0, 0), 6)
-                  ]}
-                </p>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
-                <p className="text-xs text-slate-500">Batch</p>
-                <p className="text-sm font-bold text-slate-900">
-                  <Badge tone={
-                    batchStatus === "completed" ? "green" :
-                    batchStatus === "running" ? "amber" :
-                    batchStatus === "failed" ? "red" :
-                    "slate"
-                  }>
-                    {batchStatus}
+                  <Badge tone={schedulerStateTone(schedulerState)}>
+                    {schedulerStateLabel(schedulerState)}
                   </Badge>
                 </p>
               </div>
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
-                <p className="text-xs text-slate-500">Scheduled</p>
+                <p className="text-xs text-slate-500">Đã đăng hôm nay</p>
                 <p className="text-sm font-bold text-slate-900">
-                  {scheduledToday}/{dailyLimit}
+                  {publishedToday}/{dailyLimit}
                 </p>
               </div>
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
-                <p className="text-xs text-slate-500">Next batch</p>
+                <p className="text-xs text-slate-500">Còn lại</p>
                 <p className="text-sm font-bold text-slate-900">
-                  {status?.next_batch_at
-                    ? new Date(status.next_batch_at).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
+                  {remainingToday}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                <p className="text-xs text-slate-500">Lượt kế tiếp</p>
+                <p className="text-sm font-bold text-slate-900">
+                  {nextPublishAt
+                    ? new Date(nextPublishAt).toLocaleString("vi-VN", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        day: "2-digit",
+                        month: "2-digit",
+                      })
                     : "—"}
                 </p>
               </div>
             </div>
+
+            {capacityWarning ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-800">
+                {capacityWarning}
+              </div>
+            ) : null}
 
             {invTotal !== null || queueQueued !== null || batchPlanned !== null ? (
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -416,7 +513,10 @@ export function FacebookScheduler({
 
             <div className="flex items-center gap-3 pt-2 border-t border-slate-100">
               <button
-                onClick={() => setEditing(true)}
+                onClick={() => {
+                  setMaxDailyInput(String(scheduleRef.max_daily_publish));
+                  setEditing(true);
+                }}
                 className={btnSmall}
                 disabled={saving || runningBatch}
               >
@@ -476,21 +576,29 @@ export function FacebookScheduler({
                   />
                 </div>
                 <div>
-                  <label className={labelCls}>Max/day</label>
-                  <select
-                    value={String(scheduleRef.max_daily_publish)}
-                    onChange={(e) => setSchedule(prev => prev ? { ...prev, max_daily_publish: Number(e.target.value) } : null)}
+                  <label className={labelCls}>Max videos/day</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_SLOTS_PER_DAY}
+                    step={1}
+                    inputMode="numeric"
+                    value={maxDailyInput}
+                    onChange={(e) => setMaxDailyInput(e.target.value)}
                     className={inputCls}
-                  >
-                    {MAX_DAILY_OPTIONS.map(opt => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
+                    aria-invalid={Boolean(parsedMaxDaily.error)}
+                  />
+                  <p className={`mt-1 text-xs ${parsedMaxDaily.error ? "text-rose-600" : "text-slate-500"}`}>
+                    {parsedMaxDaily.error
+                      ?? "Số nguyên từ 1 trở lên. Đây là giới hạn tối đa, không phải cam kết đăng đủ."}
+                  </p>
                 </div>
               </div>
 
               <div>
-                <p className="mb-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">Lịch tuần (tối đa 5 slots/ngày)</p>
+                <p className="mb-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  Lịch tuần (tối đa {slotLimit} slots/ngày theo Max videos/day)
+                </p>
                 <div className="space-y-2 max-h-96 overflow-y-auto">
                   {WEEKDAY_KEYS.map((dayKey, dayIndex) => (
                     <div key={dayKey} className="flex items-start gap-2 rounded-xl border border-slate-100 bg-white p-2">
@@ -516,7 +624,7 @@ export function FacebookScheduler({
                             </button>
                           </div>
                         ))}
-                        {(scheduleRef.slots[dayKey] || []).length < 5 && (
+                        {(scheduleRef.slots[dayKey] || []).length < slotLimit && (
                           <button
                             type="button"
                             onClick={() => handleAddSlot(dayKey)}
@@ -551,7 +659,10 @@ export function FacebookScheduler({
                 )}
               </button>
               <button
-                onClick={() => setEditing(false)}
+                onClick={() => {
+                  setMaxDailyInput(String(scheduleRef.max_daily_publish));
+                  setEditing(false);
+                }}
                 className={btnSmall}
                 disabled={saving}
               >

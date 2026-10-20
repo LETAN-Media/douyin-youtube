@@ -314,6 +314,72 @@ async def status_counts_for_pipeline(pipeline_id: str) -> dict[str, int]:
     return {r[0]: r[1] for r in (rows.rows or [])}
 
 
+async def scheduler_day_stats(
+    pipeline_id: str,
+    *,
+    start_utc_iso: str,
+    end_utc_iso: str,
+    now_utc_iso: str,
+) -> dict[str, int | str | None]:
+    """Real scheduler usage for one pipeline/local day.
+
+    `committed` counts every live publication assigned to the day
+    (queued/processing/scheduled/published). `published` counts the subset
+    already uploaded to YouTube (scheduled) or live (published). Publications
+    without a scheduled_publish_at fall back to published_at.
+    """
+    client = get_client()
+    rows = await client.execute(
+        """
+        SELECT
+            SUM(CASE WHEN p.status IN ('scheduled', 'published') THEN 1 ELSE 0 END),
+            SUM(CASE WHEN p.status IN ('queued', 'processing', 'scheduled', 'published')
+                     THEN 1 ELSE 0 END)
+        FROM publications p
+        JOIN youtube_destinations d ON d.id = p.destination_id
+        WHERE d.pipeline_id = :pipeline_id
+        AND p.status IN ('queued', 'processing', 'scheduled', 'published')
+        AND (
+            (p.scheduled_publish_at IS NOT NULL
+             AND p.scheduled_publish_at >= :start
+             AND p.scheduled_publish_at < :end)
+            OR
+            (p.scheduled_publish_at IS NULL
+             AND p.published_at IS NOT NULL
+             AND p.published_at >= :start
+             AND p.published_at < :end)
+        )
+        """,
+        {
+            "pipeline_id": pipeline_id,
+            "start": start_utc_iso,
+            "end": end_utc_iso,
+        },
+    )
+    row = rows.rows[0] if rows.rows else (0, 0)
+    published = int(row[0] or 0)
+    committed = int(row[1] or 0)
+
+    next_rows = await client.execute(
+        """
+        SELECT MIN(p.scheduled_publish_at)
+        FROM publications p
+        JOIN youtube_destinations d ON d.id = p.destination_id
+        WHERE d.pipeline_id = :pipeline_id
+        AND p.status IN ('queued', 'processing', 'scheduled')
+        AND p.scheduled_publish_at IS NOT NULL
+        AND p.scheduled_publish_at >= :now
+        """,
+        {"pipeline_id": pipeline_id, "now": now_utc_iso},
+    )
+    next_at = next_rows.rows[0][0] if next_rows.rows else None
+    return {
+        "published_today": published,
+        "committed_today": committed,
+        "next_publish_at": next_at,
+    }
+
+
 async def list_publications(destination_id: str) -> list[dict[str, Any]]:
     client = get_client()
     rows = await client.execute(

@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 
 from ..config import settings
-from ..db.repositories import ai_metadata as ai_metadata_repo, destinations, pipelines, publications, publish_queue, reels, youtube_auth
+from ..db.repositories import ai_metadata as ai_metadata_repo, destinations, pipelines, publications, publish_queue, quota as quota_repo, reels, youtube_auth
 from .facebook_media import (
     TMP_ROOT,
     FacebookMediaError,
@@ -29,6 +29,7 @@ from .facebook_media import (
     job_dir,
 )
 from .facebook_youtube_publisher import (
+    QUOTA_EXCEEDED,
     YouTubePublisherError,
     finalize_description,
     load_destination_credentials_async,
@@ -89,6 +90,47 @@ async def _fail_job(
         "elapsed_s": time.monotonic() - started,
         "error_code": error_code,
         "error": error,
+        **extra,
+    }
+
+
+async def _pause_for_quota(
+    queue_id: str,
+    publication_id: str | None,
+    reel_db_id: str | None,
+    target_dir: Path,
+    started: float,
+    error: str,
+    **extra,
+) -> dict:
+    """Pause one pipeline and keep its job durable for a later retry.
+
+    Quota/rate-limit rejection is not a permanent video failure: the reel and
+    publication stay claimable, and the queue row goes back to 'queued' so it
+    is picked up after the pause expires.
+    """
+    pause_minutes = max(1, int(settings.FACEBOOK_QUOTA_PAUSE_MINUTES or 60))
+    await quota_repo.pause_pipeline(
+        extra.get("pipeline_id") or "",
+        minutes=pause_minutes,
+        reason=QUOTA_EXCEEDED,
+    )
+    cleanup_job_dir(target_dir)
+    if reel_db_id:
+        await reels.update_reel_status(reel_db_id, "queued")
+    await publish_queue.requeue_job(
+        queue_id,
+        stage="quota_paused",
+        error_code=QUOTA_EXCEEDED,
+        error=error,
+    )
+    return {
+        "queue_id": queue_id,
+        "result": "quota_paused",
+        "elapsed_s": time.monotonic() - started,
+        "error_code": QUOTA_EXCEEDED,
+        "error": error,
+        "paused_minutes": pause_minutes,
         **extra,
     }
 
@@ -282,6 +324,12 @@ async def _process_one_job(
             youtube_factory=youtube_factory,
         )
     except YouTubePublisherError as exc:
+        if exc.code == QUOTA_EXCEEDED:
+            return await _pause_for_quota(
+                queue_id, publication_id, reel_db_id, target_dir, started,
+                str(exc), pipeline_id=pipeline_id,
+                **{**base, "file_bytes": file_bytes, **ai_info},
+            )
         return await _fail_job(
             queue_id, publication_id, target_dir, started,
             exc.code, str(exc), **{**base, "file_bytes": file_bytes, **ai_info},

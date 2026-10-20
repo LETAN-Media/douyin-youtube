@@ -326,6 +326,18 @@ async def migrate() -> None:
     if not await _has_column(client, "publications", "shorts_check_note"):
         statements_19.append("ALTER TABLE publications ADD COLUMN shorts_check_note TEXT")
     await _apply_migration(client, applied, "20241005_19", statements_19)
+    statements_20: list[str] = [
+        """
+        CREATE TABLE IF NOT EXISTS facebook_quota_pauses (
+            pipeline_id TEXT PRIMARY KEY,
+            paused_until TEXT NOT NULL,
+            reason TEXT,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_quota_pauses_until ON facebook_quota_pauses(paused_until)",
+    ]
+    await _apply_migration(client, applied, "20261020_20", statements_20)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

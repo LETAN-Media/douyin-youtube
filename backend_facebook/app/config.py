@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     FACEBOOK_PUBLISH_POLL_SECONDS: int = 5
     FACEBOOK_PUBLISH_WORKER_ENABLED: bool = True
     FACEBOOK_PUBLISH_STALE_TTL_SECONDS: int = 300
+    # On YouTube quota/rate-limit errors, pause only that pipeline and retry
+    # its durable queue rows after this delay instead of hammering the API.
+    FACEBOOK_QUOTA_PAUSE_MINUTES: int = 60
 
     # AI metadata background worker (Task 13).
     FACEBOOK_AI_WORKER_ENABLED: bool = True

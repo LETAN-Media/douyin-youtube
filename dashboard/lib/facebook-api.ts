@@ -389,6 +389,17 @@ export interface FacebookScheduleStatus {
   batch_time: string;
   batch_status: string;
   scheduled_today: number;
+  published_today: number;
+  committed_today: number;
+  remaining_today: number;
+  feasible_today: number;
+  future_slots_today: number;
+  slots_today: number;
+  next_publish_at: string | null;
+  scheduler_state: "running" | "waiting" | "daily_limit_reached" | "quota_paused" | "no_inventory";
+  quota_paused_until: string | null;
+  quota_pause_reason: string | null;
+  capacity_warning: string | null;
   daily_limit: number;
   next_batch_at: string | null;
   inventory_total?: number;

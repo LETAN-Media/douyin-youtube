@@ -16,6 +16,11 @@ DEFAULT_TIMEZONE = "Asia/Ho_Chi_Minh"
 DEFAULT_MAX_DAILY = 5
 DEFAULT_BATCH_TIME = "06:00"
 
+# Safety ceilings only. They deliberately do NOT cap a pipeline at the legacy
+# 5 videos/day limit: the per-pipeline max_daily_publish is authoritative.
+MAX_DAILY_PUBLISH = 1000
+MAX_SLOTS_PER_DAY = 1000
+
 DEFAULT_SLOTS: dict[int, list[str]] = {
     0: ["11:30", "14:30", "18:30", "20:30", "22:30"],
     1: ["11:30", "14:30", "18:30", "20:30", "22:30"],
@@ -39,7 +44,13 @@ def validate_timezone(value: str | None) -> str:
 
 
 def normalize_slots(slots: dict[Any, Any] | None) -> dict[int, list[str]]:
-    """Accept {monday: [...]} or {0: [...]}. Enforce <=5 unique valid sorted HH:MM per day."""
+    """Accept {monday: [...]} or {0: [...]}. Enforce valid HH:MM slots per day.
+
+    The number of usable slots is a separate capacity mechanism from
+    max_daily_publish. Slots are capped only by a high safety ceiling, never
+    by the legacy 5/day limit, so a pipeline configured for 20/50/100 videos
+    per day can define enough publish times.
+    """
     if slots is None:
         return {day: list(times) for day, times in DEFAULT_SLOTS.items()}
     normalized: dict[int, list[str]] = {}
@@ -56,8 +67,10 @@ def normalize_slots(slots: dict[Any, Any] | None) -> dict[int, list[str]]:
         for t in cleaned:
             if not _SLOT_RE.match(t):
                 raise ValueError(f"Invalid slot time: {t!r} (expected HH:MM).")
-        if len(cleaned) > 5:
-            raise ValueError(f"Too many slots for {key!r}: max 5 per day.")
+        if len(cleaned) > MAX_SLOTS_PER_DAY:
+            raise ValueError(
+                f"Too many slots for {key!r}: max {MAX_SLOTS_PER_DAY} per day."
+            )
         normalized[day] = cleaned
     return normalized
 
@@ -130,8 +143,12 @@ async def upsert_schedule(
 ) -> dict[str, Any]:
     tz = validate_timezone(timezone)
     normalized = normalize_slots(slots)
-    if max_daily_publish < 1 or max_daily_publish > 5:
-        raise ValueError("max_daily_publish must be between 1 and 5.")
+    if isinstance(max_daily_publish, bool) or not isinstance(max_daily_publish, int):
+        raise ValueError("max_daily_publish must be a positive integer.")
+    if max_daily_publish < 1 or max_daily_publish > MAX_DAILY_PUBLISH:
+        raise ValueError(
+            f"max_daily_publish must be between 1 and {MAX_DAILY_PUBLISH}."
+        )
     bt = (batch_time or "").strip() or DEFAULT_BATCH_TIME
     if not _SLOT_RE.match(bt):
         raise ValueError(f"Invalid batch_time: {bt!r} (expected HH:MM).")

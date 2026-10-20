@@ -55,17 +55,22 @@ async def claim_next_job(
     client = get_client()
 
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max_ttl_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     rows = await client.execute(
         """
         WITH ranked AS (
             SELECT
-                id, pipeline_id, destination_id, reel_db_id, publication_id,
-                status, priority, stage, error_code, error,
-                queued_at, started_at, finished_at, created_at, updated_at,
-                ROW_NUMBER() OVER (PARTITION BY pipeline_id ORDER BY priority DESC, queued_at ASC) as rn
-            FROM facebook_publish_queue
-            WHERE status = 'queued'
+                q.id, q.pipeline_id, q.destination_id, q.reel_db_id, q.publication_id,
+                q.status, q.priority, q.stage, q.error_code, q.error,
+                q.queued_at, q.started_at, q.finished_at, q.created_at, q.updated_at,
+                ROW_NUMBER() OVER (PARTITION BY q.pipeline_id ORDER BY q.priority DESC, q.queued_at ASC) as rn
+            FROM facebook_publish_queue q
+            WHERE q.status = 'queued'
+            AND NOT EXISTS (
+                SELECT 1 FROM facebook_quota_pauses qp
+                WHERE qp.pipeline_id = q.pipeline_id AND qp.paused_until > :now
+            )
         )
         SELECT
             id, pipeline_id, destination_id, reel_db_id, publication_id,
@@ -76,6 +81,7 @@ async def claim_next_job(
         ORDER BY queued_at ASC
         LIMIT 1
         """,
+        {"now": now_iso},
     )
     if not rows.rows:
         return None
@@ -144,6 +150,29 @@ async def update_job_status(
     await client.execute(
         f"UPDATE facebook_publish_queue SET {', '.join(sets)} WHERE id = :id",
         params,
+    )
+
+
+async def requeue_job(
+    queue_id: str,
+    *,
+    stage: str = "quota_paused",
+    error_code: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Return a claimed job to the queue for retry after a temporary pause."""
+    client = get_client()
+    await client.execute(
+        "UPDATE facebook_publish_queue SET status = 'queued', stage = :stage, "
+        "error_code = :error_code, error = :error, started_at = NULL, "
+        "finished_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id",
+        {
+            "stage": stage,
+            "error_code": error_code,
+            "error": (error or "")[:500] or None,
+            "id": queue_id,
+        },
     )
 
 

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import require_admin
 from ..db.repositories import pipelines, publish_queue, schedules
+from ..db.repositories.schedules import MAX_DAILY_PUBLISH
 from ..services.facebook_global_publisher import get_publisher_status, run_publisher_once
 from ..services.facebook_scheduler import describe_schedule_status, run_scheduler_tick
 
@@ -37,7 +38,7 @@ def _present(schedule: dict) -> dict:
 class ScheduleUpsert(BaseModel):
     enabled: bool = False
     timezone: str | None = Field(default=None, max_length=64)
-    max_daily_publish: int = Field(default=5, ge=1, le=5)
+    max_daily_publish: int = Field(default=5, ge=1, le=MAX_DAILY_PUBLISH)
     batch_time: str | None = Field(default=None, max_length=8)
     slots: dict[str, list[str]] | None = None
 
@@ -132,6 +133,10 @@ async def schedule_today(
             "slots": [],
             "reason": reason,
             "message": outcome["message"] or "Không có video nào được xếp vào hàng đợi.",
+            "daily_limit": outcome.get("daily_limit"),
+            "slot_capacity": outcome.get("slot_capacity"),
+            "capacity_limited": outcome.get("capacity_limited", False),
+            "warning": outcome.get("warning"),
         }
 
     return {
@@ -141,7 +146,14 @@ async def schedule_today(
         "videos_enqueued": enqueued,
         "slots": outcome["slots"],
         "reason": None,
-        "message": f"Đã xếp {enqueued} video vào hàng đợi.",
+        "message": (
+            outcome.get("warning")
+            or f"Đã xếp {enqueued} video vào hàng đợi."
+        ),
+        "daily_limit": outcome.get("daily_limit"),
+        "slot_capacity": outcome.get("slot_capacity"),
+        "capacity_limited": outcome.get("capacity_limited", False),
+        "warning": outcome.get("warning"),
     }
 
 

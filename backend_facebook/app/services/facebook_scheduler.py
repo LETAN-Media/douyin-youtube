@@ -23,6 +23,7 @@ import httpx
 from ..config import settings
 from ..db.repositories import destinations, publications, reels, schedules, publish_queue
 from ..db.repositories import ai_settings as ai_settings_repo
+from ..db.repositories import quota as quota_repo
 
 logger = logging.getLogger("backend-facebook.scheduler")
 
@@ -47,6 +48,7 @@ REASON_MESSAGES: dict[str, str] = {
     "NOT_BEFORE_BATCH_TIME": "Chưa tới giờ chạy batch tự động.",
     "SCHEDULE_NOT_FOUND": "Chưa cấu hình lịch cho pipeline này.",
     "ENQUEUE_ERROR": "Lỗi khi đưa video vào hàng đợi.",
+    "QUOTA_PAUSED": "YouTube đang tạm dừng do quota/rate limit. Scheduler sẽ tự thử lại.",
 }
 
 
@@ -64,6 +66,10 @@ def _batch_result(
     slots: list[dict[str, str]] | None = None,
     reason: str | None = None,
     date: str | None = None,
+    daily_limit: int | None = None,
+    slot_capacity: int | None = None,
+    capacity_limited: bool = False,
+    warning: str | None = None,
 ) -> dict:
     return {
         "ok": videos_enqueued > 0,
@@ -72,8 +78,12 @@ def _batch_result(
         "videos_enqueued": videos_enqueued,
         "slots": slots or [],
         "reason": reason,
-        "message": reason_message(reason) if videos_enqueued == 0 else None,
+        "message": reason_message(reason) if videos_enqueued == 0 else warning,
+        "warning": warning,
         "date": date,
+        "daily_limit": daily_limit,
+        "slot_capacity": slot_capacity,
+        "capacity_limited": capacity_limited,
     }
 
 
@@ -119,6 +129,25 @@ def _future_slots_for_today(schedule: dict, now_local: datetime) -> list[tuple[s
             utc_ts = _slot_to_utc_rfc3339(date_iso, slot, tz_name)
             future.append((slot, utc_ts))
     return future
+
+
+def _local_day_bounds_utc(day, tz: ZoneInfo) -> tuple[str, str]:
+    """UTC [start, end) bounds for a local calendar day."""
+    start_local = datetime(day.year, day.month, day.day, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def _capacity_warning(daily_limit: int, feasible: int) -> str | None:
+    if feasible >= daily_limit:
+        return None
+    return (
+        f"Max videos/day = {daily_limit} nhưng hôm nay chỉ có {feasible} lượt khả thi "
+        f"(không đủ khung giờ còn lại). Thêm slot trong Lịch tuần để đăng đủ."
+    )
 
 
 async def _pick_destination(pipeline_id: str) -> tuple[dict | None, str | None]:
@@ -216,6 +245,14 @@ async def execute_daily_batch(
     date_iso = now_local.date().isoformat()
     batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
 
+    quota_pause = await quota_repo.get_active_pause(pipeline_id, now=utc_now)
+    if quota_pause is not None:
+        return _batch_result(
+            reason="QUOTA_PAUSED",
+            date=date_iso,
+            daily_limit=int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY),
+        )
+
     destination, dest_error = await _resolve_destination(pipeline_id, destination_id)
     if destination is None:
         return _batch_result(reason=dest_error or "NO_DESTINATION", date=date_iso)
@@ -231,7 +268,17 @@ async def execute_daily_batch(
     # Slots are future-only for BOTH paths: force_now must not backfill.
     slots = _future_slots_for_today(schedule, now_local)
 
-    max_daily = schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY
+    max_daily = max(1, int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY))
+    slot_capacity = len(slots)
+    feasible = min(max_daily, slot_capacity)
+    capacity_limited = max_daily > slot_capacity
+    capacity_warning = _capacity_warning(max_daily, feasible) if capacity_limited else None
+    result_ctx = {
+        "daily_limit": max_daily,
+        "slot_capacity": slot_capacity,
+        "capacity_limited": capacity_limited,
+        "warning": capacity_warning,
+    }
 
     existing = await schedules.get_batch(pipeline_id, destination_id, date_iso)
     topping_up = bool(
@@ -246,6 +293,7 @@ async def execute_daily_batch(
                 videos_enqueued=0,
                 reason="BATCH_IN_PROGRESS",
                 date=date_iso,
+                **result_ctx,
             )
         # Completed + automatic tick: never re-run the same day twice.
         # Completed + manual run: allow topping up free future slots below.
@@ -256,6 +304,7 @@ async def execute_daily_batch(
                 videos_enqueued=existing["uploaded_count"] or 0,
                 reason="BATCH_ALREADY_COMPLETED",
                 date=date_iso,
+                **result_ctx,
             )
         # 'no_work' / 'failed' stay re-runnable: inventory or AI metadata may have
         # changed since. Already-enqueued reels left status 'new' -> 'queued' and
@@ -281,8 +330,9 @@ async def execute_daily_batch(
                 videos_enqueued=already_enqueued,
                 reason="BATCH_ALREADY_COMPLETED",
                 date=date_iso,
+                **result_ctx,
             )
-        return _batch_result(reason="NO_FUTURE_SLOTS", date=date_iso)
+        return _batch_result(reason="NO_FUTURE_SLOTS", date=date_iso, **result_ctx)
 
     if topping_up:
         # Manual top-up of a completed batch: only slots nobody took yet,
@@ -304,6 +354,7 @@ async def execute_daily_batch(
                 videos_enqueued=already_enqueued,
                 reason="BATCH_ALREADY_COMPLETED",
                 date=date_iso,
+                **result_ctx,
             )
         # Only top up when new AI-ready work actually exists; otherwise a
         # plain double-click would flip a friendly BATCH_ALREADY_COMPLETED
@@ -316,6 +367,7 @@ async def execute_daily_batch(
                 videos_enqueued=already_enqueued,
                 reason="BATCH_ALREADY_COMPLETED",
                 date=date_iso,
+                **result_ctx,
             )
     else:
         quota = min(max_daily, len(slots))
@@ -326,6 +378,7 @@ async def execute_daily_batch(
                 batch_status=(existing or {}).get("status", "planned"),
                 reason="DAILY_LIMIT_REACHED",
                 date=date_iso,
+                **result_ctx,
             )
         plan_slots = slots
 
@@ -378,6 +431,7 @@ async def execute_daily_batch(
             batch_status=final_status,
             reason=reason,
             date=date_iso,
+            **result_ctx,
         )
 
     logger.info(
@@ -390,6 +444,7 @@ async def execute_daily_batch(
         videos_enqueued=enqueued,
         slots=used_slots,
         date=date_iso,
+        **result_ctx,
     )
 
 
@@ -538,7 +593,7 @@ async def _enqueue_one_video(
 
 
 async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
-    """Data for GET schedule/status. None when no schedule row exists."""
+    """Data for GET schedule/status. None when the pipeline does not exist."""
     from ..db.repositories import pipelines
 
     pipeline = await pipelines.get_pipeline(pipeline_id)
@@ -553,11 +608,24 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
             "batch_time": _DEFAULT_BATCH_TIME,
             "batch_status": "idle",
             "scheduled_today": 0,
+            "published_today": 0,
+            "committed_today": 0,
+            "remaining_today": _DEFAULT_MAX_DAILY,
+            "feasible_today": 0,
+            "future_slots_today": 0,
+            "slots_today": 0,
+            "next_publish_at": None,
+            "scheduler_state": "waiting",
+            "quota_paused_until": None,
+            "quota_pause_reason": None,
+            "capacity_warning": None,
             "daily_limit": _DEFAULT_MAX_DAILY,
             "slots": [],
             "scheduler_enabled": False,
         }
-    now_local = utc_now.astimezone(ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE))
+
+    tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
+    now_local = utc_now.astimezone(tz)
     date_iso = now_local.date().isoformat()
     batch = await schedules.get_batch_for_pipeline_date(pipeline_id, date_iso)
     batch_status = "idle"
@@ -581,14 +649,51 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
                 "enabled": True,
             })
 
+    daily_limit = max(1, int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY))
+    day_start, day_end = _local_day_bounds_utc(now_local.date(), tz)
+    day_stats = await publications.scheduler_day_stats(
+        pipeline_id,
+        start_utc_iso=day_start,
+        end_utc_iso=day_end,
+        now_utc_iso=utc_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    committed_today = int(day_stats.get("committed_today") or 0)
+    published_today = int(day_stats.get("published_today") or 0)
+
+    used_times = set(
+        await publications.used_slot_times_for_date(
+            pipeline_id, date_iso, schedule.get("timezone") or _DEFAULT_TIMEZONE
+        )
+    )
+    future_slots = [
+        slot for slot in _future_slots_for_today(schedule, now_local)
+        if slot[0] not in used_times
+    ]
+    future_slots_today = len(future_slots)
+    slots_today = len(schedule.get("slots", {}).get(now_local.weekday(), []))
+    feasible_today = min(daily_limit, committed_today + future_slots_today)
+    remaining_today = max(0, daily_limit - committed_today)
+    capacity_warning = _capacity_warning(daily_limit, feasible_today)
+
+    quota_pause = await quota_repo.get_active_pause(pipeline_id, now=utc_now)
+    counts = await _ai_readiness_counts(pipeline_id, batch)
+    if quota_pause is not None:
+        scheduler_state = "quota_paused"
+    elif batch_status == "running" or (counts.get("queue_processing") or 0) > 0:
+        scheduler_state = "running"
+    elif committed_today >= daily_limit:
+        scheduler_state = "daily_limit_reached"
+    elif (counts.get("inventory_total") or 0) == 0:
+        scheduler_state = "no_inventory"
+    else:
+        scheduler_state = "waiting"
+
     next_batch_dt = None
     if schedule.get("enabled"):
         batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
         batch_hour, batch_minute = _parse_time(batch_time)
-        tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
-        local_now = utc_now.astimezone(tz)
-        candidate = local_now.replace(hour=batch_hour, minute=batch_minute, second=0, microsecond=0)
-        if candidate <= local_now:
+        candidate = now_local.replace(hour=batch_hour, minute=batch_minute, second=0, microsecond=0)
+        if candidate <= now_local:
             candidate = candidate + timedelta(days=1)
         next_batch_dt = candidate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -599,11 +704,22 @@ async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
         "batch_time": schedule.get("batch_time") or _DEFAULT_BATCH_TIME,
         "batch_status": batch_status,
         "scheduled_today": batch["uploaded_count"] if batch else 0,
-        "daily_limit": schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY,
+        "published_today": published_today,
+        "committed_today": committed_today,
+        "remaining_today": remaining_today,
+        "feasible_today": feasible_today,
+        "future_slots_today": future_slots_today,
+        "slots_today": slots_today,
+        "next_publish_at": day_stats.get("next_publish_at"),
+        "scheduler_state": scheduler_state,
+        "quota_paused_until": (quota_pause or {}).get("paused_until"),
+        "quota_pause_reason": (quota_pause or {}).get("reason"),
+        "capacity_warning": capacity_warning,
+        "daily_limit": daily_limit,
         "next_batch_at": next_batch_dt,
         "slots": slots,
         "scheduler_enabled": bool(schedule.get("enabled")),
-        **await _ai_readiness_counts(pipeline_id, batch),
+        **counts,
     }
 
 
