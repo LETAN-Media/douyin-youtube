@@ -100,8 +100,13 @@ export default async function PipelineDetailPage({
   const tFetch0 = Date.now();
 
   if (activeTab === "overview") {
-    apiCalls.push("getFlowState");
-    data.flow = await getFlowState(pipelineId).catch(() => null);
+    apiCalls.push("getFlowState", "listDestinations");
+    const [flow, destinations] = await Promise.all([
+      getFlowState(pipelineId).catch(() => null),
+      listDestinations(pipelineId).catch(() => []),
+    ]);
+    data.flow = flow;
+    data.destinations = destinations;
   } else if (activeTab === "sources") {
     apiCalls.push("listSources");
     data.sources = await listSources(pipelineId).catch(() => []);
@@ -230,6 +235,7 @@ export default async function PipelineDetailPage({
             pipeline={pipeline}
             pipelineId={pipelineId}
             initialFlow={data.flow ?? null}
+            initialDestinations={data.destinations ?? []}
             flowError={null}
           />
         ) : null}
