@@ -229,9 +229,6 @@ def _try_pick_video(
         .order_by(DouyinSource.created_at.asc())
     ).scalars().all()
 
-    if not sources:
-        return None
-
     cursor = pipeline.source_selection_cursor or 0
     day_start_utc: datetime | None = None
     if destination is not None:
@@ -245,124 +242,198 @@ def _try_pick_video(
         now_utc = utcnow()
         day_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    for i in range(len(sources)):
-        idx = (cursor + i) % len(sources)
-        source = sources[idx]
+    # First pass: try source-based selection (existing behavior)
+    if sources:
+        for i in range(len(sources)):
+            idx = (cursor + i) % len(sources)
+            source = sources[idx]
 
-        # Per-source daily AUTO limit.
-        if _source_daily_reached(db, source, day_start_utc):
-            logger.info(
-                "Source %s reached daily AUTO limit %s",
-                source.id,
-                source.max_videos_per_day,
-            )
-            continue
-
-        query = (
-            select(DouyinVideo)
-            .where(DouyinVideo.source_id == source.id)
-            .where(DouyinVideo.pipeline_id == pipeline.id)
-            .where(DouyinVideo.status.in_(["new", "backlog"]))
-            .where(DouyinVideo.status != "published")
-        )
-
-        if slot_type == "backlog":
-            query = query.where(DouyinVideo.is_backlog == True)  # noqa: E712
-        else:
-            query = query.where(DouyinVideo.is_backlog == False)  # noqa: E712
-
-        # Source order overrides pipeline backlog_order (default oldest first).
-        desc_order = (pipeline.backlog_order or "asc").lower() == "desc"
-        if (source.order or "oldest_first").lower() == "newest_first":
-            desc_order = True
-        elif (source.order or "").lower() == "oldest_first":
-            desc_order = False
-        if desc_order:
-            query = query.order_by(DouyinVideo.douyin_created_at.desc())
-        else:
-            query = query.order_by(DouyinVideo.douyin_created_at.asc())
-
-        candidates = db.execute(query.limit(50)).scalars().all()
-        for cand in candidates:
-            # Check content_match if destination or pipeline requires it
-            niche = destination.metadata_profile if destination else pipeline.niche
-            prompt_override = destination.prompt_override if destination else None
-
-            text = f"{cand.title or ''}\n{cand.description or ''}"
-
-            # Source keyword filters act like verdicts.
-            if _keywords_hit(text, source.exclude_keywords):
-                reason = (
-                    "KEYWORD_EXCLUDED: video matches source exclude_keywords"
-                )
-                _apply_keyword_action(
-                    db, cand, source, reason, policy="mismatch",
-                    destination_id=destination.id if destination else None,
-                )
-                continue
-            if (source.include_keywords or []) and not _keywords_hit(
-                text, source.include_keywords
-            ):
-                reason = (
-                    "KEYWORD_MISSING: video matches none of source "
-                    "include_keywords"
-                )
-                _apply_keyword_action(
-                    db, cand, source, reason, policy="borderline",
-                    destination_id=destination.id if destination else None,
+            # Per-source daily AUTO limit.
+            if _source_daily_reached(db, source, day_start_utc):
+                logger.info(
+                    "Source %s reached daily AUTO limit %s",
+                    source.id,
+                    source.max_videos_per_day,
                 )
                 continue
 
-            level, match_reason = evaluate_content_level(
-                text,
-                niche=niche,
-                prompt_override=prompt_override,
+            query = (
+                select(DouyinVideo)
+                .where(DouyinVideo.source_id == source.id)
+                .where(DouyinVideo.pipeline_id == pipeline.id)
+                .where(DouyinVideo.status.in_(["new", "backlog"]))
+                .where(DouyinVideo.status != "published")
             )
-            cand.match_level = level
 
-            if level == "match":
-                pipeline.source_selection_cursor = (idx + 1) % len(sources)
-                return cand
+            if slot_type == "backlog":
+                query = query.where(DouyinVideo.is_backlog == True)  # noqa: E712
+            else:
+                query = query.where(DouyinVideo.is_backlog == False)  # noqa: E712
 
-            if level == "borderline":
-                policy = (source.borderline_policy or "hold").lower()
-                if policy == "continue":
-                    logger.info(
-                        "Video %s borderline but source %s policy=continue",
-                        cand.video_id,
-                        source.id,
+            # Source order overrides pipeline backlog_order (default oldest first).
+            desc_order = (pipeline.backlog_order or "asc").lower() == "desc"
+            if (source.order or "oldest_first").lower() == "newest_first":
+                desc_order = True
+            elif (source.order or "").lower() == "oldest_first":
+                desc_order = False
+            if desc_order:
+                query = query.order_by(DouyinVideo.douyin_created_at.desc())
+            else:
+                query = query.order_by(DouyinVideo.douyin_created_at.asc())
+
+            candidates = db.execute(query.limit(50)).scalars().all()
+            for cand in candidates:
+                # Check content_match if destination or pipeline requires it
+                niche = destination.metadata_profile if destination else pipeline.niche
+                prompt_override = destination.prompt_override if destination else None
+
+                text = f"{cand.title or ''}\n{cand.description or ''}"
+
+                # Source keyword filters act like verdicts.
+                if _keywords_hit(text, source.exclude_keywords):
+                    reason = (
+                        "KEYWORD_EXCLUDED: video matches source exclude_keywords"
                     )
+                    _apply_keyword_action(
+                        db, cand, source, reason, policy="mismatch",
+                        destination_id=destination.id if destination else None,
+                    )
+                    continue
+                if (source.include_keywords or []) and not _keywords_hit(
+                    text, source.include_keywords
+                ):
+                    reason = (
+                        "KEYWORD_MISSING: video matches none of source "
+                        "include_keywords"
+                    )
+                    _apply_keyword_action(
+                        db, cand, source, reason, policy="borderline",
+                        destination_id=destination.id if destination else None,
+                    )
+                    continue
+
+                level, match_reason = evaluate_content_level(
+                    text,
+                    niche=niche,
+                    prompt_override=prompt_override,
+                )
+                cand.match_level = level
+
+                if level == "match":
                     pipeline.source_selection_cursor = (idx + 1) % len(sources)
                     return cand
-                logger.info(
-                    "Video %s held (borderline) for destination %s: %s",
-                    cand.video_id,
-                    destination.id if destination else None,
-                    match_reason,
-                )
-                _hold_video(db, cand, level=level, reason=match_reason)
+
+                if level == "borderline":
+                    policy = (source.borderline_policy or "hold").lower()
+                    if policy == "continue":
+                        logger.info(
+                            "Video %s borderline but source %s policy=continue",
+                            cand.video_id,
+                            source.id,
+                        )
+                        pipeline.source_selection_cursor = (idx + 1) % len(sources)
+                        return cand
+                    logger.info(
+                        "Video %s held (borderline) for destination %s: %s",
+                        cand.video_id,
+                        destination.id if destination else None,
+                        match_reason,
+                    )
+                    _hold_video(db, cand, level=level, reason=match_reason)
+                    continue
+
+                # mismatch
+                policy = (source.mismatch_policy or "reject").lower()
+                if policy == "hold":
+                    logger.info(
+                        "Video %s held (mismatch) for destination %s: %s",
+                        cand.video_id,
+                        destination.id if destination else None,
+                        match_reason,
+                    )
+                    _hold_video(db, cand, level=level, reason=match_reason)
+                else:
+                    logger.warning(
+                        "Video %s (%s) rejected by AI content match for destination %s: %s",
+                        cand.video_id,
+                        cand.title,
+                        destination.id if destination else None,
+                        match_reason,
+                    )
+                    _reject_video(db, cand, level=level, reason=match_reason)
                 continue
 
-            # mismatch
-            policy = (source.mismatch_policy or "reject").lower()
-            if policy == "hold":
-                logger.info(
-                    "Video %s held (mismatch) for destination %s: %s",
-                    cand.video_id,
-                    destination.id if destination else None,
-                    match_reason,
-                )
-                _hold_video(db, cand, level=level, reason=match_reason)
-            else:
-                logger.warning(
-                    "Video %s (%s) rejected by AI content match for destination %s: %s",
-                    cand.video_id,
-                    cand.title,
-                    destination.id if destination else None,
-                    match_reason,
-                )
-                _reject_video(db, cand, level=level, reason=match_reason)
+    # Second pass: fallback for legacy videos with source_id=NULL but matching pipeline_id
+    # These are videos imported before the Source model was integrated.
+    logger.info(
+        "No video found via source-based selection for pipeline %s, trying legacy fallback (source_id=NULL)",
+        pipeline.id,
+    )
+    legacy_query = (
+        select(DouyinVideo)
+        .where(DouyinVideo.pipeline_id == pipeline.id)
+        .where(DouyinVideo.source_id.is_(None))
+        .where(DouyinVideo.status.in_(["new", "backlog", "inventory"]))
+        .where(DouyinVideo.status != "published")
+    )
+
+    if slot_type == "backlog":
+        legacy_query = legacy_query.where(DouyinVideo.is_backlog == True)  # noqa: E712
+    else:
+        legacy_query = legacy_query.where(DouyinVideo.is_backlog == False)  # noqa: E712
+
+    # Order by pipeline backlog_order (default oldest first)
+    desc_order = (pipeline.backlog_order or "asc").lower() == "desc"
+    if desc_order:
+        legacy_query = legacy_query.order_by(DouyinVideo.douyin_created_at.desc())
+    else:
+        legacy_query = legacy_query.order_by(DouyinVideo.douyin_created_at.asc())
+
+    legacy_candidates = db.execute(legacy_query.limit(50)).scalars().all()
+    for cand in legacy_candidates:
+        # For legacy videos, skip source keyword filters (no source to check against)
+        # Only apply AI content match against pipeline niche
+        niche = destination.metadata_profile if destination else pipeline.niche
+        prompt_override = destination.prompt_override if destination else None
+
+        text = f"{cand.title or ''}\n{cand.description or ''}"
+
+        level, match_reason = evaluate_content_level(
+            text,
+            niche=niche,
+            prompt_override=prompt_override,
+        )
+        cand.match_level = level
+
+        if level == "match":
+            logger.info(
+                "Legacy video %s selected for pipeline %s (source_id=NULL)",
+                cand.video_id,
+                pipeline.id,
+            )
+            return cand
+
+        if level == "borderline":
+            # For legacy videos, default to "hold" policy (no source policy to reference)
+            logger.info(
+                "Legacy video %s held (borderline) for destination %s: %s",
+                cand.video_id,
+                destination.id if destination else None,
+                match_reason,
+            )
+            _hold_video(db, cand, level=level, reason=match_reason)
             continue
+
+        # mismatch
+        logger.warning(
+            "Legacy video %s (%s) rejected by AI content match for destination %s: %s",
+            cand.video_id,
+            cand.title,
+            destination.id if destination else None,
+            match_reason,
+        )
+        _reject_video(db, cand, level=level, reason=match_reason)
+        continue
 
     return None
 
@@ -378,9 +449,27 @@ def pick_video(
     The old slot-minute modulo made every configured slot resolve to
     ``backlog`` (480 % 6 == 0, etc.), so new videos were never preferred.
     New-first selection is now explicit and deterministic.
+
+    If the pipeline has no sources (legacy videos only), respect the
+    requested slot_type directly instead of preferring "new" first.
     """
+    # Check if pipeline has any enabled sources
+    has_sources = db.execute(
+        select(DouyinSource.id)
+        .where(DouyinSource.pipeline_id == pipeline.id)
+        .where(DouyinSource.enabled == True)  # noqa: E712
+        .limit(1)
+    ).scalar_one_or_none() is not None
+
     seen_types: set[str] = set()
-    for candidate_type in ("new", slot_type, "backlog"):
+    if has_sources:
+        # Standard mode: prefer new, then requested pool, then backlog
+        candidate_types = ("new", slot_type, "backlog")
+    else:
+        # Legacy mode: respect requested slot_type first, then backlog
+        candidate_types = (slot_type, "backlog")
+
+    for candidate_type in candidate_types:
         if candidate_type in seen_types:
             continue
         seen_types.add(candidate_type)
@@ -951,10 +1040,11 @@ def promote_due_publications(
 
 
 def count_inventory_available(db: Session, pipeline: Pipeline) -> int:
+    # Include both source-linked videos and legacy videos (source_id=NULL)
     count = db.execute(
         select(func.count(DouyinVideo.id))
         .where(DouyinVideo.pipeline_id == pipeline.id)
-        .where(DouyinVideo.status.in_(["new", "backlog"]))
+        .where(DouyinVideo.status.in_(["new", "backlog", "inventory"]))
     ).scalar_one_or_none()
     return int(count or 0)
 
@@ -1291,6 +1381,27 @@ def schedule_for_destination(
             yt_privacy = "unlisted"
         else:
             yt_privacy = "public"
+
+        # Clean up any failed/skipped publications for this video+destination
+        # to allow retry (unique constraint on douyin_video_id + destination_id)
+        failed_pub = db.execute(
+            select(Publication)
+            .where(Publication.douyin_video_id == video.id)
+            .where(Publication.destination_id == destination.id)
+            .where(Publication.status.in_(["failed", "skipped"]))
+            .limit(1)
+        ).scalar_one_or_none()
+        if failed_pub is not None:
+            logger.info(
+                "Removing failed/skipped publication %s for video %s to allow retry",
+                failed_pub.id,
+                video.video_id,
+            )
+            db.delete(failed_pub)
+            try:
+                db.flush()
+            except Exception:
+                db.rollback()
 
         publication = Publication(
             pipeline_id=pipeline.id,

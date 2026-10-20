@@ -546,5 +546,192 @@ class TestDouyinUrlParser(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestLegacyVideoFallback(unittest.TestCase):
+    """Tests for legacy video fallback when source_id=NULL but pipeline_id matches."""
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+        self.db = self.Session()
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def _make_pipeline(self, **kwargs):
+        defaults = {
+            "id": str(uuid4()),
+            "name": "Test",
+            "slug": "test",
+            "enabled": True,
+            "daily_upload_limit": 6,
+            "backlog_slots_per_day": 4,
+            "new_slots_per_day": 2,
+            "upload_slots": ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"],
+            "timezone": "UTC",
+        }
+        defaults.update(kwargs)
+        pipeline = Pipeline(**defaults)
+        self.db.add(pipeline)
+        self.db.flush()
+        return pipeline
+
+    def _make_destination(self, pipeline, **kwargs):
+        import json as _json
+        kwargs.setdefault("connected", True)
+        kwargs.setdefault(
+            "credentials",
+            _json.dumps({
+                "token": "test-token",
+                "refresh_token": "test-refresh",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "test-client",
+                "client_secret": "test-secret",
+                "scopes": [],
+            }),
+        )
+        destination = Destination(
+            id=str(uuid4()),
+            pipeline_id=pipeline.id,
+            platform="youtube",
+            name="YouTube",
+            enabled=True,
+            daily_upload_limit=pipeline.daily_upload_limit,
+            timezone=pipeline.timezone,
+            upload_slots=pipeline.upload_slots,
+            **kwargs,
+        )
+        self.db.add(destination)
+        self.db.flush()
+        return destination
+
+    def test_legacy_videos_source_id_null_picked_by_pipeline_fallback(self):
+        """Legacy videos with source_id=NULL should be picked via pipeline fallback."""
+        pipeline = self._make_pipeline()
+        self._make_destination(pipeline)
+        # No sources created - legacy videos have no source
+
+        # Create legacy videos with source_id=NULL but matching pipeline_id
+        # Set douyin_created_at to control ordering (oldest first by default)
+        base_time = datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+        video1 = DouyinVideo(
+            id=str(uuid4()),
+            source_id=None,  # Legacy: no source linked
+            pipeline_id=pipeline.id,
+            video_id="legacy_v1",
+            title="Legacy Video 1",
+            url="https://www.douyin.com/video/legacy_v1",
+            status="inventory",
+            is_backlog=False,
+            douyin_created_at=base_time + datetime.timedelta(days=1),  # oldest
+        )
+        video2 = DouyinVideo(
+            id=str(uuid4()),
+            source_id=None,
+            pipeline_id=pipeline.id,
+            video_id="legacy_v2",
+            title="Legacy Video 2",
+            url="https://www.douyin.com/video/legacy_v2",
+            status="inventory",
+            is_backlog=True,
+            douyin_created_at=base_time + datetime.timedelta(days=2),
+        )
+        video3 = DouyinVideo(
+            id=str(uuid4()),
+            source_id=None,
+            pipeline_id=pipeline.id,
+            video_id="legacy_v3",
+            title="Legacy Video 3",
+            url="https://www.douyin.com/video/legacy_v3",
+            status="new",
+            is_backlog=False,
+            douyin_created_at=base_time + datetime.timedelta(days=3),  # newest
+        )
+        self.db.add_all([video1, video2, video3])
+        self.db.commit()
+
+        # Import pick_video here to use the scheduler's function
+        from app.scheduler import pick_video
+
+        # Pipeline backlog_order defaults to "asc" (oldest first)
+        # For "new" slot: candidates are v1 (inventory, !backlog) and v3 (new, !backlog)
+        # Ordered by douyin_created_at ASC: v1 (oldest) then v3 (newest)
+        # First pick: v1
+        picked = pick_video(self.db, pipeline, "new")
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.video_id, "legacy_v1")
+        self.assertIsNone(picked.source_id)
+
+        # Pick for "backlog" slot - should get v2 (is_backlog=True)
+        picked = pick_video(self.db, pipeline, "backlog")
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.video_id, "legacy_v2")
+        self.assertIsNone(picked.source_id)
+
+        # Second "new" pick - v1 already scheduled, should get v3
+        # Note: In real scheduler, v1 status becomes "scheduled" after scheduling
+        # Here we manually update to simulate
+        v1 = self.db.query(DouyinVideo).filter(DouyinVideo.video_id == "legacy_v1").one()
+        v1.status = "scheduled"
+        self.db.commit()
+
+        picked = pick_video(self.db, pipeline, "new")
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.video_id, "legacy_v3")
+
+    def test_legacy_videos_respect_published_status(self):
+        """Legacy videos with published status should not be picked."""
+        pipeline = self._make_pipeline()
+        self._make_destination(pipeline)
+
+        video = DouyinVideo(
+            id=str(uuid4()),
+            source_id=None,
+            pipeline_id=pipeline.id,
+            video_id="legacy_published",
+            title="Published Legacy",
+            url="https://www.douyin.com/video/legacy_published",
+            status="published",
+            published_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+        self.db.add(video)
+        self.db.commit()
+
+        from app.scheduler import pick_video
+        picked = pick_video(self.db, pipeline, "new")
+        self.assertIsNone(picked)
+
+    def test_legacy_videos_respect_held_rejected_status(self):
+        """Legacy videos with held/rejected status should not be picked."""
+        pipeline = self._make_pipeline()
+        self._make_destination(pipeline)
+
+        held_video = DouyinVideo(
+            id=str(uuid4()),
+            source_id=None,
+            pipeline_id=pipeline.id,
+            video_id="legacy_held",
+            title="Held Legacy",
+            url="https://www.douyin.com/video/legacy_held",
+            status="held",
+        )
+        rejected_video = DouyinVideo(
+            id=str(uuid4()),
+            source_id=None,
+            pipeline_id=pipeline.id,
+            video_id="legacy_rejected",
+            title="Rejected Legacy",
+            url="https://www.douyin.com/video/legacy_rejected",
+            status="rejected",
+        )
+        self.db.add_all([held_video, rejected_video])
+        self.db.commit()
+
+        from app.scheduler import pick_video
+        picked = pick_video(self.db, pipeline, "new")
+        self.assertIsNone(picked)
+
+
 if __name__ == "__main__":
     unittest.main()
