@@ -71,25 +71,102 @@ async def _fail_job(
     started: float,
     error_code: str,
     error: str,
+    *,
+    skip_reel: bool = False,
+    refill_slot: bool = False,
     **extra,
 ) -> dict:
-    if publication_id:
-        await publications.mark_failed(publication_id, f"{error_code}: {error}")
+    replay_error = f"{error_code}: {error}"
     reel_db_id = extra.get("reel_db_id")
-    if reel_db_id:
-        await reels.record_reel_error(reel_db_id, f"{error_code}: {error}")
-        await reels.release_claim(reel_db_id)
-        await reels.release_processing(reel_db_id)
-    cleanup_job_dir(target_dir)
-    await publish_queue.update_job_status(
-        queue_id, "failed", stage="failed", error_code=error_code, error=error
+    publication = None
+    publication_failed = False
+    superseded = False
+
+    if publication_id:
+        publication = await publications.get_publication(publication_id)
+        try:
+            other_active = await publish_queue.has_other_active_job(
+                queue_id,
+                publication_id=publication_id,
+                reel_db_id=reel_db_id,
+            )
+        except Exception:
+            logger.exception("failed to check active duplicate jobs for %s", queue_id)
+            other_active = False
+        if (
+            (publication is not None and publication.get("status") in ("scheduled", "published"))
+            or other_active
+        ):
+            superseded = True
+            logger.warning(
+                "queue job %s is stale/duplicate for publication %s; leaving winner untouched",
+                queue_id,
+                publication_id,
+            )
+        else:
+            publication_failed = await publications.mark_failed_if_active(
+                publication_id, replay_error
+            )
+            if not publication_failed and publication is not None:
+                # Another worker won the terminal-state race after our check.
+                superseded = True
+
+    if reel_db_id and not superseded:
+        await reels.record_reel_error(reel_db_id, replay_error)
+        if skip_reel:
+            if not await reels.advance_status(reel_db_id, "processing", "skipped"):
+                await reels.advance_status(reel_db_id, "queued", "skipped")
+        else:
+            await reels.release_claim(reel_db_id)
+            await reels.release_processing(reel_db_id)
+
+    if target_dir and target_dir != Path("/tmp"):
+        cleanup_job_dir(target_dir)
+    queue_code = "SUPERSEDED" if superseded else error_code
+    queue_error = (
+        "Another active job already owns this reel/publication."
+        if superseded
+        else error
     )
+    await publish_queue.update_job_status(
+        queue_id,
+        "failed",
+        stage="superseded" if superseded else "failed",
+        error_code=queue_code,
+        error=queue_error,
+    )
+
+    replacement = None
+    if (
+        refill_slot
+        and publication_failed
+        and publication is not None
+        and reel_db_id
+    ):
+        try:
+            from .facebook_scheduler import refill_slot_after_failure
+
+            job = await publish_queue.get_job(queue_id)
+            if job is not None:
+                replacement = await refill_slot_after_failure(
+                    pipeline_id=job["pipeline_id"],
+                    destination_id=job["destination_id"],
+                    scheduled_publish_at=publication.get("scheduled_publish_at"),
+                    failed_reel_db_id=reel_db_id,
+                )
+        except Exception:
+            logger.exception("slot refill failed after %s for publication %s", error_code, publication_id)
+            replacement = {"refilled": False, "reason": "REFILL_ERROR"}
+
     return {
         "queue_id": queue_id,
         "result": "failed",
         "elapsed_s": time.monotonic() - started,
         "error_code": error_code,
         "error": error,
+        "publication_failed": publication_failed,
+        "superseded": superseded,
+        "replacement": replacement,
         **extra,
     }
 
@@ -294,6 +371,8 @@ async def _process_one_job(
                 return await _fail_job(
                     queue_id, publication_id, target_dir, started,
                     "SHORTS_INELIGIBLE", f"Video không đủ điều kiện Shorts: {note}",
+                    skip_reel=True,
+                    refill_slot=True,
                     **{**base, **ai_info},
                 )
         except ShortsCheckError as exc:
@@ -508,33 +587,22 @@ async def _publisher_loop(
 async def _handle_unexpected_job_error(job: dict, exc: BaseException) -> None:
     """Last-resort handler for errors escaping _process_one_job.
 
-    The queue row alone is not enough: also fail the publication with a
-    clear code and release the reel claims, otherwise the publication sits
-    at 'queued' and the reel bricks at 'processing' — invisible to both
-    scheduler (wants 'new') and publisher (wants queue rows).
+    Routes through _fail_job so a stale duplicate can never overwrite a
+    publication that another worker already scheduled/published.
     """
     logger.exception("unexpected error processing queue job %s: %s", job.get("id"), exc)
     try:
-        await publish_queue.update_job_status(
-            job["id"], "failed", stage="error",
-            error_code="UNEXPECTED", error=f"{type(exc).__name__}: {exc}",
+        await _fail_job(
+            job["id"],
+            job.get("publication_id"),
+            Path("/tmp"),
+            time.monotonic(),
+            "UNEXPECTED",
+            f"{type(exc).__name__}: {exc}",
+            reel_db_id=job.get("reel_db_id"),
         )
     except Exception:
-        logger.exception("failed to mark queue job %s failed", job.get("id"))
-    try:
-        if job.get("publication_id"):
-            await publications.mark_failed(
-                job["publication_id"], f"UNEXPECTED: {type(exc).__name__}: {exc}"
-            )
-    except Exception:
-        logger.exception("failed to mark publication %s failed", job.get("publication_id"))
-    try:
-        if job.get("reel_db_id"):
-            await reels.record_reel_error(job["reel_db_id"], f"UNEXPECTED: {type(exc).__name__}")
-            await reels.release_claim(job["reel_db_id"])
-            await reels.release_processing(job["reel_db_id"])
-    except Exception:
-        logger.exception("failed to release reel %s", job.get("reel_db_id"))
+        logger.exception("failed to persist unexpected failure for job %s", job.get("id"))
 
 
 async def run_publisher_once(

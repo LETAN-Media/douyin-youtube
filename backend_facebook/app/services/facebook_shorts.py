@@ -5,9 +5,10 @@ Current YouTube Shorts rules applied here:
 - square or vertical aspect (width <= height)
 
 Nothing is trimmed or re-encoded by this module: ineligible files fail
-loudly with SHORTS_INELIGIBLE instead of silently losing content. Video
-mode skips verification entirely (uploads as-is; note that YouTube itself
-may still classify a short vertical file as a Short).
+loudly with SHORTS_INELIGIBLE. The global publisher then replaces the
+failed slot with the next AI-ready reel for the same publishAt. Video mode
+skips verification entirely (uploads as-is; note that YouTube itself may
+still classify a short vertical file as a Short).
 
 Requires ffprobe (ffmpeg package). Missing binary -> SHORTS_CHECK_UNAVAILABLE.
 """

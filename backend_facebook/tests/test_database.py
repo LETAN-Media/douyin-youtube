@@ -51,8 +51,47 @@ async def test_migration_partial_state_recovers() -> None:
         await migrate()  # must not fail with duplicate-column
         rows = await client.execute("SELECT version FROM schema_migrations ORDER BY id")
         versions = [r[0] for r in rows.rows]
-        assert set(versions) == {"20241003_01", "20241003_02", "20241003_03", "20241003_04", "20241003_05", "20241003_06", "20241003_07", "20241003_08", "20241003_09", "20241005_10", "20241005_11", "20241005_12", "20241005_13", "20241005_14", "20241005_15", "20241005_16", "20241005_17", "20241005_18", "20241005_19", "20261020_20"}
+        assert set(versions) == {"20241003_01", "20241003_02", "20241003_03", "20241003_04", "20241003_05", "20241003_06", "20241003_07", "20241003_08", "20241003_09", "20241005_10", "20241005_11", "20241005_12", "20241005_13", "20241005_14", "20241005_15", "20241005_16", "20241005_17", "20241005_18", "20241005_19", "20261020_20", "20261021_21"}
         await migrate()  # fully idempotent afterwards
+    finally:
+        teardown()
+
+
+async def test_claim_lost_repair_migration() -> None:
+    """A stale duplicate CLAIM_LOST must be repaired when the video exists."""
+    from app.db.client import get_client
+
+    setup_env()
+    try:
+        await migrate()
+        await pipelines.create_pipeline(pipeline_id="pipeline-1", name="Test", slug="test-1")
+        await sources.create_source(
+            source_id="source-1", pipeline_id="pipeline-1",
+            page_id="123", page_name="Test Page",
+        )
+        await reels.insert_reel_if_new(
+            reel_db_id="reel-1", source_id="source-1", reel_id="fb-123"
+        )
+        await destinations.create_destination(
+            destination_id="dest-1", pipeline_id="pipeline-1",
+            channel_id="yt-123", channel_name="Test Channel",
+        )
+        assert await reels.advance_status("reel-1", "new", "queued")
+        await publications.create_publication(
+            publication_id="pub-1", reel_db_id="reel-1",
+            destination_id="dest-1", status="queued",
+        )
+        await publications.mark_scheduled("pub-1", "vid-1")
+        await reels.mark_reel_scheduled("reel-1", "vid-1")
+        await publications.mark_failed("pub-1", "CLAIM_LOST: duplicate job")
+        await get_client().execute(
+            "DELETE FROM schema_migrations WHERE version = '20261021_21'"
+        )
+        await migrate()
+        pub = await publications.get_publication("pub-1")
+        assert pub is not None and pub["status"] == "scheduled"
+        assert pub["youtube_video_id"] == "vid-1"
+        assert pub["last_error"] is None
     finally:
         teardown()
 

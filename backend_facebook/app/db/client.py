@@ -338,6 +338,52 @@ async def migrate() -> None:
         "CREATE INDEX IF NOT EXISTS idx_quota_pauses_until ON facebook_quota_pauses(paused_until)",
     ]
     await _apply_migration(client, applied, "20261020_20", statements_20)
+    statements_21 = [
+        # Keep one live job per publication, preferring a job already in
+        # flight, then the oldest. Terminal duplicates remain as history.
+        """
+        UPDATE facebook_publish_queue
+        SET status = 'failed', stage = 'superseded',
+            error_code = 'DUPLICATE_JOB',
+            error = 'Superseded by another active job for this publication',
+            finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY publication_id
+                        ORDER BY CASE status WHEN 'processing' THEN 0 ELSE 1 END,
+                                 queued_at ASC, id ASC
+                    ) AS rn
+                FROM facebook_publish_queue
+                WHERE status IN ('queued', 'processing')
+            )
+            WHERE rn > 1
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_queue_active_publication "
+        "ON facebook_publish_queue(publication_id) "
+        "WHERE status IN ('queued', 'processing')",
+        # Repair historical duplicate-job damage: the reel and the YouTube
+        # video both prove the upload succeeded even though a stale duplicate
+        # later wrote CLAIM_LOST onto the publication.
+        """
+        UPDATE publications
+        SET status = 'scheduled', last_error = NULL,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        WHERE status = 'failed'
+        AND last_error LIKE 'CLAIM_LOST:%'
+        AND youtube_video_id IS NOT NULL
+        AND EXISTS (
+            SELECT 1 FROM facebook_reels r
+            WHERE r.id = publications.reel_db_id
+            AND r.status = 'scheduled'
+            AND r.youtube_video_id = publications.youtube_video_id
+        )
+        """,
+    ]
+    await _apply_migration(client, applied, "20261021_21", statements_21)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

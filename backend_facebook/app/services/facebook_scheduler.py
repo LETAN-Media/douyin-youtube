@@ -592,6 +592,89 @@ async def _enqueue_one_video(
         return False, "ENQUEUE_ERROR"
 
 
+async def refill_slot_after_failure(
+    *,
+    pipeline_id: str,
+    destination_id: str,
+    scheduled_publish_at: str | None,
+    failed_reel_db_id: str,
+    now=None,
+) -> dict:
+    """Replace a video-specific failure with the next AI-ready reel.
+
+    The failed publication no longer counts as committed, so the replacement
+    keeps the same YouTube publishAt without exceeding the daily limit. The
+    failed reel must already be skipped/terminal so it cannot be selected
+    again. Returns a small result dict; never raises for ordinary no-op cases.
+    """
+    if not scheduled_publish_at:
+        return {"refilled": False, "reason": "NO_SLOT"}
+
+    try:
+        publish_dt = datetime.fromisoformat(str(scheduled_publish_at).replace("Z", "+00:00"))
+        if publish_dt.tzinfo is None:
+            return {"refilled": False, "reason": "INVALID_SLOT"}
+        publish_dt = publish_dt.astimezone(timezone.utc)
+    except Exception:
+        return {"refilled": False, "reason": "INVALID_SLOT"}
+
+    utc_now = _now_utc(now)
+    if publish_dt <= utc_now + timedelta(seconds=60):
+        return {"refilled": False, "reason": "SLOT_TOO_CLOSE"}
+
+    schedule = await schedules.get_schedule(pipeline_id)
+    if schedule is None:
+        return {"refilled": False, "reason": "SCHEDULE_NOT_FOUND"}
+
+    if await quota_repo.get_active_pause(pipeline_id, now=utc_now) is not None:
+        return {"refilled": False, "reason": "QUOTA_PAUSED"}
+
+    tz = ZoneInfo(schedule.get("timezone") or _DEFAULT_TIMEZONE)
+    local_dt = publish_dt.astimezone(tz)
+    local_date = local_dt.date().isoformat()
+    start_utc, end_utc = _local_day_bounds_utc(local_dt.date(), tz)
+    stats = await publications.scheduler_day_stats(
+        pipeline_id,
+        start_utc_iso=start_utc,
+        end_utc_iso=end_utc,
+        now_utc_iso=utc_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    daily_limit = max(1, int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY))
+    if int(stats.get("committed_today") or 0) >= daily_limit:
+        return {"refilled": False, "reason": "DAILY_LIMIT_REACHED"}
+
+    batch = await schedules.get_batch_for_pipeline_date(pipeline_id, local_date)
+    batch_id = batch["id"] if batch else f"refill_{uuid.uuid4().hex[:12]}"
+    slot_time = local_dt.strftime("%H:%M")
+    normalized_publish_at = publish_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    ok, failure = await _enqueue_one_video(
+        pipeline_id,
+        destination_id,
+        local_date,
+        (schedule.get("batch_time") or _DEFAULT_BATCH_TIME),
+        slot_time,
+        normalized_publish_at,
+        schedule,
+        batch_id=batch_id,
+        slot_index=0,
+    )
+    if ok:
+        logger.info(
+            "refilled slot %s (%s) for pipeline %s after reel %s failed",
+            slot_time,
+            normalized_publish_at,
+            pipeline_id,
+            failed_reel_db_id,
+        )
+    return {
+        "refilled": ok,
+        "reason": failure,
+        "slot": slot_time,
+        "scheduled_publish_at": normalized_publish_at,
+    }
+
+
 async def describe_schedule_status(pipeline_id: str, now=None) -> dict | None:
     """Data for GET schedule/status. None when the pipeline does not exist."""
     from ..db.repositories import pipelines

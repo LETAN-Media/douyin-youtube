@@ -137,8 +137,9 @@ export function FacebookUploadMode({ pipelineId }: { pipelineId: string }) {
             {mode === "shorts" ? (
               <p className="rounded-xl bg-amber-50 p-2.5 text-[11px] leading-relaxed text-amber-800 ring-1 ring-inset ring-amber-100">
                 File không đủ điều kiện (dài quá 3 phút hoặc video ngang) sẽ báo lỗi rõ ràng
-                chứ không bị cắt. Lưu ý: YouTube vẫn có thể tự phân loại file dọc ngắn
-                thành Shorts ngay cả ở chế độ Video thường.
+                và được thay bằng video AI-ready kế tiếp cho cùng khung giờ (không cắt file).
+                Lưu ý: YouTube vẫn có thể tự phân loại file dọc ngắn thành Shorts ngay cả ở
+                chế độ Video thường.
               </p>
             ) : null}
             {message ? (

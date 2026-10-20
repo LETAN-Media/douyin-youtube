@@ -249,6 +249,24 @@ async def mark_failed(publication_id: str, error: str) -> None:
     )
 
 
+async def mark_failed_if_active(publication_id: str, error: str) -> bool:
+    """Fail only while the publication is not already successful.
+
+    A stale duplicate queue job must never overwrite a publication that
+    another job already moved to scheduled/published. Returns True when the
+    row was actually failed.
+    """
+    client = get_client()
+    res = await client.execute(
+        "UPDATE publications SET status = 'failed', last_error = :error, "
+        "retry_count = retry_count + 1, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+        "WHERE id = :id AND status NOT IN ('scheduled', 'published')",
+        {"error": (error or "")[:500], "id": publication_id},
+    )
+    return (res.rows_affected or 0) > 0
+
+
 async def set_scheduled_publish_at(publication_id: str, scheduled_publish_at: str) -> None:
     """Set the scheduled_publish_at timestamp on an existing publication."""
     client = get_client()

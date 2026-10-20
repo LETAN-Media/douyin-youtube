@@ -15,7 +15,9 @@ No YouTube, no downloads: SLOT_MISSED triggers before any media work.
 import asyncio
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import app.db.client as client_module
 from app.config import settings
@@ -28,10 +30,13 @@ from app.db.repositories import (
     publications,
     publish_queue,
     reels,
+    schedules,
     sources,
     youtube_auth,
 )
+import app.services.facebook_global_publisher as publisher_module
 from app.services.facebook_global_publisher import (
+    _fail_job,
     _handle_unexpected_job_error,
     run_publisher_once,
 )
@@ -299,5 +304,162 @@ def test_run_once_heals_orphans_even_with_no_queued_jobs() -> None:
         assert reel is not None and reel["status"] == "new"
         pub = await publications.get_publication("pub_orphan5")
         assert pub is not None and pub["status"] == "failed"
+
+    asyncio.run(_check())
+
+
+def test_enqueue_publish_job_is_idempotent_while_active() -> None:
+    """Concurrent enqueue attempts must reuse the live job, not race."""
+    async def _go():
+        q1 = await publish_queue.enqueue_publish_job(
+            pipeline_id="pl_idem", destination_id="ytd_idem",
+            reel_db_id="reel_idem", publication_id="pub_idem", priority=999,
+        )
+        q2 = await publish_queue.enqueue_publish_job(
+            pipeline_id="pl_idem", destination_id="ytd_idem",
+            reel_db_id="reel_idem", publication_id="pub_idem", priority=998,
+        )
+        assert q1 == q2
+        rows = await client_module.get_client().execute(
+            "SELECT COUNT(*), MIN(priority) FROM facebook_publish_queue "
+            "WHERE publication_id = 'pub_idem' "
+            "AND status IN ('queued', 'processing')"
+        )
+        assert rows.rows[0][0] == 1
+        assert rows.rows[0][1] == 999
+
+    asyncio.run(_go())
+
+
+def test_stale_duplicate_failure_cannot_unschedule_success() -> None:
+    """A late duplicate CLAIM_LOST must leave the winning publication/reel alone."""
+    pipe_id, did = seed_connected("pl_stale", "ytd_stale")
+    reel_db_id = seed_ready_reel("pl_stale", "r1")
+    pub_id = "pub_stale"
+
+    async def _stage():
+        assert await reels.advance_status(reel_db_id, "new", "queued")
+        await publications.get_or_create(
+            publication_id=pub_id, reel_db_id=reel_db_id, destination_id=did
+        )
+        await publish_queue.enqueue_publish_job(
+            pipeline_id=pipe_id, destination_id=did,
+            reel_db_id=reel_db_id, publication_id=pub_id,
+        )
+
+    asyncio.run(_stage())
+
+    qid = asyncio.run(
+        client_module.get_client().execute(
+            "SELECT id FROM facebook_publish_queue WHERE publication_id = :pub",
+            {"pub": pub_id},
+        )
+    ).rows[0][0]
+    queue_id = qid
+
+    async def _win():
+        await publications.mark_scheduled(pub_id, "vid_winner")
+        await reels.mark_reel_scheduled(reel_db_id, "vid_winner")
+
+    asyncio.run(_win())
+
+    result = asyncio.run(_fail_job(
+        queue_id, pub_id, Path("/tmp"), 0.0,
+        "CLAIM_LOST", "Reel left queued state before processing.",
+        reel_db_id=reel_db_id,
+    ))
+    assert result["superseded"] is True, result
+    assert result["publication_failed"] is False, result
+
+    async def _check():
+        pub = await publications.get_publication(pub_id)
+        assert pub is not None and pub["status"] == "scheduled"
+        assert pub["youtube_video_id"] == "vid_winner"
+        assert pub["last_error"] is None
+        reel = await reels.get_reel(reel_db_id)
+        assert reel is not None and reel["status"] == "scheduled"
+        assert reel["retry_count"] == 0
+        job = await publish_queue.get_job(queue_id)
+        assert job is not None and job["status"] == "failed"
+        assert job["error_code"] == "SUPERSEDED"
+
+    asyncio.run(_check())
+
+
+def test_shorts_ineligible_refills_same_slot_with_next_reel(monkeypatch) -> None:
+    """A Shorts-ineligible file must not consume the slot: next AI-ready reel
+    is enqueued for the exact same publishAt, with no YouTube call."""
+    pipe_id, did = seed_connected("pl_refill", "ytd_refill")
+    reel1 = seed_ready_reel("pl_refill", "r1")
+    reel2 = seed_ready_reel("pl_refill", "r2")
+    pub_id = "pub_refill"
+    publish_at = (datetime.now(timezone.utc) + timedelta(hours=3)).replace(microsecond=0)
+    publish_at_iso = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
+    local = publish_at.astimezone(tz)
+
+    async def _stage():
+        await schedules.upsert_schedule(
+            pipe_id,
+            enabled=True,
+            timezone="Asia/Ho_Chi_Minh",
+            max_daily_publish=5,
+            batch_time="06:00",
+            slots={local.weekday(): [local.strftime("%H:%M")]},
+        )
+        assert await reels.advance_status(reel1, "new", "queued")
+        await publications.get_or_create(
+            publication_id=pub_id, reel_db_id=reel1, destination_id=did
+        )
+        await publications.set_scheduled_publish_at(pub_id, publish_at_iso)
+        await publications.set_upload_snapshot(pub_id, "shorts")
+        await publish_queue.enqueue_publish_job(
+            pipeline_id=pipe_id, destination_id=did,
+            reel_db_id=reel1, publication_id=pub_id, priority=999,
+        )
+
+    asyncio.run(_stage())
+
+    class FakeResolver:
+        @classmethod
+        def from_settings(cls, transport=None):
+            return cls()
+
+        async def resolve(self, url):
+            return {"url": url}
+
+        async def download_media(self, media, job_id, tmp_root=None):
+            path = Path(tmp_root) / job_id / "video.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fake-video")
+            return path
+
+    monkeypatch.setattr(publisher_module, "FacebookMediaResolver", FakeResolver)
+    import app.services.facebook_shorts as shorts_module
+    monkeypatch.setattr(
+        shorts_module,
+        "check_shorts_eligibility",
+        lambda _path: (False, "504s · 720x1280 vertical · vượt quá 180s"),
+    )
+
+    result = asyncio.run(run_publisher_once())
+    assert result is not None and result["error_code"] == "SHORTS_INELIGIBLE", result
+    assert result["publication_failed"] is True, result
+    assert result["replacement"]["refilled"] is True, result
+
+    async def _check():
+        pub = await publications.get_publication(pub_id)
+        assert pub is not None and pub["status"] == "failed"
+        assert pub["shorts_eligible"] is False
+        failed_reel = await reels.get_reel(reel1)
+        assert failed_reel is not None and failed_reel["status"] == "skipped"
+        next_reel = await reels.get_reel(reel2)
+        assert next_reel is not None and next_reel["status"] == "queued"
+        pubs = await publications.list_publications(did)
+        replacement = next(p for p in pubs if p["status"] == "queued")
+        assert replacement["scheduled_publish_at"] == publish_at_iso
+        queued = await publish_queue.list_queued_jobs()
+        assert len(queued) == 1, queued
+        assert queued[0]["reel_db_id"] == reel2
 
     asyncio.run(_check())

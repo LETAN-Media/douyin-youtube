@@ -17,25 +17,96 @@ async def enqueue_publish_job(
     publication_id: str,
     priority: int = 0,
 ) -> str:
-    """Add a publish job to the global queue. Returns queue job ID."""
+    """Add a publish job to the global queue. Returns queue job ID.
+
+    Idempotent while a job for the same publication is still queued or
+    processing: concurrent scheduler/publisher paths get the existing job
+    instead of creating a duplicate that would later fail CLAIM_LOST.
+    """
     queue_id = f"pq_{uuid.uuid4().hex[:12]}"
     client = get_client()
-    await client.execute(
-        """
-        INSERT INTO facebook_publish_queue
-        (id, pipeline_id, destination_id, reel_db_id, publication_id, status, priority)
-        VALUES (:id, :pipeline_id, :destination_id, :reel_db_id, :publication_id, 'queued', :priority)
-        """,
-        {
-            "id": queue_id,
-            "pipeline_id": pipeline_id,
-            "destination_id": destination_id,
-            "reel_db_id": reel_db_id,
-            "publication_id": publication_id,
-            "priority": priority,
-        },
+    try:
+        await client.execute(
+            """
+            INSERT INTO facebook_publish_queue
+            (id, pipeline_id, destination_id, reel_db_id, publication_id, status, priority)
+            VALUES (:id, :pipeline_id, :destination_id, :reel_db_id, :publication_id, 'queued', :priority)
+            """,
+            {
+                "id": queue_id,
+                "pipeline_id": pipeline_id,
+                "destination_id": destination_id,
+                "reel_db_id": reel_db_id,
+                "publication_id": publication_id,
+                "priority": priority,
+            },
+        )
+        return queue_id
+    except Exception:
+        existing = await get_active_job_for_publication(publication_id)
+        if existing is not None:
+            return existing["id"]
+        raise
+
+
+async def get_active_job_for_publication(publication_id: str) -> dict[str, Any] | None:
+    client = get_client()
+    rows = await client.execute(
+        "SELECT id, pipeline_id, destination_id, reel_db_id, publication_id, "
+        "status, priority, stage, error_code, error, queued_at, started_at, "
+        "finished_at, created_at, updated_at "
+        "FROM facebook_publish_queue "
+        "WHERE publication_id = :publication_id "
+        "AND status IN ('queued', 'processing') "
+        "ORDER BY queued_at ASC, id ASC LIMIT 1",
+        {"publication_id": publication_id},
     )
-    return queue_id
+    if not rows.rows:
+        return None
+    job = rows.rows[0]
+    return {
+        "id": job[0],
+        "pipeline_id": job[1],
+        "destination_id": job[2],
+        "reel_db_id": job[3],
+        "publication_id": job[4],
+        "status": job[5],
+        "priority": job[6],
+        "stage": job[7],
+        "error_code": job[8],
+        "error": job[9],
+        "queued_at": job[10],
+        "started_at": job[11],
+        "finished_at": job[12],
+        "created_at": job[13],
+        "updated_at": job[14],
+    }
+
+
+async def has_other_active_job(
+    queue_id: str,
+    *,
+    publication_id: str | None = None,
+    reel_db_id: str | None = None,
+) -> bool:
+    """True when another live job owns this publication or reel."""
+    if not publication_id and not reel_db_id:
+        return False
+    clauses = ["id != :queue_id", "status IN ('queued', 'processing')"]
+    params: dict[str, Any] = {"queue_id": queue_id}
+    owners = []
+    if publication_id:
+        owners.append("publication_id = :publication_id")
+        params["publication_id"] = publication_id
+    if reel_db_id:
+        owners.append("reel_db_id = :reel_db_id")
+        params["reel_db_id"] = reel_db_id
+    clauses.append("(" + " OR ".join(owners) + ")")
+    rows = await get_client().execute(
+        "SELECT 1 FROM facebook_publish_queue WHERE " + " AND ".join(clauses) + " LIMIT 1",
+        params,
+    )
+    return bool(rows.rows)
 
 
 async def claim_next_job(
