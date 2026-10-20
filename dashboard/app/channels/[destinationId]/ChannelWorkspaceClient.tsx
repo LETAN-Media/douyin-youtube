@@ -461,7 +461,6 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   const [sourceName, setSourceName] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [sourcePlatform, setSourcePlatform] = useState<"douyin" | "facebook">("douyin");
-  const [sourceScanInterval, setSourceScanInterval] = useState("15");
   const [sourceMaxPerDay, setSourceMaxPerDay] = useState("5");
   const [sourceStartMode, setSourceStartMode] = useState<"new_only" | "last_n">("new_only");
   const [sourceInitialLimit, setSourceInitialLimit] = useState("10");
@@ -530,6 +529,25 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
     if (activeTab === "auto") fetchAutoStatus();
   }, [activeTab, fetchAutoStatus]);
 
+  // Initial import runs in the background after a source is added. Poll only
+  // while a source is actually busy, then stop.
+  useEffect(() => {
+    const busy = workspaceSources.some((s) => {
+      const sync = (s.status || "").toLowerCase();
+      const imp = (s.initial_import_status || "").toLowerCase();
+      return (
+        ["running", "queued", "pending"].includes(sync) ||
+        ["running", "pending"].includes(imp)
+      );
+    });
+    if (!busy) return;
+    const timer = window.setInterval(() => {
+      fetchWorkspaceSources();
+      reloadDetail();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [workspaceSources, fetchWorkspaceSources, reloadDetail]);
+
   const handleAddSource = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sourceName.trim() || !sourceUrl.trim() || addingSource) return;
@@ -543,7 +561,6 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
           platform: sourcePlatform,
           name: sourceName.trim(),
           url: sourceUrl.trim(),
-          scan_interval_minutes: Number(sourceScanInterval) || 15,
           max_videos_per_day: Number(sourceMaxPerDay) || 0,
           start_mode: sourceStartMode,
           initial_limit: Number(sourceInitialLimit) || 10,
@@ -2082,7 +2099,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             {autoStatus && (
               <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500">
                 <span>Last scan: <strong className="text-slate-700">{autoStatus.last_scan_at ? new Date(autoStatus.last_scan_at).toLocaleString() : "—"}</strong></span>
-                <span>Next scan: <strong className="text-slate-700">{autoStatus.next_scan_at ? new Date(autoStatus.next_scan_at).toLocaleString() : "—"}</strong></span>
+                <span>Quét định kỳ: <strong className="text-slate-700">Tắt — chỉ scan thủ công ở tab Sources</strong></span>
                 <button type="button" onClick={fetchAutoStatus} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50"><IconRefresh size={12} />Làm mới</button>
               </div>
             )}
@@ -2206,8 +2223,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 <input type="text" value={sourceName} onChange={(e) => setSourceName(e.target.value)} placeholder="Tên tác giả / Page" className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
                 <input type="text" value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder={sourcePlatform === "facebook" ? "Link Facebook Page/Profile" : "Link Douyin (https://v.douyin.com/...)"} className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" />
               </div>
-              <div className="grid gap-3 sm:grid-cols-4">
-                <div><label className="text-[11px] font-bold text-slate-600">Scan interval (phút)</label><input type="number" min={5} max={1440} value={sourceScanInterval} onChange={(e) => setSourceScanInterval(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900" /></div>
+              <div className="grid gap-3 sm:grid-cols-3">
                 <div><label className="text-[11px] font-bold text-slate-600">Max videos/ngày</label><input type="number" min={0} max={50} value={sourceMaxPerDay} onChange={(e) => setSourceMaxPerDay(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900" /></div>
                 <div><label className="text-[11px] font-bold text-slate-600">Start mode</label><select value={sourceStartMode} onChange={(e) => setSourceStartMode(e.target.value as "new_only" | "last_n")} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700"><option value="new_only">NEW_ONLY (chỉ video mới)</option><option value="last_n">LAST_N (giữ N mới nhất)</option></select></div>
                 <div><label className="text-[11px] font-bold text-slate-600">Initial limit (LAST_N)</label><input type="number" min={1} max={50} value={sourceInitialLimit} onChange={(e) => setSourceInitialLimit(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900" /></div>
@@ -2216,9 +2232,13 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 <div><label className="text-[11px] font-bold text-slate-600">Include keywords (phân cách dấu phẩy)</label><input type="text" value={sourceIncludeKw} onChange={(e) => setSourceIncludeKw(e.target.value)} placeholder="ví dụ: dance, street" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900" /></div>
                 <div><label className="text-[11px] font-bold text-slate-600">Exclude keywords</label><input type="text" value={sourceExcludeKw} onChange={(e) => setSourceExcludeKw(e.target.value)} placeholder="ví dụ: gym, food" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900" /></div>
               </div>
+              <p className="text-[11px] font-medium text-slate-500">
+                Sau khi thêm, hệ thống tự chạy <strong>một lần import toàn bộ video hiện có</strong>.
+                Các lần quét sau chỉ chạy thủ công — không có scan định kỳ.
+              </p>
               <button type="submit" disabled={addingSource || !sourceName.trim() || !sourceUrl.trim()} className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
                 <IconPlus size={15} />
-                {addingSource ? "Đang thêm…" : "Thêm Source"}
+                {addingSource ? "Đang thêm…" : "Thêm Source & Import"}
               </button>
             </form>
 
@@ -2232,7 +2252,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h3 className="text-sm font-extrabold text-slate-900">Danh sách tác giả trong workspace ({workspaceSources.length || detail.sources?.length || 0})</h3>
               <div className="flex flex-wrap items-center gap-2">
-                {quota && (
+                {quota && quota.required !== false && (
                   <span
                     className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-bold ${
                       quota.status === "quota_exhausted"
@@ -2288,7 +2308,12 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                           </div>
                           <p className="mt-0.5 font-mono text-[11px] text-slate-400 truncate max-w-md">{source.profile_url}</p>
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                            <span>Kho: <strong className="text-slate-800">{source.video_count ?? 0}</strong> video</span>
+                            <span>Tìm thấy: <strong className="text-slate-800">{source.total_found ?? source.video_count ?? 0}</strong></span>
+                            <span>· Đã lưu: <strong className="text-slate-800">{source.saved_count ?? source.video_count ?? 0}</strong></span>
+                            <span>· Mới: <strong className="text-emerald-700">{source.new_count ?? 0}</strong></span>
+                            <span>· Khả dụng: <strong className="text-slate-800">{source.available_count ?? 0}</strong></span>
+                            <span>· Đã đăng: <strong className="text-slate-800">{source.published_count ?? 0}</strong></span>
+                            {(source.failed_count ?? 0) > 0 && <span>· Lỗi: <strong className="text-rose-600">{source.failed_count}</strong></span>}
                             <span>· Trạng thái: <Badge tone={source.status === "syncing" || source.status === "running" ? "amber" : source.status === "auth_required" ? "red" : "slate"}>{source.status}</Badge></span>
                             <span>· Import: <Badge tone={importTone}>{importLabel}</Badge></span>
                             {platform === "douyin" && (
@@ -2299,6 +2324,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                             {(importStatus === "running" || importStatus === "paused_quota" || importStatus === "paused") && (
                               <span>· Đã đọc <strong className="text-slate-800">{source.initial_import_pages ?? 0}</strong> trang / <strong className="text-slate-800">{source.initial_import_videos ?? 0}</strong> video</span>
                             )}
+                            <span>· Scan cuối: <strong className="text-slate-700">{source.last_scan_at ? new Date(source.last_scan_at).toLocaleString() : "—"}</strong></span>
                             {needsGlobalAuth && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 font-bold text-amber-700">Douyin account needs login (global)</span>}
                             {isPaused && <Badge tone="amber">Paused</Badge>}
                           </div>
@@ -2312,7 +2338,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                           )}
                           {showRefresh && (
                             <button type="button" onClick={() => handleSyncSource(source.id)} disabled={syncingSourceId === source.id} className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-                              <IconRefresh size={13} /> {syncingSourceId === source.id ? "Đang cập nhật…" : "Cập nhật video mới"}
+                              <IconRefresh size={13} /> {syncingSourceId === source.id ? "Đang quét…" : "Quét video mới"}
                             </button>
                           )}
                           <button type="button" onClick={() => handlePauseSource(source.id, !isPaused)} className={`inline-flex min-h-[36px] items-center rounded-lg border px-3 py-1.5 text-xs font-bold ${isPaused ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
@@ -2337,6 +2363,20 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
       {/* ============================================================ */}
       {activeTab === "inventory" && (
         <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            {[
+              { label: "Tổng kho", value: detail.inventory_count || detail.inventory?.length || 0, tone: "text-slate-900" },
+              { label: "Khả dụng", value: detail.inventory_available ?? 0, tone: "text-emerald-700" },
+              { label: "Đã lên lịch", value: detail.inventory_scheduled ?? 0, tone: "text-indigo-700" },
+              { label: "Đã đăng", value: detail.inventory_published ?? 0, tone: "text-slate-700" },
+              { label: "Lỗi", value: detail.failed_count ?? 0, tone: "text-rose-600" },
+            ].map((card) => (
+              <div key={card.label} className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{card.label}</p>
+                <p className={`mt-1 text-lg font-black ${card.tone}`}>{card.value}</p>
+              </div>
+            ))}
+          </div>
           {/* Filters */}
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             {["all", "new", "backlog", "scheduled", "published", "held", "rejected", "baseline", "content_mismatch"].map((st) => (
@@ -2381,7 +2421,10 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                         </Badge>
                       </div>
                       <p className="mt-1 font-bold text-slate-900 line-clamp-2">{item.title || "Douyin Video"}</p>
-                      <p className="mt-1 font-mono text-[10px] text-slate-400">ID: {item.video_id}</p>
+                      <p className="mt-1 font-mono text-[10px] text-slate-400">
+                        ID: {item.video_id}
+                        {item.duration ? ` · ${formatDuration(item.duration)}` : ""}
+                      </p>
                     </div>
 
                     <div className="mt-2 flex items-center justify-between pt-2 border-t border-slate-100">

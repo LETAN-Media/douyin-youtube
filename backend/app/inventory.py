@@ -255,6 +255,19 @@ def _upsert_videos(
         title = str(video.get("title") or "")[:200]
         description = str(video.get("description") or "")[:1000]
         url = str(video.get("url") or "")
+        thumbnail_url = str(
+            video.get("thumbnail_url")
+            or video.get("cover")
+            or video.get("cover_url")
+            or ""
+        ).strip() or None
+        try:
+            duration = int(video.get("duration") or 0) or None
+        except (TypeError, ValueError):
+            duration = None
+        # Douyin's aweme payload reports milliseconds; inventory stores secs.
+        if duration is not None and duration > 10_000:
+            duration = duration // 1000
 
         if existing is not None:
             existing.title = title
@@ -262,6 +275,10 @@ def _upsert_videos(
             existing.url = url
             existing.douyin_created_at = douyin_created_at
             existing.is_backlog = is_backlog
+            if thumbnail_url:
+                existing.thumbnail_url = thumbnail_url
+            if duration is not None:
+                existing.duration = duration
             if existing.status == "inventory":
                 existing.status = "backlog" if is_backlog else "new"
             updated_count += 1
@@ -279,6 +296,8 @@ def _upsert_videos(
                 title=title,
                 description=description,
                 url=url,
+                thumbnail_url=thumbnail_url,
+                duration=duration,
                 douyin_created_at=douyin_created_at,
                 status=status,
                 is_backlog=is_backlog,

@@ -722,6 +722,11 @@ class DouyinVideo(Base):
         nullable=True,
     )
 
+    duration: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
     douyin_created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

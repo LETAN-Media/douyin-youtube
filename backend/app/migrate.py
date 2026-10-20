@@ -1131,6 +1131,23 @@ def _apply_015(cache: SchemaCache, engine: Any) -> None:
                 pass
 
 
+# --- Migration 016: Douyin video duration ---
+def _verify_016(cache: SchemaCache, engine: Any) -> bool:
+    return cache.column_exists("douyin_videos", "duration")
+
+
+def _apply_016(cache: SchemaCache, engine: Any) -> None:
+    if not cache.table_exists("douyin_videos"):
+        return
+    if not cache.column_exists("douyin_videos", "duration"):
+        with log_step("add_col_douyin_videos_duration"):
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE douyin_videos ADD COLUMN duration INTEGER")
+                )
+            cache.add_column("douyin_videos", "duration")
+
+
 # Registry of all migrations in chronological order
 MIGRATIONS = [
     MigrationDefinition("20240101_001_core_tables", "Core base tables", _verify_001, _apply_001),
@@ -1148,6 +1165,7 @@ MIGRATIONS = [
     MigrationDefinition("20240113_013_tenant_multiuser", "Multi-tenant auth & workspace backfill", _verify_013, _apply_013),
     MigrationDefinition("20240114_014_destination_sync", "Legacy YouTube OAuth migration & job assignment", _verify_014, _apply_014),
     MigrationDefinition("20240115_015_performance_indexes", "Channel workspace performance indexes", _verify_015, _apply_015),
+    MigrationDefinition("20240116_016_douyin_video_duration", "Douyin video duration seconds", _verify_016, _apply_016),
 ]
 
 

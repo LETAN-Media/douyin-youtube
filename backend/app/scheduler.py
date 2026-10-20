@@ -373,12 +373,23 @@ def pick_video(
     slot_type: str,
     destination: Destination | None = None,
 ) -> DouyinVideo | None:
-    video = _try_pick_video(db, pipeline, slot_type, destination=destination)
-    if video is not None:
-        return video
+    """Prefer genuinely new inventory, then the requested pool, then backlog.
 
-    other_type = "new" if slot_type == "backlog" else "backlog"
-    return _try_pick_video(db, pipeline, other_type, destination=destination)
+    The old slot-minute modulo made every configured slot resolve to
+    ``backlog`` (480 % 6 == 0, etc.), so new videos were never preferred.
+    New-first selection is now explicit and deterministic.
+    """
+    seen_types: set[str] = set()
+    for candidate_type in ("new", slot_type, "backlog"):
+        if candidate_type in seen_types:
+            continue
+        seen_types.add(candidate_type)
+        video = _try_pick_video(
+            db, pipeline, candidate_type, destination=destination
+        )
+        if video is not None:
+            return video
+    return None
 
 
 def count_todays_released_jobs(

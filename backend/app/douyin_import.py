@@ -2,22 +2,20 @@
 
 Why this module exists
 ----------------------
-RapidAPI's BASIC plan bills per request and *every creator-feed page is one
-request* (~20 a month).  So discovery cannot run on a schedule: it is started
-by an admin and it must be careful with every single page.
-
-Two operations live here, both driven by `JustOneRapidApiProvider.fetch_page`:
+Discovery is admin-driven: source creation starts one initial import and all
+later scans are manual. Two operations live here:
 
 * :func:`initial_import` — a one-off backlog walk for a source. It pages until
   ``has_more=false``, persists **each page immediately**, and stores the cursor
-  after every page so a quota stop can be resumed later instead of refetching
+  after every page so a transient stop can resume later instead of refetching
   page 1.
 * :func:`refresh_source` — the manual "check for new videos" action. It reads
   page 1 (newest first) and stops at the first ``aweme_id`` already in the
-  inventory, so a creator that published nothing costs exactly one request.
+  inventory.
 
-Nothing here schedules itself and nothing here retries past the quota floor;
-the guard lives in :mod:`app.douyin_quota`.
+Both use ``fetch_page`` when the active provider supports it. RapidAPI is
+quota-gated (see :mod:`app.douyin_quota`); self-hosted providers are not.
+Nothing here schedules itself.
 """
 
 from __future__ import annotations
@@ -51,6 +49,7 @@ PROVIDER_OK = "ok"
 PROVIDER_QUOTA = "quota_exhausted"
 PROVIDER_ERROR = "provider_error"
 PROVIDER_INVALID = "invalid"
+PROVIDER_RISK_CONTROL = "risk_control"
 
 #: Sources with an import/refresh in flight *in this process*, so two button
 #: clicks cannot spend the same page twice.
@@ -99,11 +98,68 @@ def _summary(
     }
 
 
+def _provider_uses_quota(provider: Any) -> bool:
+    """True only for providers billed through the RapidAPI quota.
+
+    Test doubles and legacy providers may omit the attribute, so the provider
+    name is also checked; self_hosted/revid never consume RapidAPI quota.
+    """
+    explicit = getattr(provider, "uses_rapidapi_quota", None)
+    if explicit is not None:
+        return bool(explicit)
+    return getattr(provider, "name", "") == "rapidapi_justone"
+
+
 def quota_status() -> dict[str, Any]:
     """Public quota view for the API/UI. Contains no secrets."""
     snap = douyin_quota.snapshot()
     snap["safety_margin"] = douyin_quota.safety_margin()
+    try:
+        provider = get_primary_provider()
+        snap["provider"] = getattr(provider, "name", None)
+        snap["required"] = _provider_uses_quota(provider)
+    except Exception:
+        snap["provider"] = None
+        snap["required"] = True
     return snap
+
+
+def can_start_import() -> bool:
+    """Provider-aware gate used by the API before queueing a scan."""
+    try:
+        provider = get_primary_provider()
+    except Exception:
+        return False
+    if not _provider_uses_quota(provider):
+        return True
+    try:
+        return bool(douyin_quota.can_spend(1))
+    except Exception:
+        return True
+
+
+def _is_page_limit_error(exc: Exception) -> bool:
+    """Deeper-page upstream risk control is resumable, not a failure."""
+    return exc.__class__.__name__ == "DouyinFeedPageLimitError"
+
+
+def _fetch_page(
+    provider: Any,
+    *,
+    sec_uid: str,
+    profile_url: str,
+    source_id: str,
+    cursor: str | None,
+) -> dict[str, Any]:
+    if hasattr(provider, "fetch_page"):
+        return provider.fetch_page(sec_uid, cursor)
+    # Compatibility fallback for providers that only expose fetch_all.
+    items = provider.fetch_all(
+        profile_url or f"https://www.douyin.com/user/{sec_uid}",
+        sec_uid,
+        source_id,
+    )
+    return {"items": list(items), "has_more": False, "next_cursor": ""}
 
 
 def _resolve_sec_uid(source: DouyinSource) -> str:
@@ -125,12 +181,7 @@ def _resolve_sec_uid(source: DouyinSource) -> str:
 
 
 def _provider():
-    provider = get_primary_provider()
-    if not hasattr(provider, "fetch_page"):
-        raise RuntimeError(
-            f"provider {getattr(provider, 'name', '?')} does not support paged import"
-        )
-    return provider
+    return get_primary_provider()
 
 
 def _recount(db: Session, source_id: str) -> int:
@@ -209,6 +260,7 @@ def _finish(
             source.initial_import_completed_at = utcnow()
             source.inventory_synced_at = utcnow()
             source.last_checked_at = utcnow()
+            source.last_scan_at = utcnow()
 
 
 def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
@@ -237,6 +289,7 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                     source_id, STATUS_FAILED,
                     error="DOUYIN_SOURCE_INVALID: thiếu secUid/profile_url",
                 )
+            profile_url = source.profile_url or ""
             cursor = (source.initial_import_cursor or None) if resume else None
             if not resume:
                 source.initial_import_cursor = None
@@ -265,6 +318,7 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
         delay = float(
             getattr(settings, "douyin_initial_import_page_delay_seconds", 0.5) or 0
         )
+        uses_quota = _provider_uses_quota(provider)
 
         new_total = 0
         updated_total = 0
@@ -275,7 +329,7 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
         provider_status = PROVIDER_OK
 
         while pages < max_pages:
-            if not douyin_quota.can_spend(1):
+            if uses_quota and not douyin_quota.can_spend(1):
                 status = STATUS_PAUSED_QUOTA
                 provider_status = PROVIDER_QUOTA
                 error = (
@@ -285,23 +339,33 @@ def initial_import(source_id: str, resume: bool = False) -> dict[str, Any]:
                 break
 
             try:
-                page = provider.fetch_page(sec_uid, cursor)
+                page = _fetch_page(
+                    provider,
+                    sec_uid=sec_uid,
+                    profile_url=profile_url,
+                    source_id=source_id,
+                    cursor=cursor,
+                )
             except douyin_quota.QuotaExhausted as exc:  # defensive
                 status = STATUS_PAUSED_QUOTA
                 provider_status = PROVIDER_QUOTA
                 error = str(exc)[:2000]
                 break
             except Exception as exc:
-                # JustOneQuotaError is a RuntimeError subclass; detect by text.
                 text = str(exc)
-                if "QUOTA" in text.upper() or isinstance(exc, douyin_quota.QuotaExhausted):
+                if _is_page_limit_error(exc):
+                    status = STATUS_PAUSED
+                    provider_status = PROVIDER_RISK_CONTROL
+                elif uses_quota and (
+                    "QUOTA" in text.upper()
+                    or isinstance(exc, douyin_quota.QuotaExhausted)
+                ):
                     status = STATUS_PAUSED_QUOTA
                     provider_status = PROVIDER_QUOTA
-                    error = text[:2000]
                 else:
                     status = STATUS_FAILED
                     provider_status = PROVIDER_ERROR
-                    error = text[:2000]
+                error = text[:2000]
                 break
 
             items = list(page.get("items") or [])
@@ -381,6 +445,7 @@ def refresh_source(source_id: str) -> dict[str, Any]:
                     source_id, STATUS_FAILED,
                     error="DOUYIN_SOURCE_INVALID: thiếu secUid/profile_url",
                 )
+            profile_url = source.profile_url or ""
             known_ids = set(
                 str(v) for v in db.execute(
                     select(DouyinVideo.video_id).where(
@@ -403,6 +468,7 @@ def refresh_source(source_id: str) -> dict[str, Any]:
         max_pages = max(
             1, int(getattr(settings, "douyin_refresh_max_pages", 3) or 3)
         )
+        uses_quota = _provider_uses_quota(provider)
         cursor: str | None = None
         pages = 0
         new_total = 0
@@ -413,7 +479,7 @@ def refresh_source(source_id: str) -> dict[str, Any]:
         provider_status = PROVIDER_OK
 
         while pages < max_pages:
-            if not douyin_quota.can_spend(1):
+            if uses_quota and not douyin_quota.can_spend(1):
                 status = STATUS_PAUSED_QUOTA
                 provider_status = PROVIDER_QUOTA
                 error = (
@@ -421,10 +487,19 @@ def refresh_source(source_id: str) -> dict[str, Any]:
                 )
                 break
             try:
-                page = provider.fetch_page(sec_uid, cursor)
+                page = _fetch_page(
+                    provider,
+                    sec_uid=sec_uid,
+                    profile_url=profile_url,
+                    source_id=source_id,
+                    cursor=cursor,
+                )
             except Exception as exc:
                 text = str(exc)
-                if "QUOTA" in text.upper():
+                if _is_page_limit_error(exc):
+                    status = STATUS_PAUSED
+                    provider_status = PROVIDER_RISK_CONTROL
+                elif uses_quota and "QUOTA" in text.upper():
                     status = STATUS_PAUSED_QUOTA
                     provider_status = PROVIDER_QUOTA
                 else:
@@ -478,10 +553,12 @@ def refresh_source(source_id: str) -> dict[str, Any]:
                     source.inventory_sync_error = None
                     source.inventory_synced_at = utcnow()
                     source.last_checked_at = utcnow()
+                    source.last_scan_at = utcnow()
+                elif status in (STATUS_PAUSED_QUOTA, STATUS_PAUSED):
+                    source.inventory_sync_status = status
+                    source.inventory_sync_error = error
                 else:
-                    source.inventory_sync_status = (
-                        STATUS_PAUSED_QUOTA if status == STATUS_PAUSED_QUOTA else "failed"
-                    )
+                    source.inventory_sync_status = "failed"
                     source.inventory_sync_error = error
 
         logger.info(
@@ -531,6 +608,8 @@ def list_source_inventory(
                 "video_id": v.video_id,
                 "title": v.title,
                 "url": v.url,
+                "thumbnail_url": v.thumbnail_url,
+                "duration": v.duration,
                 "status": v.status,
                 "is_backlog": bool(v.is_backlog),
                 "is_backfill": bool(v.is_backfill),
@@ -546,12 +625,14 @@ __all__ = [
     "PROVIDER_INVALID",
     "PROVIDER_OK",
     "PROVIDER_QUOTA",
+    "PROVIDER_RISK_CONTROL",
     "STATUS_COMPLETED",
     "STATUS_FAILED",
     "STATUS_PAUSED",
     "STATUS_PAUSED_QUOTA",
     "STATUS_PENDING",
     "STATUS_RUNNING",
+    "can_start_import",
     "initial_import",
     "list_source_inventory",
     "quota_status",

@@ -43,6 +43,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _coerce_duration(item: dict[str, Any]) -> int | None:
+    """Provider duration in milliseconds, when available."""
+    try:
+        value = int(item.get("duration") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value or None
+
+
 # ---------------------------------------------------------------------------
 # Cookie support (DOUYIN_COOKIES_B64 = base64 of Netscape cookies.txt)
 # Never log cookie values. Never expose cookies via API.
@@ -332,6 +341,9 @@ def cookies_from_netscape_text(text: str) -> list[dict[str, Any]]:
 
 class DouyinInventoryProvider(ABC):
     name = "base"
+    # Only providers that bill a third-party request quota opt into the
+    # RapidAPI floor. Self-hosted/manual providers must never be blocked by it.
+    uses_rapidapi_quota = False
 
     @abstractmethod
     def fetch_all(
@@ -1085,6 +1097,37 @@ class SelfHostedDouyinFeedProvider(DouyinInventoryProvider):
 
     name = "self_hosted"
 
+    def fetch_page(
+        self,
+        sec_uid_or_url: str,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch exactly one creator-feed page for resumable imports."""
+        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
+        if not sec_uid:
+            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
+        if not getattr(settings, "douyin_feed_api_enabled", True):
+            raise DouyinInventoryError("self_hosted provider disabled")
+
+        from app.integrations.douyin_feed.client import DouyinFeedClient
+
+        result = DouyinFeedClient().fetch_user_posts(
+            sec_uid,
+            cursor=cursor,
+            count=20,
+        )
+        next_cursor = str(result.get("next_cursor") or "")
+        if next_cursor in ("", "0"):
+            next_cursor = ""
+        return {
+            "items": [
+                self._normalize_feed_item(item)
+                for item in result.get("items", [])
+            ],
+            "has_more": bool(result.get("has_more")) and bool(next_cursor),
+            "next_cursor": next_cursor,
+        }
+
     def fetch_all(
         self,
         profile_url: str,
@@ -1128,37 +1171,7 @@ class SelfHostedDouyinFeedProvider(DouyinInventoryProvider):
             count=20,
         )
 
-        ordered: list[dict[str, Any]] = []
-        for item in raw_items:
-            aweme_id = str(item.get("aweme_id") or "").strip()
-            if not aweme_id:
-                continue
-            share_url = str(
-                item.get("share_url")
-                or f"https://www.douyin.com/video/{aweme_id}"
-            )
-            caption = str(item.get("caption") or "")
-            try:
-                ts = int(item.get("create_time") or 0)
-            except (TypeError, ValueError):
-                ts = 0
-            douyin_created_at = (
-                datetime.fromtimestamp(ts, tz=timezone.utc) if ts > 0 else None
-            )
-            ordered.append(
-                {
-                    "video_id": aweme_id,
-                    "aweme_id": aweme_id,
-                    "title": caption[:200] if caption else aweme_id,
-                    "description": caption[:1000],
-                    "url": share_url,
-                    "douyin_created_at": douyin_created_at,
-                    "author": "",
-                    "cover": str(item.get("cover_url") or ""),
-                    "share_url": share_url,
-                    "create_time": ts,
-                }
-            )
+        ordered = [self._normalize_feed_item(item) for item in raw_items]
 
         logger.info(
             "self_hosted douyin_feed collected %s videos for secUid=%s",
@@ -1166,6 +1179,39 @@ class SelfHostedDouyinFeedProvider(DouyinInventoryProvider):
             sec_uid[:12],
         )
         return ordered
+
+    @staticmethod
+    def _normalize_feed_item(item: dict[str, Any]) -> dict[str, Any]:
+        aweme_id = str(item.get("aweme_id") or "").strip()
+        share_url = str(
+            item.get("share_url")
+            or f"https://www.douyin.com/video/{aweme_id}"
+        )
+        caption = str(item.get("caption") or "")
+        try:
+            ts = int(item.get("create_time") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        douyin_created_at = (
+            datetime.fromtimestamp(ts, tz=timezone.utc) if ts > 0 else None
+        )
+        try:
+            duration = int(item.get("duration") or 0) or None
+        except (TypeError, ValueError):
+            duration = None
+        return {
+            "video_id": aweme_id,
+            "aweme_id": aweme_id,
+            "title": caption[:200] if caption else aweme_id,
+            "description": caption[:1000],
+            "url": share_url,
+            "douyin_created_at": douyin_created_at,
+            "author": "",
+            "cover": str(item.get("cover_url") or ""),
+            "duration": duration,
+            "share_url": share_url,
+            "create_time": ts,
+        }
 
     @staticmethod
     def _resolve_sec_uid(value: str) -> str:
@@ -1196,6 +1242,7 @@ class JustOneRapidApiProvider(DouyinInventoryProvider):
     """
 
     name = "rapidapi_justone"
+    uses_rapidapi_quota = True
 
     def fetch_all(
         self,
@@ -1276,6 +1323,7 @@ class JustOneRapidApiProvider(DouyinInventoryProvider):
             "douyin_created_at": douyin_created_at,
             "author": "",
             "cover": str(item.get("cover_url") or ""),
+            "duration": _coerce_duration(item),
             "share_url": share_url,
             "create_time": ts,
         }

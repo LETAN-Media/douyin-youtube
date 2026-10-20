@@ -427,9 +427,18 @@ export interface WorkspaceSourceItem extends ChannelSourceItem {
   last_refresh_at?: string | null;
   provider_status?: string | null;
   provider_status_detail?: string | null;
+  total_found?: number | null;
+  saved_count?: number | null;
+  new_count?: number | null;
+  available_count?: number | null;
+  scheduled_count?: number | null;
+  published_count?: number | null;
+  failed_count?: number | null;
 }
 
 export interface DouyinQuotaStatus {
+  provider?: string | null;
+  required?: boolean;
   limit: number;
   remaining: number;
   used: number;
@@ -501,6 +510,7 @@ export interface ChannelInventoryItem {
   title: string;
   description: string;
   thumbnail_url?: string | null;
+  duration?: number | null;
   url: string;
   status: string;
   is_backlog: boolean;
@@ -525,6 +535,9 @@ export interface ChannelDetail {
   published: ManualPublicationItem[];
   inventory?: ChannelInventoryItem[];
   inventory_count?: number;
+  inventory_available?: number;
+  inventory_scheduled?: number;
+  inventory_published?: number;
   failed_count?: number;
   next_slot?: string | null;
   shorts_capacity?: {

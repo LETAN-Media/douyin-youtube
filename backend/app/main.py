@@ -1403,6 +1403,18 @@ def retry_job(
     job.error = None
     job.progress = 0
 
+    # Keep the linked Publication consistent so the dashboard and scheduler
+    # do not leave it stuck in failed while the job is retried.
+    publication = None
+    if getattr(job, "publication_id", None):
+        publication = db.get(Publication, job.publication_id)
+    if publication is not None and publication.status != "published":
+        publication.status = "queued"
+        publication.error = None
+        publication.attempts = 0
+        if publication.scheduled_at is None:
+            publication.scheduled_at = _utcnow()
+
     db.commit()
     db.refresh(job)
 
@@ -1672,13 +1684,20 @@ def create_pipeline_source(
         initial_import_status="pending",
     )
 
+    try:
+        from app.douyin_inventory_providers import get_primary_provider
+
+        source.feed_provider = get_primary_provider().name
+    except Exception:
+        pass
+
     db.add(source)
     db.commit()
     db.refresh(source)
 
-    # Manual-inventory mode: creating a source does NOT spend a RapidAPI
-    # request. The admin starts the one-off import from the dashboard
-    # (POST /api/sources/{id}/initial-import).
+    # Run the one-off backlog import immediately. Daily auto-scan stays off;
+    # this is the only scan that starts without an explicit admin click.
+    queue_initial_import(db, source)
     return source
 
 
@@ -3149,17 +3168,7 @@ def start_initial_import(
             detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
         )
 
-    source.initial_import_status = "running"
-    source.initial_import_last_error = None
-    source.inventory_sync_status = "queued"
-    source.inventory_sync_error = None
-    db.commit()
-
-    import threading as _threading
-
-    _threading.Thread(
-        target=trigger_inventory_sync_job, args=(source_id, "full"), daemon=True
-    ).start()
+    queue_initial_import(db, source)
     return SourceImportResponse(
         source_id=source_id, status="queued", quota=DouyinQuotaOut(**quota)
     )
@@ -3194,19 +3203,10 @@ def resume_initial_import(
             detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
         )
 
-    source.initial_import_status = "running"
-    source.initial_import_last_error = None
-    source.inventory_sync_status = "queued"
-    source.inventory_sync_error = None
-    db.commit()
-
-    import threading as _threading
-
-    _threading.Thread(
-        target=trigger_inventory_sync_job, args=(source_id, "resume"), daemon=True
-    ).start()
+    cursor = source.initial_import_cursor
+    queue_initial_import(db, source, resume=True)
     return SourceImportResponse(
-        source_id=source_id, status="queued", cursor=source.initial_import_cursor,
+        source_id=source_id, status="queued", cursor=cursor,
         quota=DouyinQuotaOut(**quota),
     )
 
@@ -4811,15 +4811,11 @@ def get_channel_detail_endpoint(
             .where(DouyinSource.pipeline_id == pipeline.id)
             .order_by(DouyinSource.created_at.desc())
         ).scalars().all()
+        stats_map = _source_stats_map(db, [s.id for s in sources])
         for s in sources:
-            sources_data.append({
-                "id": s.id,
-                "name": s.name,
-                "profile_url": s.profile_url or s.original_profile_url,
-                "status": s.inventory_sync_status,
-                "video_count": s.inventory_count,
-                "last_synced_at": s.last_checked_at.isoformat() if s.last_checked_at else None,
-            })
+            sources_data.append(
+                _source_with_cookie_out(s, stats_map.get(s.id))
+            )
 
     avatar_url = None
     if d.credentials:
@@ -4971,6 +4967,18 @@ def get_channel_detail_endpoint(
         inventory_count = inv_rows[0][1] if inv_rows else 0
         inventory_videos = [r[0] for r in inv_rows]
 
+    inventory_status_counts: dict[str, int] = {}
+    if pipeline:
+        inv_status_rows = db.execute(
+            select(DouyinVideo.status, func.count(DouyinVideo.id))
+            .where(DouyinVideo.pipeline_id == pipeline.id)
+            .group_by(DouyinVideo.status)
+        ).all()
+        inventory_status_counts = {
+            str(status): int(count or 0)
+            for status, count in inv_status_rows
+        }
+
     inventory_data = [
         {
             "id": v.id,
@@ -4978,6 +4986,7 @@ def get_channel_detail_endpoint(
             "title": v.title,
             "description": v.description,
             "thumbnail_url": v.thumbnail_url,
+            "duration": v.duration,
             "url": v.url,
             "status": v.status,
             "is_backlog": v.is_backlog,
@@ -5062,6 +5071,12 @@ def get_channel_detail_endpoint(
         published=published_list,
         inventory=inventory_data,
         inventory_count=inventory_count,
+        inventory_available=(
+            inventory_status_counts.get("new", 0)
+            + inventory_status_counts.get("backlog", 0)
+        ),
+        inventory_scheduled=inventory_status_counts.get("scheduled", 0),
+        inventory_published=inventory_status_counts.get("published", 0),
         failed_count=failed_count,
         next_slot=next_slot_str,
         shorts_capacity=shorts_capacity,
@@ -5155,13 +5170,49 @@ def update_channel_endpoint(
 
 
 def douyin_quota_can_start() -> bool:
-    """True when one more RapidAPI request is allowed above the safety floor."""
-    from app import douyin_quota
+    """Provider-aware import gate (RapidAPI quota or self-hosted no-op)."""
+    from app import douyin_import
 
     try:
-        return bool(douyin_quota.can_spend(1))
+        return bool(douyin_import.can_start_import())
     except Exception:
         return True
+
+
+def queue_initial_import(
+    db: Session,
+    source: DouyinSource,
+    *,
+    resume: bool = False,
+) -> bool:
+    """Mark an initial import running and start it outside the request."""
+    from app import douyin_import
+
+    if not douyin_import.can_start_import():
+        source.initial_import_status = "paused_quota"
+        source.inventory_sync_status = "paused_quota"
+        source.initial_import_last_error = (
+            "RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này"
+        )
+        db.commit()
+        return False
+
+    source.initial_import_status = "running"
+    source.initial_import_last_error = None
+    source.inventory_sync_status = "queued"
+    source.inventory_sync_error = None
+    if not resume:
+        source.initial_import_started_at = _utcnow()
+    db.commit()
+
+    import threading as _threading
+
+    _threading.Thread(
+        target=trigger_inventory_sync_job,
+        args=(source.id, "resume" if resume else "full"),
+        daemon=True,
+    ).start()
+    return True
 
 
 def trigger_inventory_sync_job(source_id: str, mode: str = "full") -> None:
@@ -5260,14 +5311,19 @@ def add_channel_source_endpoint(
         mismatch_policy=payload.mismatch_policy,
         order=payload.order,
     )
+    try:
+        from app.douyin_inventory_providers import get_primary_provider
+
+        source.feed_provider = get_primary_provider().name
+    except Exception:
+        pass
     db.add(source)
     db.commit()
     db.refresh(source)
 
-    # Manual-inventory mode: no automatic scan on creation. The source starts
-    # with initial_import_status='pending' and the admin triggers the one-off
-    # backlog import (POST /api/sources/{id}/initial-import) so RapidAPI quota
-    # is only spent on demand.
+    # Initial import starts automatically exactly once. Daily auto-scan
+    # remains disabled; later scans are manual only.
+    queue_initial_import(db, source)
     return {
         "id": source.id,
         "name": source.name,
@@ -5327,8 +5383,62 @@ def _require_workspace_source(
     return d, s
 
 
-def _source_with_cookie_out(s: DouyinSource) -> dict:
+def _source_stats_map(db: Session, source_ids: list[str]) -> dict[str, dict[str, int]]:
+    """Per-source totals in one grouped query (no N+1 on the Sources tab)."""
+    if not source_ids:
+        return {}
+    stats: dict[str, dict[str, int]] = {
+        sid: {
+            "total": 0,
+            "new": 0,
+            "backlog": 0,
+            "scheduled": 0,
+            "published": 0,
+            "failed": 0,
+        }
+        for sid in source_ids
+    }
+    rows = db.execute(
+        select(DouyinVideo.source_id, DouyinVideo.status, func.count(DouyinVideo.id))
+        .where(DouyinVideo.source_id.in_(source_ids))
+        .group_by(DouyinVideo.source_id, DouyinVideo.status)
+    ).all()
+    for source_id, status, count in rows:
+        bucket = stats.get(str(source_id))
+        if bucket is None:
+            continue
+        bucket["total"] += int(count or 0)
+        if status in ("new", "backlog", "scheduled", "published"):
+            bucket[status] += int(count or 0)
+
+    failed_rows = db.execute(
+        select(DouyinVideo.source_id, func.count(Publication.id))
+        .join(Publication, Publication.douyin_video_id == DouyinVideo.id)
+        .where(DouyinVideo.source_id.in_(source_ids))
+        .where(Publication.status == "failed")
+        .group_by(DouyinVideo.source_id)
+    ).all()
+    for source_id, count in failed_rows:
+        bucket = stats.get(str(source_id))
+        if bucket is not None:
+            bucket["failed"] += int(count or 0)
+    return stats
+
+
+def _source_with_cookie_out(
+    s: DouyinSource,
+    stats: dict[str, int] | None = None,
+) -> dict:
+    stats = stats or {}
     # Deprecated per-source cookie fields kept for backwards compat, not used in runtime.
+    total = int(stats.get("total") or s.inventory_count or 0)
+    last_scan = (
+        getattr(s, "last_scan_at", None)
+        or getattr(s, "last_refresh_at", None)
+        or getattr(s, "initial_import_completed_at", None)
+        or s.inventory_synced_at
+        or s.last_checked_at
+    )
     return {
         "id": s.id,
         "name": s.name,
@@ -5368,7 +5478,7 @@ def _source_with_cookie_out(s: DouyinSource) -> dict:
         "order": s.order or "oldest_first",
         "cookie_configured": False,
         "status": s.inventory_sync_status,
-        "video_count": s.inventory_count,
+        "video_count": total,
         # Manual-inventory mode (admin-driven discovery).
         "feed_provider": getattr(s, "feed_provider", "rapidapi_justone"),
         "initial_import_status": getattr(s, "initial_import_status", "pending"),
@@ -5381,6 +5491,18 @@ def _source_with_cookie_out(s: DouyinSource) -> dict:
         "last_refresh_at": getattr(s, "last_refresh_at", None),
         "provider_status": getattr(s, "provider_status", "ok"),
         "provider_status_detail": getattr(s, "provider_status_detail", None),
+        # Source-level inventory progress for the dashboard.
+        "total_found": max(
+            int(getattr(s, "initial_import_videos", 0) or 0),
+            total,
+        ),
+        "saved_count": total,
+        "new_count": int(stats.get("new") or 0),
+        "available_count": int(stats.get("new") or 0) + int(stats.get("backlog") or 0),
+        "scheduled_count": int(stats.get("scheduled") or 0),
+        "published_count": int(stats.get("published") or 0),
+        "failed_count": int(stats.get("failed") or 0),
+        "last_scan_at": last_scan,
     }
 
 
@@ -5409,7 +5531,8 @@ def list_channel_sources_endpoint(
             .order_by(PipelineSource.created_at.asc())
         ).scalars().all()
     )
-    out = [_source_with_cookie_out(s) for s in douyin]
+    stats_map = _source_stats_map(db, [s.id for s in douyin])
+    out = [_source_with_cookie_out(s, stats_map.get(s.id)) for s in douyin]
     for g in generic:
         out.append(
             {

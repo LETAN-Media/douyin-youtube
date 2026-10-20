@@ -8,6 +8,7 @@ from app.douyin_inventory_providers import (
     parse_aweme_post_response,
     parse_netscape_cookies,
     PlaywrightDouyinInventoryProvider,
+    SelfHostedDouyinFeedProvider,
 )
 
 
@@ -277,6 +278,69 @@ class TestPlaywrightAnonymousFirst(unittest.TestCase):
         self.assertEqual(
             resolve("https://www.douyin.com/user/SEC123?x=1"), "SEC123"
         )
+
+
+class TestSelfHostedFeedPagination(unittest.TestCase):
+    def test_fetch_page_normalizes_items_and_cursor(self):
+        from unittest.mock import patch
+
+        import app.douyin_inventory_providers as providers
+
+        payload = {
+            "items": [
+                {
+                    "aweme_id": "123",
+                    "caption": "hello",
+                    "create_time": 1700000000,
+                    "share_url": "",
+                    "cover_url": "https://c/1.jpg",
+                    "duration": 15000,
+                }
+            ],
+            "has_more": True,
+            "next_cursor": "100",
+        }
+        with patch.object(providers.settings, "douyin_feed_api_enabled", True), \
+             patch(
+                 "app.integrations.douyin_feed.client.DouyinFeedClient.fetch_user_posts",
+                 return_value=payload,
+             ) as fetch:
+            page = SelfHostedDouyinFeedProvider().fetch_page("SEC123", cursor="50")
+
+        fetch.assert_called_once_with("SEC123", cursor="50", count=20)
+        self.assertTrue(page["has_more"])
+        self.assertEqual(page["next_cursor"], "100")
+        self.assertEqual(page["items"][0]["video_id"], "123")
+        self.assertTrue(page["items"][0]["url"].endswith("/video/123"))
+        self.assertEqual(page["items"][0]["cover"], "https://c/1.jpg")
+        self.assertEqual(page["items"][0]["duration"], 15000)
+
+
+class TestSelfHostedFeedClientNormalization(unittest.TestCase):
+    def test_normalize_extracts_duration_and_cursor(self):
+        from app.integrations.douyin_feed.client import DouyinFeedClient
+
+        page = DouyinFeedClient._normalize(
+            {
+                "items": [
+                    {
+                        "content_id": "456",
+                        "title": "nested duration",
+                        "created_at": "2024-01-01T00:00:00Z",
+                        "media": {
+                            "covers": [{"url": "https://c/2.jpg"}],
+                            "duration": 22000,
+                        },
+                    }
+                ]
+            },
+            {"cursor": {"has_more": True, "next": "200"}},
+        )
+
+        self.assertTrue(page["has_more"])
+        self.assertEqual(page["next_cursor"], "200")
+        self.assertEqual(page["items"][0]["cover_url"], "https://c/2.jpg")
+        self.assertEqual(page["items"][0]["duration"], 22000)
 
 
 if __name__ == "__main__":

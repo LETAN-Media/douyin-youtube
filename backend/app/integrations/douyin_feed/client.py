@@ -324,6 +324,7 @@ class DouyinFeedClient:
                     "create_time": create_ts,
                     "share_url": share_url,
                     "cover_url": cover_url,
+                    "duration": extract_duration(entry),
                 }
             )
 
@@ -338,6 +339,27 @@ class DouyinFeedClient:
             next_cursor = str(data.get("max_cursor") or "")
 
         return {"items": items, "has_more": has_more, "next_cursor": next_cursor}
+
+
+def extract_duration(entry: dict[str, Any]) -> int | None:
+    """Duration in milliseconds/seconds from normalized or raw service data."""
+    candidates = [
+        entry.get("duration"),
+        entry.get("duration_ms"),
+        entry.get("video_duration"),
+    ]
+    for key in ("media", "video"):
+        nested = entry.get(key)
+        if isinstance(nested, dict):
+            candidates.extend([nested.get("duration"), nested.get("duration_ms")])
+    for value in candidates:
+        try:
+            duration = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            return duration
+    return None
 
 
 def iso_to_epoch(created_at: Any) -> int:

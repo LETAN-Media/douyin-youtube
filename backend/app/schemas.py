@@ -554,6 +554,7 @@ class DouyinVideoOut(BaseModel):
     description: str
     url: str
     thumbnail_url: str | None = None
+    duration: int | None = None
     douyin_created_at: datetime | None
     status: str
     is_backlog: bool
@@ -777,6 +778,8 @@ class SourceSyncResponse(BaseModel):
 class DouyinQuotaOut(BaseModel):
     """RapidAPI quota view. Never contains the API key."""
 
+    provider: str | None = None
+    required: bool = True
     limit: int = 0
     remaining: int = 0
     used: int = 0
@@ -844,6 +847,9 @@ class ChannelDetailResponse(BaseModel):
     published: list[ManualPublicationItem] = Field(default_factory=list)
     inventory: list[dict[str, Any]] = Field(default_factory=list)
     inventory_count: int = 0
+    inventory_available: int = 0
+    inventory_scheduled: int = 0
+    inventory_published: int = 0
     failed_count: int = 0
     next_slot: str | None = None
     # Shorts 4/day capacity snapshot for the Queue UI card.

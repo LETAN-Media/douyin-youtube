@@ -452,8 +452,8 @@ class TestScheduler(unittest.TestCase):
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
         self.assertEqual(scheduled, 3)
 
-    def test_backlog_new_ratio(self):
-        # Fixed 4/day cap: backlog fills first, new videos wait for next days.
+    def test_new_videos_preferred_then_backlog(self):
+        # Fixed 4/day cap: genuinely new videos are selected before backlog.
         pipeline = self._make_pipeline()
         self._make_destination(pipeline)
         source = self._make_source(pipeline)
@@ -476,8 +476,8 @@ class TestScheduler(unittest.TestCase):
         backlog_scheduled = [v for v in scheduled if v.is_backlog]
         new_scheduled = [v for v in scheduled if not v.is_backlog]
         self.assertEqual(len(scheduled), 4)
-        self.assertEqual(len(backlog_scheduled), 4)
-        self.assertEqual(len(new_scheduled), 0)
+        self.assertEqual(len(new_scheduled), 2)
+        self.assertEqual(len(backlog_scheduled), 2)
 
     def test_round_robin_between_sources(self):
         pipeline = self._make_pipeline()
