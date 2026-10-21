@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from app.db.client import get_client
@@ -259,21 +260,48 @@ def _parse_genre(raw: Any) -> list[str] | None:
     """Genre is multi-select: stored as JSON array; legacy plain strings kept."""
     if raw is None:
         return None
-    if isinstance(raw, list):
-        items = [str(x).strip() for x in raw if str(x).strip()]
-        return items or None
-    text = str(raw).strip()
-    if not text:
-        return None
-    if text.startswith("["):
-        try:
-            items = json.loads(text)
-            if isinstance(items, list):
-                items = [str(x).strip() for x in items if str(x).strip()]
-                return items or None
-        except Exception:
-            pass
-    return [text]
+    curr = raw
+    for _ in range(10):
+        if isinstance(curr, list):
+            items = []
+            for x in curr:
+                if isinstance(x, (list, str)):
+                    sub = _parse_genre(x)
+                    if sub:
+                        items.extend(sub)
+                elif str(x).strip():
+                    items.append(str(x).strip())
+            cleaned = []
+            seen = set()
+            for it in items:
+                parts = re.split(r"[\",\']+", str(it))
+                for part in parts:
+                    clean_it = re.sub(r"^[\[\'\"\\\s]+|[\]\'\"\\\s]+$", "", part).strip()
+                    if clean_it and clean_it not in seen and not clean_it.startswith("[") and not clean_it.endswith("]"):
+                        seen.add(clean_it)
+                        cleaned.append(clean_it)
+            return cleaned or None
+        if isinstance(curr, str):
+            text = curr.strip()
+            if not text:
+                return None
+            if (text.startswith("[") and text.endswith("]")) or (text.startswith('"[') and text.endswith(']"')):
+                try:
+                    curr = json.loads(text)
+                    continue
+                except Exception:
+                    pass
+            parts = re.split(r"[\",\']+", text)
+            clean_items = []
+            seen = set()
+            for part in parts:
+                clean_it = re.sub(r"^[\[\'\"\\\s]+|[\]\'\"\\\s]+$", "", part).strip()
+                if clean_it and clean_it not in seen and not clean_it.startswith("[") and not clean_it.endswith("]"):
+                    seen.add(clean_it)
+                    clean_items.append(clean_it)
+            return clean_items or None
+        break
+    return [str(curr)]
 
 
 def upsert_ai_settings(pipeline_id: str, **fields: Any) -> dict[str, Any]:
@@ -283,9 +311,7 @@ def upsert_ai_settings(pipeline_id: str, **fields: Any) -> dict[str, Any]:
         raise VersionConflict(int(expected), int(current.get("config_version") or 1))
 
     def pick(key: str, default: Any, is_bool: bool = False):
-        if key not in fields:
-            return current.get(key, default)
-        value = fields[key]
+        value = fields[key] if key in fields else current.get(key, default)
         if is_bool:
             return bool(value)
         if key == "locked_hashtags":
@@ -294,19 +320,11 @@ def upsert_ai_settings(pipeline_id: str, **fields: Any) -> dict[str, Any]:
             if value is None:
                 return None
             if isinstance(value, list):
-                items = [str(x).strip() for x in value if str(x).strip()]
+                items = _parse_genre(value)
                 return json.dumps(items, ensure_ascii=False) if items else None
             text = str(value).strip()
-            if text.startswith("["):
-                try:
-                    items = json.loads(text)
-                    if isinstance(items, list):
-                        return json.dumps(
-                            [str(x).strip() for x in items if str(x).strip()],
-                            ensure_ascii=False)
-                except Exception:
-                    pass
-            return text or None
+            items = _parse_genre(text)
+            return json.dumps(items, ensure_ascii=False) if items else None
         if isinstance(value, str):
             return value.strip() or None
         return value

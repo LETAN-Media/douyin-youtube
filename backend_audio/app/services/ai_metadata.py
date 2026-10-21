@@ -94,9 +94,10 @@ def normalize_language(value: Any) -> str:
 
 def apply_title_template(template: str | None, title: str) -> str:
     tpl = (template or "").strip() or "{title}"
-    if "{title}" not in tpl:
+    if "{title}" not in tpl.lower():
         tpl = "{title}"
-    return tpl.replace("{title}", (title or "").strip()).strip()[:100].rstrip()
+    pattern = re.compile(re.escape("{title}"), re.IGNORECASE)
+    return pattern.sub((title or "").strip(), tpl).strip()[:100].rstrip()
 
 
 def apply_locked_hashtags(locked: list[str] | None,
@@ -116,8 +117,10 @@ def apply_locked_hashtags(locked: list[str] | None,
 def apply_description_template(template: str | None, description: str,
                                hashtags: list[str]) -> str:
     tpl = (template or "").strip() or "{description}\n\n{hashtags}"
-    rendered = tpl.replace("{description}", (description or "").strip()).replace(
-        "{hashtags}", " ".join(hashtags))
+    pattern_desc = re.compile(re.escape("{description}"), re.IGNORECASE)
+    pattern_tags = re.compile(re.escape("{hashtags}"), re.IGNORECASE)
+    rendered = pattern_desc.sub((description or "").strip(), tpl)
+    rendered = pattern_tags.sub(" ".join(hashtags), rendered)
     lines = [line.rstrip() for line in rendered.splitlines()]
     return "\n".join(lines).strip()[:5000].rstrip()
 
@@ -140,6 +143,35 @@ def extract_json_object(text: str) -> dict:
         except Exception:
             pass
     raise MetadataError(INVALID_RESPONSE, "Model did not return a JSON object.")
+
+
+def parse_chat_body(raw_text: str) -> tuple[dict, str, dict]:
+    text = (raw_text or "").strip()
+    if "data: [DONE]" in text:
+        text = text.split("data: [DONE]")[0].strip()
+    try:
+        body = json.loads(text)
+    except Exception:
+        body = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("data:"):
+                continue
+            try:
+                candidate = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(candidate, dict):
+                body = candidate
+                break
+    if not isinstance(body, dict):
+        raise MetadataError(INVALID_RESPONSE, "ToolNet response has no usable content.")
+    try:
+        content = body["choices"][0]["message"]["content"]
+        usage = body.get("usage") or {}
+    except Exception:
+        raise MetadataError(INVALID_RESPONSE, "ToolNet response has no usable content.")
+    return body, content, usage
 
 
 def validate_metadata(data: dict) -> tuple[str, str, list[str]]:
@@ -198,8 +230,16 @@ async def generate_metadata(ctx: AiContext, settings_row: dict,
     await _limiter.reserve()
 
     system = BASE_PROMPTS[language]
-    genre_text = (", ".join(g for g in ctx.genre if str(g).strip())
-                  if isinstance(ctx.genre, list) else str(ctx.genre or "").strip())
+    if isinstance(ctx.genre, list):
+        genres = []
+        for g in ctx.genre:
+            for part in str(g).split(","):
+                cleaned = re.sub(r"[\[\]\'\"\\\\]+", "", part).strip()
+                if cleaned and cleaned not in genres:
+                    genres.append(cleaned)
+        genre_text = ", ".join(genres)
+    else:
+        genre_text = re.sub(r"[\[\]\'\"\\\\]+", "", str(ctx.genre or "")).strip()
     if genre_text:
         system += f"\nThể loại nội dung: {genre_text}"
     if settings_row.get("system_prompt"):
@@ -249,31 +289,33 @@ async def generate_metadata(ctx: AiContext, settings_row: dict,
         if resp.status_code == 429:
             last_error = MetadataError(RATE_LIMITED, "ToolNet rate limited (429).")
             continue
+        if 500 <= resp.status_code <= 599:
+            last_error = MetadataError(UPSTREAM_ERROR, f"ToolNet error ({resp.status_code}).")
+            continue
         if resp.status_code != 200:
             raise MetadataError(UPSTREAM_ERROR, f"ToolNet HTTP {resp.status_code}.")
         try:
-            body = resp.json()
-            content = body["choices"][0]["message"]["content"]
-            usage = body.get("usage") or {}
-        except Exception:
-            raise MetadataError(INVALID_RESPONSE, "ToolNet response has no content.")
-        data = extract_json_object(content if isinstance(content, str) else "")
-        title, description, hashtags = validate_metadata(data)
-        final_title = (apply_title_template(settings_row.get("title_template"), title)
-                       if settings_row.get("generate_title", True) else "")
-        final_tags = (apply_locked_hashtags(
-            _parse_locked(settings_row.get("locked_hashtags_json")), hashtags)
-            if settings_row.get("generate_hashtags", True) else
-            apply_locked_hashtags(
-                _parse_locked(settings_row.get("locked_hashtags_json")), []))
-        final_desc = (apply_description_template(
-            settings_row.get("description_template"), description, final_tags)
-            if settings_row.get("generate_description", True) else "")
-        if not final_title.strip():
-            raise MetadataError(INVALID_RESPONSE, "Empty title after template.")
-        return GeneratedMetadata(title=final_title, description=final_desc,
-                                 hashtags=final_tags, model=chosen,
-                                 usage=usage if isinstance(usage, dict) else {})
+            _, content, usage = parse_chat_body(resp.text)
+            data = extract_json_object(content if isinstance(content, str) else "")
+            title, description, hashtags = validate_metadata(data)
+            final_title = (apply_title_template(settings_row.get("title_template"), title)
+                           if settings_row.get("generate_title", True) else "")
+            final_tags = (apply_locked_hashtags(
+                _parse_locked(settings_row.get("locked_hashtags_json")), hashtags)
+                if settings_row.get("generate_hashtags", True) else
+                apply_locked_hashtags(
+                    _parse_locked(settings_row.get("locked_hashtags_json")), []))
+            final_desc = (apply_description_template(
+                settings_row.get("description_template"), description, final_tags)
+                if settings_row.get("generate_description", True) else "")
+            if not final_title.strip():
+                raise MetadataError(INVALID_RESPONSE, "Empty title after template.")
+            return GeneratedMetadata(title=final_title, description=final_desc,
+                                     hashtags=final_tags, model=chosen,
+                                     usage=usage if isinstance(usage, dict) else {})
+        except MetadataError as me:
+            last_error = me
+            continue
     assert last_error is not None
     raise last_error
 
