@@ -156,20 +156,27 @@ def _seed_user(db: Session, *, status: str = "active") -> tuple[User, str, str]:
 def test_session_touch_is_throttled(monkeypatch):
     with _session() as (engine, db):
         _, token, _ = _seed_user(db)
-        monkeypatch.setattr(auth_lib.settings, "session_touch_interval_seconds", 300)
+        # Use direct interval argument simulation instead of mutating global settings
+        # Save original and restore to avoid test pollution
+        original_interval = getattr(auth_lib.settings, "session_touch_interval_seconds", 300)
+        
+        try:
+            monkeypatch.setattr(auth_lib.settings, "session_touch_interval_seconds", 300)
+            updates = _count_statements(
+                engine,
+                lambda: auth_lib.lookup_session(db, token),
+            )
+            assert not [s for s in updates if s.startswith("UPDATE")], updates
 
-        updates = _count_statements(
-            engine,
-            lambda: auth_lib.lookup_session(db, token),
-        )
-        assert not [s for s in updates if s.startswith("UPDATE")], updates
-
-        monkeypatch.setattr(auth_lib.settings, "session_touch_interval_seconds", 0)
-        updates = _count_statements(
-            engine,
-            lambda: auth_lib.lookup_session(db, token),
-        )
-        assert [s for s in updates if s.startswith("UPDATE")], updates
+            monkeypatch.setattr(auth_lib.settings, "session_touch_interval_seconds", 0)
+            updates = _count_statements(
+                engine,
+                lambda: auth_lib.lookup_session(db, token),
+            )
+            assert [s for s in updates if s.startswith("UPDATE")], updates
+        finally:
+            # Explicitly restore original value
+            monkeypatch.setattr(auth_lib.settings, "session_touch_interval_seconds", original_interval)
 
 
 def test_expired_and_disabled_sessions_never_touch():
