@@ -25,7 +25,7 @@ from fastapi.middleware.cors import (
 from fastapi.responses import (
     HTMLResponse,
 )
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session, lazyload
 
 from app.config import settings
@@ -2193,6 +2193,14 @@ def pipeline_flow_state(
     ).all()
     pub_counts = {str(r[0]): int(r[1] or 0) for r in pub_count_rows}
 
+    def _iso(dt: Any) -> str | None:
+        if dt is None:
+            return None
+        try:
+            return dt.isoformat()
+        except Exception:
+            return str(dt)
+
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -2201,8 +2209,9 @@ def pipeline_flow_state(
         select(
             Publication.destination_id,
             func.count(
-                func.CASE(
-                    (Publication.published_at >= today_start, Publication.id)
+                case(
+                    (Publication.published_at >= today_start, Publication.id),
+                    else_=None,
                 )
             ).label("today_cnt"),
             func.max(Publication.published_at).label("last_pub"),
@@ -2213,7 +2222,7 @@ def pipeline_flow_state(
     ).all()
     today_by_dest = {str(r[0]): int(r[1] or 0) for r in pub_stats_rows}
     last_pub_by_dest = {
-        str(r[0]): r[2].isoformat() if r[2] is not None else None
+        str(r[0]): _iso(r[2])
         for r in pub_stats_rows
     }
 
@@ -2272,12 +2281,6 @@ def pipeline_flow_state(
         if v is None or not job.destination_id:
             continue
         jobs_by_route[(str(v.id), str(job.destination_id))] = job
-
-    def _iso(dt: Any) -> str | None:
-        try:
-            return dt.isoformat() if dt is not None else None
-        except Exception:
-            return None
 
     routes: list[dict] = []
     seen_routes: set[tuple[str, str]] = set()

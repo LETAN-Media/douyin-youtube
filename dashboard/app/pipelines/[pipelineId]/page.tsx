@@ -82,6 +82,7 @@ export default async function PipelineDetailPage({
   // ai-profile/settings: pipeline only (0 extra).
   type Fetched = {
     flow?: Awaited<ReturnType<typeof getFlowState>> | null;
+    flowError?: string | null;
     sources?: Awaited<ReturnType<typeof listSources>>;
     destinations?: Awaited<ReturnType<typeof listDestinations>>;
     statusById?: Record<string, import("@/lib/types").DestinationStatus | null>;
@@ -100,7 +101,17 @@ export default async function PipelineDetailPage({
 
   if (activeTab === "overview") {
     apiCalls.push("getFlowState");
-    data.flow = await getFlowState(pipelineId).catch(() => null);
+    try {
+      data.flow = await getFlowState(pipelineId);
+    } catch (e) {
+      data.flow = null;
+      const statusText = e instanceof ApiError ? ` (HTTP ${e.status})` : "";
+      const rawMessage = e instanceof Error ? e.message : "Lỗi không xác định";
+      data.flowError = `${rawMessage}${statusText}`;
+      console.error(
+        `[PipelineDetailPage] getFlowState failed for pipeline=${pipelineId}: ${data.flowError}`,
+      );
+    }
   } else if (activeTab === "sources") {
     apiCalls.push("listSources");
     data.sources = await listSources(pipelineId).catch(() => []);
@@ -231,7 +242,9 @@ export default async function PipelineDetailPage({
             <Card className="p-5">
               <p className="text-sm font-bold text-rose-700">Không tải được flow state</p>
               <p className="mt-1 text-sm text-slate-600">
-                Backend không trả dữ liệu graph. Kiểm tra kết nối rồi tải lại trang.
+                {data.flowError
+                  ? `${data.flowError}. Vui lòng thử tải lại trang hoặc kiểm tra kết nối backend.`
+                  : "Backend không trả dữ liệu graph. Kiểm tra kết nối rồi tải lại trang."}
               </p>
             </Card>
           )

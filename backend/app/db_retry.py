@@ -5,6 +5,7 @@ from functools import wraps
 from typing import Callable, TypeVar
 
 from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.orm import Session
 
 T = TypeVar("T")
 
@@ -54,6 +55,19 @@ def with_retry(
                     last_exc = exc
                     if attempt >= max_attempts or not is_retriable_db_error(exc):
                         raise
+                    # Reset session transaction so next attempt gets clean connection
+                    for a in args:
+                        if isinstance(a, Session):
+                            try:
+                                a.rollback()
+                            except Exception:
+                                pass
+                    for v in kwargs.values():
+                        if isinstance(v, Session):
+                            try:
+                                v.rollback()
+                            except Exception:
+                                pass
                     # Exponential backoff: base * 2^(attempt-1) + jitter
                     delay = min(
                         base_delay_ms * (2 ** (attempt - 1)),
