@@ -12,8 +12,10 @@ from datetime import datetime, timedelta, timezone
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, lazyload
 
+from app.config import settings
 from app.models import User, UserSession, utcnow
 
 _ph = PasswordHasher()  # Argon2id by default
@@ -75,28 +77,47 @@ def create_user_session(
 
 
 def lookup_session(db: Session, token: str) -> tuple[UserSession, User] | None:
-    """Validate an opaque session token. Returns (session, active_user)."""
+    """Validate an opaque session token. Returns (session, active_user).
+
+    Security semantics are intentionally unchanged: every call still reads the
+    session + user row and checks expiry, revocation and user status.  Only the
+    ``last_used_at`` write is throttled.  This keeps revocation immediate while
+    avoiding a COMMIT on every dashboard poll.
+    """
     if not token:
         return None
-    row = (
-        db.query(UserSession)
-        .filter(UserSession.token_hash == hash_session_token(token))
-        .first()
-    )
-    if row is None:
+
+    token_hash = hash_session_token(token)
+    found = db.execute(
+        select(UserSession, User)
+        .join(User, User.id == UserSession.user_id)
+        .where(UserSession.token_hash == token_hash)
+        .options(lazyload("*"))
+        .limit(1)
+    ).first()
+    if found is None:
         return None
+    row, user = found
+
     now = datetime.now(timezone.utc)
     exp = row.expires_at
     if exp is not None and exp.tzinfo is None:
         exp = exp.replace(tzinfo=timezone.utc)
     if exp is not None and exp <= now:
         return None
-    user = db.get(User, row.user_id)
     if user is None or (user.status or "active") != "active":
         return None
-    row.last_used_at = now
-    user.last_login_at = user.last_login_at or now
-    db.commit()
+
+    touched = row.last_used_at
+    if touched is not None and touched.tzinfo is None:
+        touched = touched.replace(tzinfo=timezone.utc)
+    interval = max(0, int(getattr(settings, "session_touch_interval_seconds", 300) or 0))
+    stale = touched is None or (now - touched).total_seconds() >= interval
+    if stale or user.last_login_at is None:
+        row.last_used_at = now
+        if user.last_login_at is None:
+            user.last_login_at = now
+        db.commit()
     return row, user
 
 

@@ -235,6 +235,11 @@ class Settings(BaseSettings):
     signup_disabled: bool = True
     # Opaque session token lifetime for user login (email+password).
     session_ttl_seconds: int = 30 * 24 * 60 * 60
+    # Touch ``UserSession.last_used_at`` at most this often.  The session is
+    # still checked against the DB (expiry/revocation/status) on EVERY request;
+    # only the write is throttled so a 3s dashboard poll does not COMMIT each
+    # time.  Set 0 to restore old update-every-request behaviour.
+    session_touch_interval_seconds: int = 300
     # Optional bootstrap for the FIRST system-admin user. When both are set
     # and no user with that email exists, migration creates it. After the
     # first login, rotate/remove these immediately.

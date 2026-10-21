@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, lazyload
 
 from app import auth as auth_lib
 from app.config import settings
@@ -246,9 +246,24 @@ def visible_destination_ids(db: Session, ctx: AuthContext) -> set[str] | None:
 # require_* fetchers: 404 when missing OR out of scope (no existence leak)
 # --------------------------------------------------------------------------
 
-def require_pipeline(db: Session, pipeline_id: str) -> Pipeline:
+def require_pipeline(
+    db: Session,
+    pipeline_id: str,
+    *,
+    include_relations: bool = False,
+) -> Pipeline:
+    """Fetch a pipeline for an authorization/hot path.
+
+    The model declares every child collection as ``lazy="selectin"``.  That is
+    useful for worker code which intentionally walks the object graph, but it
+    turns a one-row pipeline lookup into 11 database round trips (pipeline +
+    sources + videos + destinations + publications + nested rows/jobs).
+    Hot HTTP endpoints only need pipeline scalar columns, so they use
+    ``lazyload('*')``; callers that genuinely need relations can opt in.
+    """
     ctx = tenant_ctx()
-    pipe = db.get(Pipeline, pipeline_id)
+    options = () if include_relations else (lazyload("*"),)
+    pipe = db.get(Pipeline, pipeline_id, options=options)
     if pipe is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy pipeline")
     if not ctx.is_system_admin and not _workspace_allows(ctx, pipe.workspace_id):

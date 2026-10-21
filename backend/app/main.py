@@ -26,7 +26,7 @@ from fastapi.responses import (
     HTMLResponse,
 )
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, lazyload
 
 from app.config import settings
 from app.db import (
@@ -1448,6 +1448,8 @@ def list_pipelines(
     ctx = tenant_ctx()
     statement = (
         select(Pipeline)
+        # PipelineOut is scalar-only; do not eager-load the selectin graph.
+        .options(lazyload("*"))
         .order_by(Pipeline.created_at.asc())
         .limit(100)
     )
@@ -4957,7 +4959,8 @@ def get_channel_detail_endpoint(
     if (d.platform or "").lower() != "youtube":
         raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
     if not ctx.is_system_admin and d.workspace_id not in ctx.workspace_ids:
-        raise HTTPException(status_code=403, detail="Không có quyền truy cập channel")
+        # Same 404 contract as require_destination: do not leak existence.
+        raise HTTPException(status_code=404, detail="Không tìm thấy channel")
 
 
     sources_data = []
