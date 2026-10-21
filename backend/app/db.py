@@ -14,7 +14,7 @@ class Base(DeclarativeBase):
 _engine_kwargs: dict = {
     "connect_args": settings.sqlalchemy_connect_args,
     "pool_pre_ping": True,
-    "pool_recycle": 300,
+    "pool_recycle": 60,
 }
 # libsql/remote SQLite resolves to SingletonThreadPool, which keeps one
 # connection per thread (and never closes them).  That is wrong for a remote
