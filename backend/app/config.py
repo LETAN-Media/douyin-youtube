@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_poll_seconds: int = 60
     scheduler_startup_delay_seconds: int = 10
+    scheduler_cycle_timeout_seconds: int = 180
 
     # YouTube Shorts fixed rule: max N shorts per day per channel.
     youtube_shorts_daily_limit: int = 4

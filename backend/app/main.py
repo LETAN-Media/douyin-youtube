@@ -265,6 +265,8 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict:
+    from app.scheduler import scheduler_runtime
+
     return {
         "ok": True,
         "service": (
@@ -277,6 +279,12 @@ def health() -> dict:
             getattr(settings, "monitor_enabled", True)
             and monitor_task is not None
         ),
+        "scheduler": bool(
+            getattr(settings, "scheduler_enabled", True)
+            and scheduler_task is not None
+            and not scheduler_task.done()
+        ),
+        "scheduler_runtime": dict(scheduler_runtime),
     }
 
 

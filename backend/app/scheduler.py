@@ -1,6 +1,9 @@
 import asyncio
 import logging
+import os
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -25,6 +28,16 @@ REASON_DISABLED = "SCHEDULER_DISABLED"
 REASON_WORKER_ERROR = "WORKER_ERROR"
 REASON_UPLOAD_INTERVAL = "UPLOAD_INTERVAL_WAIT"
 REASON_SOURCE_DAILY_LIMIT = "SOURCE_DAILY_LIMIT_REACHED"
+REASON_OAUTH_REAUTH = "OAUTH_REAUTH_REQUIRED"
+
+PICKABLE_VIDEO_STATUSES = ("new", "backlog", "inventory")
+
+scheduler_runtime: dict[str, Any] = {
+    "last_cycle_started_at": None,
+    "last_cycle_finished_at": None,
+    "last_cycle_ok": None,
+    "consecutive_failures": 0,
+}
 
 
 def _keywords_hit(text: str, keywords: list[str] | None) -> bool:
@@ -261,8 +274,7 @@ def _try_pick_video(
                 select(DouyinVideo)
                 .where(DouyinVideo.source_id == source.id)
                 .where(DouyinVideo.pipeline_id == pipeline.id)
-                .where(DouyinVideo.status.in_(["new", "backlog"]))
-                .where(DouyinVideo.status != "published")
+                .where(DouyinVideo.status.in_(PICKABLE_VIDEO_STATUSES))
             )
 
             if slot_type == "backlog":
@@ -373,8 +385,7 @@ def _try_pick_video(
         select(DouyinVideo)
         .where(DouyinVideo.pipeline_id == pipeline.id)
         .where(DouyinVideo.source_id.is_(None))
-        .where(DouyinVideo.status.in_(["new", "backlog", "inventory"]))
-        .where(DouyinVideo.status != "published")
+        .where(DouyinVideo.status.in_(PICKABLE_VIDEO_STATUSES))
     )
 
     if slot_type == "backlog":
@@ -1040,11 +1051,10 @@ def promote_due_publications(
 
 
 def count_inventory_available(db: Session, pipeline: Pipeline) -> int:
-    # Include both source-linked videos and legacy videos (source_id=NULL)
     count = db.execute(
         select(func.count(DouyinVideo.id))
         .where(DouyinVideo.pipeline_id == pipeline.id)
-        .where(DouyinVideo.status.in_(["new", "backlog", "inventory"]))
+        .where(DouyinVideo.status.in_(PICKABLE_VIDEO_STATUSES))
     ).scalar_one_or_none()
     return int(count or 0)
 
@@ -1058,6 +1068,8 @@ def is_destination_ready(
     if (destination.platform or "").lower() != "youtube":
         return False, "UNSUPPORTED_PLATFORM"
     if not destination.connected:
+        if (destination.last_skip_reason or "") == REASON_OAUTH_REAUTH:
+            return False, REASON_OAUTH_REAUTH
         return False, REASON_NOT_CONNECTED
     if not destination.credentials:
         return False, REASON_NOT_CONNECTED
@@ -1534,6 +1546,70 @@ def run_scheduler_once() -> None:
                 )
 
 
+async def run_scheduler_cycle_isolated(
+    timeout_seconds: float | None = None,
+) -> bool:
+    """Run one scheduler cycle in a killable child process.
+
+    The Turso/libsql driver has been observed to hang a Python thread after a
+    Hrana connection timeout and a Rust panic. A child process with a hard
+    timeout keeps that failure from wedging the scheduler forever.
+    """
+    try:
+        timeout = float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else getattr(settings, "scheduler_cycle_timeout_seconds", 180)
+        )
+    except (TypeError, ValueError):
+        timeout = 180.0
+    timeout = max(1.0, timeout)
+
+    backend_root = Path(__file__).resolve().parent.parent
+    env = os.environ.copy()
+    python_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(backend_root)
+        + (os.pathsep + python_path if python_path else "")
+    )
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "app.scheduler",
+        cwd=str(backend_root),
+        env=env,
+    )
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Scheduler cycle exceeded %.0fs; killing child pid=%s",
+            timeout,
+            process.pid,
+        )
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error(
+                "Scheduler child pid=%s did not exit after kill",
+                process.pid,
+            )
+        return False
+
+    if process.returncode != 0:
+        logger.error(
+            "Scheduler child exited with code %s",
+            process.returncode,
+        )
+        return False
+    return True
+
+
 async def scheduler_loop() -> None:
     if not getattr(settings, "scheduler_enabled", True):
         logger.info("Douyin scheduler is disabled")
@@ -1541,18 +1617,41 @@ async def scheduler_loop() -> None:
 
     startup_delay = getattr(settings, "scheduler_startup_delay_seconds", 10)
     poll_interval = getattr(settings, "scheduler_poll_seconds", 60)
+    cycle_timeout = getattr(settings, "scheduler_cycle_timeout_seconds", 180)
 
     logger.info("Douyin scheduler started, waiting %s seconds before first run", startup_delay)
     await asyncio.sleep(startup_delay)
 
     while True:
+        scheduler_runtime["last_cycle_started_at"] = utcnow().isoformat()
         try:
-            logger.info("Starting scheduler cycle")
-            await asyncio.to_thread(run_scheduler_once)
+            logger.info("Starting scheduler cycle (isolated)")
+            ok = await run_scheduler_cycle_isolated(cycle_timeout)
+            scheduler_runtime["last_cycle_ok"] = bool(ok)
+            if ok:
+                scheduler_runtime["consecutive_failures"] = 0
+            else:
+                scheduler_runtime["consecutive_failures"] = (
+                    int(scheduler_runtime.get("consecutive_failures") or 0) + 1
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
+            scheduler_runtime["last_cycle_ok"] = False
+            scheduler_runtime["consecutive_failures"] = (
+                int(scheduler_runtime.get("consecutive_failures") or 0) + 1
+            )
             logger.exception("Scheduler loop error")
+        finally:
+            scheduler_runtime["last_cycle_finished_at"] = utcnow().isoformat()
 
         logger.info("Scheduler sleeping for %s seconds", poll_interval)
         await asyncio.sleep(poll_interval)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    run_scheduler_once()

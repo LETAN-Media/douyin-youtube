@@ -14,7 +14,7 @@ from app.db import Base
 from app.douyin_url import parse_douyin_profile_url
 from app.inventory import fetch_all_videos_from_source, sync_source_inventory
 from app.models import Destination, DouyinSource, DouyinVideo, Pipeline
-from app.scheduler import pick_video, schedule_for_pipeline
+from app.scheduler import count_inventory_available, pick_video, schedule_for_pipeline
 
 
 class TestInventory(unittest.TestCase):
@@ -513,6 +513,36 @@ class TestScheduler(unittest.TestCase):
         video = pick_video(self.db, pipeline, "new")
         self.assertIsNotNone(video)
         self.assertTrue(video.is_backlog)
+
+
+    def test_source_linked_inventory_video_is_picked(self):
+        """Source-linked inventory must be selectable, matching the count."""
+        pipeline = self._make_pipeline()
+        destination = self._make_destination(pipeline)
+        source = self._make_source(pipeline)
+        video = DouyinVideo(
+            id=str(uuid4()),
+            source_id=source.id,
+            pipeline_id=pipeline.id,
+            video_id="source_inventory_v1",
+            title="inventory video",
+            url="https://www.douyin.com/video/source_inventory_v1",
+            status="inventory",
+            is_backlog=False,
+        )
+        self.db.add(video)
+        self.db.commit()
+
+        self.assertEqual(count_inventory_available(self.db, pipeline), 1)
+        with patch(
+            "app.scheduler.evaluate_content_level",
+            return_value=("match", "test"),
+        ):
+            picked = pick_video(
+                self.db, pipeline, "new", destination=destination
+            )
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.id, video.id)
 
 
 class TestDouyinUrlParser(unittest.TestCase):

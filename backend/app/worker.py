@@ -14,6 +14,7 @@ from app.douyin import (
     download_video,
 )
 from app.models import Destination, DouyinVideo, Pipeline, Publication, VideoJob
+from app.scheduler import REASON_OAUTH_REAUTH
 from app.youtube import upload_video
 
 
@@ -298,6 +299,17 @@ def mark_failed(
         job.status = "failed"
         job.progress = 0
         job.error = error_text
+
+        if "invalid_grant" in error_text.lower() and job.destination_id:
+            destination = db.get(Destination, job.destination_id)
+            if destination is not None:
+                destination.connected = False
+                destination.last_skip_reason = REASON_OAUTH_REAUTH
+                logger.error(
+                    "Destination %s YouTube OAuth refresh token is invalid; "
+                    "reconnect required before further uploads",
+                    destination.id,
+                )
 
         try:
             pub = _find_linked_publication(db, job)
