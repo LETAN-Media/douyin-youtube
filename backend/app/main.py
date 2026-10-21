@@ -26,7 +26,7 @@ from fastapi.responses import (
     HTMLResponse,
 )
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, lazyload
 
 from app.config import settings
 from app.db import (
@@ -34,6 +34,7 @@ from app.db import (
     engine,
     get_db,
 )
+from app.db_retry import with_retry
 from app.migrate import run_migrations
 from app.models import (
     Destination,
@@ -1448,6 +1449,8 @@ def list_pipelines(
     ctx = tenant_ctx()
     statement = (
         select(Pipeline)
+        # PipelineOut is scalar-only; do not eager-load the selectin graph.
+        .options(lazyload("*"))
         .order_by(Pipeline.created_at.asc())
         .limit(100)
     )
@@ -2138,6 +2141,7 @@ def pipeline_destination_statuses(
         Depends(authenticate_request)
     ],
 )
+@with_retry(max_attempts=3, base_delay_ms=100, max_delay_ms=1000)
 def pipeline_flow_state(
     pipeline_id: str,
     db: Session = Depends(
@@ -2192,30 +2196,25 @@ def pipeline_flow_state(
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    today_rows = db.execute(
+    # Merged: today count + last published_at in single query (13→12 SQL)
+    pub_stats_rows = db.execute(
         select(
             Publication.destination_id,
-            func.count(Publication.id).label("cnt"),
-        )
-        .where(Publication.pipeline_id == pipeline_id)
-        .where(Publication.status == "published")
-        .where(Publication.published_at >= today_start)
-        .group_by(Publication.destination_id)
-    ).all()
-    today_by_dest = {str(r[0]): int(r[1] or 0) for r in today_rows}
-
-    last_pub_rows = db.execute(
-        select(
-            Publication.destination_id,
-            func.max(Publication.published_at).label("last"),
+            func.count(
+                func.CASE(
+                    (Publication.published_at >= today_start, Publication.id)
+                )
+            ).label("today_cnt"),
+            func.max(Publication.published_at).label("last_pub"),
         )
         .where(Publication.pipeline_id == pipeline_id)
         .where(Publication.status == "published")
         .group_by(Publication.destination_id)
     ).all()
+    today_by_dest = {str(r[0]): int(r[1] or 0) for r in pub_stats_rows}
     last_pub_by_dest = {
-        str(r[0]): r[1].isoformat() if r[1] is not None else None
-        for r in last_pub_rows
+        str(r[0]): r[2].isoformat() if r[2] is not None else None
+        for r in pub_stats_rows
     }
 
     # Active publications (queued/scheduled) joined with their video.
@@ -2865,6 +2864,7 @@ def delete_pipeline(
         Depends(authenticate_request)
     ],
 )
+@with_retry(max_attempts=3, base_delay_ms=100, max_delay_ms=1000)
 def pipeline_stats(
     pipeline_id: str,
     db: Session = Depends(
@@ -3851,6 +3851,7 @@ def reschedule_publication(
         Depends(authenticate_request)
     ],
 )
+@with_retry(max_attempts=3, base_delay_ms=100, max_delay_ms=1000)
 def pipeline_scheduler_status(
     pipeline_id: str,
     db: Session = Depends(
@@ -4957,7 +4958,8 @@ def get_channel_detail_endpoint(
     if (d.platform or "").lower() != "youtube":
         raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
     if not ctx.is_system_admin and d.workspace_id not in ctx.workspace_ids:
-        raise HTTPException(status_code=403, detail="Không có quyền truy cập channel")
+        # Same 404 contract as require_destination: do not leak existence.
+        raise HTTPException(status_code=404, detail="Không tìm thấy channel")
 
 
     sources_data = []

@@ -38,9 +38,20 @@ import {
 // Geometry + stage mapping live in lib/flowLayout (unit-tested, no JSX).
 
 const PALETTE = ["fA", "fB", "fC"];
-const POLL_VISIBLE_MS = 3000;
-const POLL_HIDDEN_MS = 15000;
+const POLL_ACTIVE_MS = 3000;
+const POLL_IDLE_MS = 12_000;
 const FADE_MS = 6000;
+
+function flowIsActive(flow: FlowState): boolean {
+  return (
+    flow.active_routes.length > 0 ||
+    flow.summary.queue > 0 ||
+    flow.summary.publishing > 0 ||
+    flow.sources.some((s) =>
+      ["running", "queued", "syncing"].includes(s.sync_status),
+    )
+  );
+}
 
 type Sel =
   | { type: "source" | "dest" | "route" | "proc"; id: string }
@@ -93,6 +104,7 @@ export function PipelineFlowGraph({
   initial: FlowState;
 }) {
   const [flow, setFlow] = useState<FlowState>(initial);
+  const flowRef = useRef<FlowState>(initial);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [lastOk, setLastOk] = useState(() => Date.now());
   const [live, setLive] = useState(true);
@@ -104,38 +116,51 @@ export function PipelineFlowGraph({
   const didInitScroll = useRef(false);
 
   // Realtime poll: graph state only, never revalidates the page.
-  // Hidden tab polls slower; visible again polls immediately.
+  // Idle graphs poll at 12s; active sync/publish stays at 3s. A recursive
+  // timeout + in-flight guard prevents overlapping server actions, and a
+  // hidden tab stops polling entirely (one immediate refresh on return).
   useEffect(() => {
     let stop = false;
-    let id: ReturnType<typeof setInterval>;
-    const poll = async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let running = false;
+    let current = flowRef.current;
+
+    function schedule() {
+      if (stop || document.hidden) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => void run(), flowIsActive(current) ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+    }
+
+    async function run() {
+      if (stop || running || document.hidden) return;
+      running = true;
       const r = await actionGetFlowState(pipelineId);
+      running = false;
       if (stop) return;
       if (r.ok) {
-        setFlow(r.flow);
+        const next = r.flow;
+        current = next;
+        flowRef.current = next;
+        setFlow((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
         setLastOk(Date.now());
         setLive(true);
       } else {
         setLive(false);
       }
       setNowMs(Date.now());
-    };
-    const start = (ms: number) => {
-      clearInterval(id);
-      id = setInterval(poll, ms);
-    };
+      schedule();
+    }
+
     const onVis = () => {
-      if (document.hidden) start(POLL_HIDDEN_MS);
-      else {
-        start(POLL_VISIBLE_MS);
-        void poll();
-      }
+      clearTimeout(timer);
+      if (!document.hidden) void run();
     };
+
     document.addEventListener("visibilitychange", onVis);
-    start(document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS);
+    schedule();
     return () => {
       stop = true;
-      clearInterval(id);
+      clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [pipelineId]);
