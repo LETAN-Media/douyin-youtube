@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import secrets
@@ -13,7 +14,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -43,6 +44,35 @@ GLOBAL_TOKEN_SETTING_KEY = "youtube_credentials"
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class OAuthFlowError(RuntimeError):
+    """A user-actionable OAuth failure with a stable, safe error code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def oauth_state_fingerprint(state: str | None) -> str:
+    """Return a short non-reversible fingerprint; never log the raw state."""
+    if not state:
+        return "none"
+
+    return hashlib.sha256(state.encode("utf-8")).hexdigest()[:12]
+
+
+def _flow_session_state(flow: Any) -> str | None:
+    session = getattr(flow, "oauth2session", None)
+    if session is None:
+        return None
+
+    value = getattr(session, "state", None)
+    if value is None:
+        value = getattr(session, "_state", None)
+
+    return value
 
 
 def validate_google_config() -> None:
@@ -160,8 +190,11 @@ def create_oauth_url(
     initiated_by_user_id: str | None = None,
 ) -> str:
     validate_google_config()
+    oauth_client_config = client_config()
+    callback_url = public_callback_url()
 
     state = secrets.token_urlsafe(48)
+    state_fp = oauth_state_fingerprint(state)
 
     resolved_destination_id = destination_id
 
@@ -193,39 +226,74 @@ def create_oauth_url(
         if pipe_row is not None:
             bound_workspace_id = pipe_row.workspace_id
 
-    db.add(
-        OAuthState(
-            state=state,
-            pipeline_id=pipeline_id,
-            destination_id=resolved_destination_id,
-            workspace_id=bound_workspace_id,
-            initiated_by_user_id=initiated_by_user_id,
-            expires_at=(
-                utcnow()
-                + timedelta(minutes=15)
-            ),
-        )
+    state_row = OAuthState(
+        state=state,
+        pipeline_id=pipeline_id,
+        destination_id=resolved_destination_id,
+        workspace_id=bound_workspace_id,
+        initiated_by_user_id=initiated_by_user_id,
+        expires_at=(
+            utcnow()
+            + timedelta(minutes=15)
+        ),
     )
-
+    db.add(state_row)
     db.commit()
 
-    flow = Flow.from_client_config(
-        client_config(),
-        scopes=SCOPES,
-        state=state,
-        autogenerate_code_verifier=False,
-    )
-
-    flow.redirect_uri = (
-        public_callback_url()
-    )
-
-    authorization_url, _ = (
-        flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent select_account",
+    try:
+        flow = Flow.from_client_config(
+            oauth_client_config,
+            scopes=SCOPES,
+            state=state,
+            autogenerate_code_verifier=False,
         )
+
+        flow.redirect_uri = callback_url
+
+        authorization_url, returned_state = (
+            flow.authorization_url(
+                access_type="offline",
+                include_granted_scopes="true",
+                prompt="consent select_account",
+            )
+        )
+    except Exception:
+        db.delete(state_row)
+        db.commit()
+        logger.exception(
+            "OAuth URL generation failed state_fp=%s destination=%s pipeline=%s",
+            state_fp,
+            resolved_destination_id,
+            pipeline_id,
+        )
+        raise
+
+    internal_state = _flow_session_state(flow)
+    if returned_state != state or internal_state != state:
+        db.delete(state_row)
+        db.commit()
+        logger.error(
+            "OAuth state generation mismatch state_fp=%s returned_fp=%s "
+            "internal_fp=%s destination=%s pipeline=%s",
+            state_fp,
+            oauth_state_fingerprint(returned_state),
+            oauth_state_fingerprint(internal_state),
+            resolved_destination_id,
+            pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_state_generation_failed",
+            "Không tạo được phiên OAuth an toàn. Vui lòng thử kết nối lại.",
+        )
+
+    logger.info(
+        "OAuth URL created state_fp=%s destination=%s pipeline=%s "
+        "workspace=%s expires_at=%s",
+        state_fp,
+        resolved_destination_id,
+        pipeline_id,
+        bound_workspace_id,
+        state_row.expires_at.isoformat() if state_row.expires_at else None,
     )
 
     return authorization_url
@@ -234,18 +302,45 @@ def create_oauth_url(
 def complete_oauth(
     db: Session,
     state: str,
-    authorization_response: str,
+    code: str,
     pipeline_id: str | None = None,
     destination_id: str | None = None,
 ) -> dict:
+    state_fp = oauth_state_fingerprint(state)
+
+    if not (state or "").strip():
+        logger.warning(
+            "OAuth callback rejected code=oauth_state_invalid reason=missing"
+        )
+        raise OAuthFlowError(
+            "oauth_state_invalid",
+            "Thiếu OAuth state. Vui lòng bấm Kết nối lại từ dashboard.",
+        )
+
+    if not (code or "").strip():
+        logger.warning(
+            "OAuth callback rejected code=oauth_callback_missing_code state_fp=%s",
+            state_fp,
+        )
+        raise OAuthFlowError(
+            "oauth_callback_missing_code",
+            "Google không trả về authorization code. Vui lòng kết nối lại.",
+        )
+
     state_row = db.get(
         OAuthState,
         state,
     )
 
     if state_row is None:
-        raise RuntimeError(
-            "OAuth state không tồn tại"
+        logger.warning(
+            "OAuth callback rejected code=oauth_state_invalid state_fp=%s",
+            state_fp,
+        )
+        raise OAuthFlowError(
+            "oauth_state_invalid",
+            "Phiên OAuth không tồn tại hoặc đã được sử dụng. "
+            "Vui lòng bấm Kết nối lại để tạo phiên mới.",
         )
 
     expires_at = state_row.expires_at
@@ -258,17 +353,58 @@ def complete_oauth(
     if expires_at < utcnow():
         db.delete(state_row)
         db.commit()
-
-        raise RuntimeError(
-            "OAuth state đã hết hạn"
+        logger.warning(
+            "OAuth callback rejected code=oauth_state_expired state_fp=%s "
+            "expires_at=%s",
+            state_fp,
+            expires_at.isoformat(),
+        )
+        raise OAuthFlowError(
+            "oauth_state_expired",
+            "Phiên OAuth đã hết hạn. Vui lòng bấm Kết nối lại.",
         )
 
-    resolved_destination_id = (
-        destination_id or state_row.destination_id
-    )
-    resolved_pipeline_id = (
-        pipeline_id or state_row.pipeline_id
-    )
+    # The OAuth state is the single source of truth for the target. Never
+    # accept a callback query that tries to attach the token to a different
+    # destination/pipeline than the one the signed flow was created for.
+    if destination_id and str(destination_id) != str(
+        state_row.destination_id or ""
+    ):
+        db.delete(state_row)
+        db.commit()
+        logger.warning(
+            "OAuth callback rejected code=oauth_state_destination_mismatch "
+            "state_fp=%s expected_destination=%s callback_destination=%s",
+            state_fp,
+            state_row.destination_id,
+            destination_id,
+        )
+        raise OAuthFlowError(
+            "oauth_state_destination_mismatch",
+            "Phiên OAuth không khớp với channel đích. "
+            "Không có thay đổi nào được lưu. Vui lòng Kết nối lại.",
+        )
+
+    if pipeline_id and str(pipeline_id) != str(
+        state_row.pipeline_id or ""
+    ):
+        db.delete(state_row)
+        db.commit()
+        logger.warning(
+            "OAuth callback rejected code=oauth_state_pipeline_mismatch "
+            "state_fp=%s expected_pipeline=%s callback_pipeline=%s",
+            state_fp,
+            state_row.pipeline_id,
+            pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_state_pipeline_mismatch",
+            "Phiên OAuth không khớp với pipeline đích. "
+            "Không có thay đổi nào được lưu. Vui lòng Kết nối lại.",
+        )
+
+    resolved_destination_id = state_row.destination_id
+    resolved_pipeline_id = state_row.pipeline_id
 
     # Tenant binding (Phase 9): a workspace-bound flow may ONLY attach
     # credentials to a destination/pipeline inside that same workspace.
@@ -278,30 +414,65 @@ def complete_oauth(
         if resolved_destination_id:
             _dest = db.get(Destination, resolved_destination_id)
             if _dest is None:
-                raise RuntimeError("Destination không tồn tại khi lưu OAuth")
+                db.delete(state_row)
+                db.commit()
+                raise OAuthFlowError(
+                    "oauth_destination_not_found",
+                    "Destination đích không còn tồn tại.",
+                )
             _dest_ws = _dest.workspace_id
             if not _dest_ws and _dest.pipeline_id:
                 _pipe = db.get(Pipeline, _dest.pipeline_id)
                 _dest_ws = _pipe.workspace_id if _pipe else None
             if str(_dest_ws or "") != str(bound_ws):
-                raise RuntimeError(
-                    "OAuth state không thuộc workspace của channel này"
+                db.delete(state_row)
+                db.commit()
+                logger.warning(
+                    "OAuth callback rejected code=oauth_tenant_mismatch "
+                    "state_fp=%s destination=%s",
+                    state_fp,
+                    resolved_destination_id,
+                )
+                raise OAuthFlowError(
+                    "oauth_tenant_mismatch",
+                    "Phiên OAuth không thuộc workspace của channel này. "
+                    "Không có thay đổi nào được lưu.",
                 )
         elif resolved_pipeline_id:
             _pipe = db.get(Pipeline, resolved_pipeline_id)
             if _pipe is None:
-                raise RuntimeError("Pipeline không tồn tại khi lưu OAuth")
+                db.delete(state_row)
+                db.commit()
+                raise OAuthFlowError(
+                    "oauth_pipeline_not_found",
+                    "Pipeline đích không còn tồn tại.",
+                )
             if str(_pipe.workspace_id or "") != str(bound_ws):
-                raise RuntimeError(
-                    "OAuth state không thuộc workspace của pipeline này"
+                db.delete(state_row)
+                db.commit()
+                logger.warning(
+                    "OAuth callback rejected code=oauth_tenant_mismatch "
+                    "state_fp=%s pipeline=%s",
+                    state_fp,
+                    resolved_pipeline_id,
+                )
+                raise OAuthFlowError(
+                    "oauth_tenant_mismatch",
+                    "Phiên OAuth không thuộc workspace của pipeline này. "
+                    "Không có thay đổi nào được lưu.",
                 )
         else:
-            raise RuntimeError(
-                "OAuth state thiếu destination/pipeline"
+            db.delete(state_row)
+            db.commit()
+            raise OAuthFlowError(
+                "oauth_state_invalid_target",
+                "Phiên OAuth thiếu channel/pipeline đích. "
+                "Vui lòng Kết nối lại từ dashboard.",
             )
 
     old_refresh_token = None
     destination = None
+    pipeline = None
 
     if resolved_destination_id:
         destination = db.get(
@@ -344,33 +515,152 @@ def complete_oauth(
             except Exception:
                 old_refresh_token = None
 
-    flow = Flow.from_client_config(
-        client_config(),
-        scopes=SCOPES,
-        state=state,
-        autogenerate_code_verifier=False,
+    try:
+        oauth_client_config = client_config()
+        callback_url = public_callback_url()
+        flow = Flow.from_client_config(
+            oauth_client_config,
+            scopes=SCOPES,
+            state=state,
+            autogenerate_code_verifier=False,
+        )
+        flow.redirect_uri = callback_url
+    except Exception as exc:
+        logger.exception(
+            "OAuth setup failed state_fp=%s destination=%s pipeline=%s",
+            state_fp,
+            resolved_destination_id,
+            resolved_pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_config_invalid",
+            "Cấu hình OAuth phía server chưa hợp lệ. "
+            "Vui lòng kiểm tra HTTPS/PUBLIC_BASE_URL và thử lại.",
+        ) from exc
+
+    internal_state = _flow_session_state(flow)
+    if internal_state != state:
+        db.delete(state_row)
+        db.commit()
+        logger.error(
+            "OAuth state internal mismatch state_fp=%s internal_fp=%s "
+            "destination=%s pipeline=%s",
+            state_fp,
+            oauth_state_fingerprint(internal_state),
+            resolved_destination_id,
+            resolved_pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_state_internal_mismatch",
+            "Không xác thực được phiên OAuth. "
+            "Không có thay đổi nào được lưu. Vui lòng Kết nối lại.",
+        )
+
+    # Consume the state atomically BEFORE the network exchange. This prevents
+    # duplicate/concurrent callbacks from exchanging the same code twice, and
+    # makes a replay fail closed instead of reaching Google.
+    consumed = db.execute(
+        delete(OAuthState).where(
+            OAuthState.state == state
+        )
+    )
+    db.commit()
+
+    if consumed.rowcount == 0:
+        logger.warning(
+            "OAuth callback rejected code=oauth_state_reused state_fp=%s",
+            state_fp,
+        )
+        raise OAuthFlowError(
+            "oauth_state_reused",
+            "Phiên OAuth đã được sử dụng bởi một callback khác. "
+            "Vui lòng bấm Kết nối lại.",
+        )
+
+    logger.info(
+        "OAuth callback accepted state_fp=%s destination=%s pipeline=%s",
+        state_fp,
+        resolved_destination_id,
+        resolved_pipeline_id,
     )
 
-    flow.redirect_uri = (
-        public_callback_url()
-    )
+    try:
+        # Validate state ourselves from the single-use DB row, then exchange
+        # only the code. Do NOT let oauthlib re-check a reconstructed
+        # authorization_response (that was the source of mismatching_state).
+        flow.fetch_token(code=code)
+    except Exception as exc:
+        error_text = str(exc).lower()
 
-    # Never hand oauthlib the raw inbound URL: behind the Northflank proxy it
-    # arrives as http even though the public callback is https.
-    authorization_response = canonical_authorization_response(
-        authorization_response
-    )
+        if "invalid_grant" in error_text:
+            error_code = "oauth_invalid_grant"
+            message = (
+                "Google từ chối authorization code (invalid_grant). "
+                "Code có thể đã hết hạn hoặc đã được sử dụng. "
+                "Vui lòng bấm Kết nối lại."
+            )
+        elif "access_denied" in error_text:
+            error_code = "oauth_access_denied"
+            message = (
+                "Bạn đã từ chối cấp quyền cho ứng dụng. "
+                "Vui lòng Kết nối lại và chấp nhận các quyền cần thiết."
+            )
+        elif "insufficient" in error_text or "forbidden" in error_text:
+            error_code = "oauth_permission_denied"
+            message = (
+                "Tài khoản Google không có đủ quyền cho kênh này. "
+                "Vui lòng kiểm tra quyền YouTube và Kết nối lại."
+            )
+        else:
+            error_code = "oauth_exchange_failed"
+            message = (
+                "Không đổi được authorization code thành token. "
+                "Vui lòng thử Kết nối lại; nếu vẫn lỗi, kiểm tra log backend."
+            )
 
-    flow.fetch_token(
-        authorization_response=authorization_response
-    )
+        logger.warning(
+            "OAuth token exchange failed state_fp=%s destination=%s "
+            "pipeline=%s code=%s error_type=%s",
+            state_fp,
+            resolved_destination_id,
+            resolved_pipeline_id,
+            error_code,
+            type(exc).__name__,
+        )
+        raise OAuthFlowError(error_code, message) from exc
 
-    credentials = flow.credentials
+    credentials = getattr(flow, "credentials", None)
+    if credentials is None or not getattr(credentials, "token", None):
+        logger.warning(
+            "OAuth token exchange returned no access token state_fp=%s "
+            "destination=%s pipeline=%s",
+            state_fp,
+            resolved_destination_id,
+            resolved_pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_exchange_failed",
+            "Google không trả về access token. Vui lòng Kết nối lại.",
+        )
 
     refresh_token = (
         credentials.refresh_token
         or old_refresh_token
     )
+
+    if not refresh_token:
+        logger.warning(
+            "OAuth callback rejected code=oauth_missing_refresh_token "
+            "state_fp=%s destination=%s pipeline=%s",
+            state_fp,
+            resolved_destination_id,
+            resolved_pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_missing_refresh_token",
+            "Google không trả về refresh token nên kênh sẽ không tự "
+            "upload lâu dài. Vui lòng Kết nối lại và chấp nhận quyền offline.",
+        )
 
     data = {
         "token": credentials.token,
@@ -385,30 +675,71 @@ def complete_oauth(
         ),
     }
 
-    token_json = json.dumps(data)
-
-    youtube = build(
-        "youtube",
-        "v3",
-        credentials=credentials,
-        cache_discovery=False,
-    )
-
     try:
+        youtube = build(
+            "youtube",
+            "v3",
+            credentials=credentials,
+            cache_discovery=False,
+        )
+
         result = youtube.channels().list(
             part="id,snippet",
             mine=True,
         ).execute()
     except HttpError as exc:
-        raise RuntimeError(
-            f"YouTube API error khi kiểm tra kênh: {exc}"
+        status = getattr(
+            getattr(exc, "resp", None),
+            "status",
+            None,
+        )
+        logger.warning(
+            "YouTube channel lookup failed state_fp=%s destination=%s "
+            "pipeline=%s http_status=%s",
+            state_fp,
+            resolved_destination_id,
+            resolved_pipeline_id,
+            status,
+        )
+        if status == 403:
+            raise OAuthFlowError(
+                "oauth_permission_denied",
+                "Tài khoản Google không có quyền đọc kênh YouTube. "
+                "Vui lòng kiểm tra quyền và Kết nối lại.",
+            ) from exc
+
+        raise OAuthFlowError(
+            "oauth_channel_lookup_failed",
+            "Không kiểm tra được kênh YouTube sau khi kết nối. "
+            "Token cũ (nếu có) vẫn được giữ nguyên. Vui lòng thử lại.",
+        ) from exc
+    except Exception as exc:
+        logger.exception(
+            "YouTube channel lookup crashed state_fp=%s destination=%s "
+            "pipeline=%s",
+            state_fp,
+            resolved_destination_id,
+            resolved_pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_channel_lookup_failed",
+            "Không kiểm tra được kênh YouTube sau khi kết nối. "
+            "Token cũ (nếu có) vẫn được giữ nguyên. Vui lòng thử lại.",
         ) from exc
 
-    channels = result.get("items", [])
+    channels = result.get("items", []) or []
 
     if not channels:
-        raise RuntimeError(
-            "Không tìm thấy kênh YouTube nào trên tài khoản này"
+        logger.warning(
+            "OAuth callback rejected code=oauth_channel_not_found state_fp=%s "
+            "destination=%s pipeline=%s",
+            state_fp,
+            resolved_destination_id,
+            resolved_pipeline_id,
+        )
+        raise OAuthFlowError(
+            "oauth_channel_not_found",
+            "Không tìm thấy kênh YouTube nào trên tài khoản Google này.",
         )
 
     channel = channels[0]
@@ -424,68 +755,82 @@ def complete_oauth(
         data["avatar_url"] = avatar_url
     token_json = json.dumps(data)
 
-    if resolved_destination_id:
-        if destination is None:
-            destination = db.get(
-                Destination,
-                resolved_destination_id,
-            )
+    try:
+        if resolved_destination_id:
             if destination is None:
-                raise RuntimeError(
-                    "Destination không tồn tại khi lưu OAuth"
+                destination = db.get(
+                    Destination,
+                    resolved_destination_id,
                 )
+                if destination is None:
+                    raise OAuthFlowError(
+                        "oauth_destination_not_found",
+                        "Destination đích không còn tồn tại.",
+                    )
 
-        destination.credentials = token_json
-        destination.external_account_id = channel_id
-        destination.external_account_name = channel_title
-        destination.connected = True
-        db.commit()
-        logger.info(
-            "Saved YouTube OAuth for destination=%s",
-            resolved_destination_id,
-        )
-    elif resolved_pipeline_id:
-        if pipeline is None:
-            pipeline = db.get(
-                Pipeline,
-                resolved_pipeline_id,
+            destination.credentials = token_json
+            destination.external_account_id = channel_id
+            destination.external_account_name = channel_title
+            destination.connected = True
+            db.commit()
+            logger.info(
+                "Saved YouTube OAuth for destination=%s state_fp=%s",
+                resolved_destination_id,
+                state_fp,
             )
+        elif resolved_pipeline_id:
             if pipeline is None:
-                raise RuntimeError(
-                    "Pipeline không tồn tại khi lưu OAuth"
+                pipeline = db.get(
+                    Pipeline,
+                    resolved_pipeline_id,
                 )
+                if pipeline is None:
+                    raise OAuthFlowError(
+                        "oauth_pipeline_not_found",
+                        "Pipeline đích không còn tồn tại.",
+                    )
 
-        pipeline.youtube_credentials = token_json
-        pipeline.youtube_channel_id = channel_id
-        pipeline.youtube_channel_title = channel_title
-        pipeline.youtube_connected = True
-        db.commit()
-        logger.info(
-            "Saved YouTube OAuth for pipeline=%s",
+            pipeline.youtube_credentials = token_json
+            pipeline.youtube_channel_id = channel_id
+            pipeline.youtube_channel_title = channel_title
+            pipeline.youtube_connected = True
+            db.commit()
+            logger.info(
+                "Saved YouTube OAuth for pipeline=%s state_fp=%s",
+                resolved_pipeline_id,
+                state_fp,
+            )
+        else:
+            save_setting(
+                db,
+                GLOBAL_TOKEN_SETTING_KEY,
+                token_json,
+            )
+            logger.info(
+                "Saved YouTube OAuth globally state_fp=%s",
+                state_fp,
+            )
+    except OAuthFlowError:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "OAuth token save failed state_fp=%s destination=%s pipeline=%s",
+            state_fp,
+            resolved_destination_id,
             resolved_pipeline_id,
         )
-    else:
-        save_setting(
-            db,
-            GLOBAL_TOKEN_SETTING_KEY,
-            token_json,
-        )
-        logger.info(
-            "Saved YouTube OAuth globally"
-        )
-
-    state_row = db.get(
-        OAuthState,
-        state,
-    )
-
-    if state_row:
-        db.delete(state_row)
-        db.commit()
+        raise OAuthFlowError(
+            "oauth_save_failed",
+            "Không lưu được token YouTube vào destination. "
+            "Token cũ (nếu có) vẫn được giữ nguyên. Vui lòng thử lại.",
+        ) from exc
 
     return {
         "destination_id": resolved_destination_id,
         "pipeline_id": resolved_pipeline_id,
+        "channel_id": channel_id,
     }
 
 

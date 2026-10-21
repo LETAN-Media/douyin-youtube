@@ -8,13 +8,19 @@ import { Badge, Card, EmptyState, PageHeader } from "@/components/ui";
 import { IconAlert, IconChannels, IconPlus, IconRefresh, IconX } from "@/components/icons";
 import type { ChannelItem, Pipeline } from "@/lib/types";
 import { actionCreateDestination, actionGetOauthUrl } from "@/lib/actions";
+import { oauthErrorMessage } from "@/lib/oauthErrors";
 
 interface ChannelsClientProps {
   initialChannels: ChannelItem[];
   pipelines: Pipeline[];
+  oauthError?: string;
 }
 
-export function ChannelsClient({ initialChannels, pipelines }: ChannelsClientProps) {
+export function ChannelsClient({
+  initialChannels,
+  pipelines,
+  oauthError,
+}: ChannelsClientProps) {
   const router = useRouter();
   const [channels, setChannels] = useState<ChannelItem[]>(initialChannels);
   const [loading, setLoading] = useState(false);
@@ -130,6 +136,13 @@ export function ChannelsClient({ initialChannels, pipelines }: ChannelsClientPro
           </div>
         }
       />
+
+      {oauthError ? (
+        <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          <p className="font-bold">Kết nối YouTube thất bại</p>
+          <p className="mt-1">{oauthErrorMessage(oauthError)}</p>
+        </div>
+      ) : null}
 
       <div className="mt-6">
         {channels.length === 0 ? (

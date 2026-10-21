@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -8,6 +9,7 @@ from datetime import (
     timezone,
 )
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import (
     BackgroundTasks,
@@ -37,6 +39,7 @@ from app.models import (
     Destination,
     DouyinSource,
     DouyinVideo,
+    OAuthState,
     Pipeline,
     Publication,
     VideoJob,
@@ -115,10 +118,11 @@ from app.worker import (
     worker_loop,
 )
 from app.youtube import (
-    canonical_authorization_response,
+    OAuthFlowError,
     complete_oauth,
     create_oauth_url,
     get_youtube_status,
+    oauth_state_fingerprint,
 )
 from app.monitor import monitor_loop
 from app.scheduler import scheduler_loop
@@ -2585,14 +2589,79 @@ def youtube_oauth_url(
     }
 
 
+def _oauth_frontend_base_url() -> str:
+    base = (settings.frontend_url or "").strip().rstrip("/")
+    if base:
+        return base
+
+    # Production may omit FRONTEND_URL while CORS_ORIGINS is configured.
+    # Never redirect to an arbitrary http origin; HTTPS only.
+    for origin in settings.allowed_origins:
+        origin = origin.strip().rstrip("/")
+        if origin.startswith("https://"):
+            return origin
+
+    return ""
+
+
+def _oauth_error_response(
+    db: Session,
+    error_code: str,
+    destination_id: str | None,
+    pipeline_id: str | None,
+):
+    from fastapi.responses import RedirectResponse
+
+    base = _oauth_frontend_base_url()
+
+    if base:
+        if destination_id and not pipeline_id:
+            destination = db.get(Destination, destination_id)
+            if destination is not None:
+                pipeline_id = destination.pipeline_id
+
+        if pipeline_id:
+            query = urlencode(
+                {
+                    "tab": "destinations",
+                    "oauth": "error",
+                    "oauth_error": error_code,
+                }
+            )
+            return RedirectResponse(
+                url=f"{base}/pipelines/{pipeline_id}?{query}",
+                status_code=302,
+            )
+
+        query = urlencode(
+            {
+                "oauth": "error",
+                "oauth_error": error_code,
+            }
+        )
+        return RedirectResponse(
+            url=f"{base}/channels?{query}",
+            status_code=302,
+        )
+
+    return HTMLResponse(
+        content=(
+            "<h2>YouTube OAuth lỗi</h2>"
+            f"<p>Mã lỗi: {html.escape(error_code)}</p>"
+            "<p>Có thể đóng tab này và bấm Kết nối lại trên dashboard.</p>"
+        ),
+        status_code=400,
+    )
+
+
 @app.get(
     "/auth/youtube/callback",
     response_class=HTMLResponse,
 )
 def youtube_callback(
-    request: Request,
-    state: str = Query(...),
-    code: str = Query(...),
+    state: str | None = Query(default=None),
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
     destination_id: str | None = Query(
         default=None,
     ),
@@ -2605,51 +2674,129 @@ def youtube_callback(
 ):
     from fastapi.responses import RedirectResponse
 
-    # Rebuild on the configured HTTPS public callback: the reverse proxy
-    # terminates TLS and request.url is http internally, which oauthlib
-    # rejects with InsecureTransportError.
-    authorization_response = canonical_authorization_response(
-        request.url.query
+    state_row = (
+        db.get(OAuthState, state)
+        if state
+        else None
     )
+    state_fp = oauth_state_fingerprint(state)
+
+    # Copy IDs before complete_oauth consumes/deletes the state row.
+    error_destination_id = (
+        state_row.destination_id
+        if state_row is not None
+        else None
+    )
+    error_pipeline_id = (
+        state_row.pipeline_id
+        if state_row is not None
+        else None
+    )
+
+    if error:
+        if state_row is not None:
+            db.delete(state_row)
+            db.commit()
+
+        error_code = (
+            "oauth_access_denied"
+            if error == "access_denied"
+            else "oauth_denied"
+        )
+        logger.warning(
+            "OAuth callback denied state_fp=%s error=%s",
+            state_fp,
+            error,
+        )
+        return _oauth_error_response(
+            db,
+            error_code,
+            error_destination_id,
+            error_pipeline_id,
+        )
+
+    if not state:
+        logger.warning(
+            "OAuth callback rejected code=oauth_state_invalid reason=missing"
+        )
+        return _oauth_error_response(
+            db,
+            "oauth_state_invalid",
+            None,
+            None,
+        )
+
+    if not code:
+        if state_row is not None:
+            db.delete(state_row)
+            db.commit()
+
+        logger.warning(
+            "OAuth callback rejected code=oauth_callback_missing_code "
+            "state_fp=%s",
+            state_fp,
+        )
+        return _oauth_error_response(
+            db,
+            "oauth_callback_missing_code",
+            error_destination_id,
+            error_pipeline_id,
+        )
 
     try:
         oauth_result = complete_oauth(
             db=db,
             state=state,
-            authorization_response=(
-                authorization_response
-            ),
+            code=code,
             pipeline_id=pipeline_id,
             destination_id=destination_id,
         )
-    except Exception as exc:
-        return HTMLResponse(
-            content=(
-                "<h2>YouTube OAuth lỗi</h2>"
-                f"<pre>{str(exc)}</pre>"
-            ),
-            status_code=400,
+    except OAuthFlowError as exc:
+        logger.warning(
+            "OAuth callback failed state_fp=%s code=%s",
+            state_fp,
+            exc.code,
+        )
+        return _oauth_error_response(
+            db,
+            exc.code,
+            error_destination_id,
+            error_pipeline_id,
+        )
+    except Exception:
+        logger.exception(
+            "OAuth callback unexpected failure state_fp=%s",
+            state_fp,
+        )
+        return _oauth_error_response(
+            db,
+            "oauth_unexpected_error",
+            error_destination_id,
+            error_pipeline_id,
         )
 
     # Resolve destination/pipeline for frontend redirect.
     # IDs come from the VERIFIED oauth state (workspace-bound), never from a
     # global "latest connected" lookup (that would leak other tenants).
     resolved_destination_id = (
-        destination_id or (oauth_result or {}).get("destination_id")
+        (oauth_result or {}).get("destination_id")
     )
     resolved_pipeline_id = (
-        pipeline_id or (oauth_result or {}).get("pipeline_id")
+        (oauth_result or {}).get("pipeline_id")
     )
 
-    # Best-effort: look up destination to build frontend URL.
-    frontend_base = (settings.frontend_url or "").rstrip("/")
+    frontend_base = _oauth_frontend_base_url()
     if frontend_base and resolved_destination_id:
         destination = db.get(Destination, resolved_destination_id)
         if destination is not None:
-            resolved_pipeline_id = resolved_pipeline_id or destination.pipeline_id
+            resolved_pipeline_id = (
+                resolved_pipeline_id
+                or destination.pipeline_id
+            )
             return RedirectResponse(
                 url=(
-                    f"{frontend_base}/pipelines/{destination.pipeline_id}"
+                    f"{frontend_base}/pipelines/"
+                    f"{destination.pipeline_id}"
                     f"?tab=destinations&oauth=success"
                 ),
                 status_code=302,
@@ -2657,7 +2804,10 @@ def youtube_callback(
 
     if frontend_base and resolved_pipeline_id and not resolved_destination_id:
         return RedirectResponse(
-            url=f"{frontend_base}/pipelines/{resolved_pipeline_id}?oauth=success",
+            url=(
+                f"{frontend_base}/pipelines/"
+                f"{resolved_pipeline_id}?oauth=success"
+            ),
             status_code=302,
         )
 

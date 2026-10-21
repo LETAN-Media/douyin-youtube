@@ -257,6 +257,11 @@ export default async function PipelineDetailPage({
             destinations={data.destinations ?? []}
             statusById={data.statusById ?? {}}
             oauthSuccess={getParam("oauth") === "success"}
+            oauthError={
+              getParam("oauth") === "error"
+                ? getParam("oauth_error") ?? "oauth_unknown"
+                : undefined
+            }
           />
         ) : null}
 

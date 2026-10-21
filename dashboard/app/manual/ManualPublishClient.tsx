@@ -20,6 +20,8 @@ import type {
   ManualResolveResult,
 } from "@/lib/types";
 import { platformLabel } from "@/lib/format";
+import { oauthErrorMessage } from "@/lib/oauthErrors";
+import { actionGetOauthUrl } from "@/lib/actions";
 import { YouTubePublishSelector } from "@/components/YouTubePublishSelector";
 
 function formatDuration(sec?: number | null): string {
@@ -48,6 +50,7 @@ export function ManualPublishClient({
   // Destinations state
   const [destinations, setDestinations] = useState<Destination[]>(initialDestinations);
   const [loadingDestinations, setLoadingDestinations] = useState(false);
+  const [oauthPendingId, setOauthPendingId] = useState<string | null>(null);
   const [selectedDestinations, setSelectedDestinations] = useState<string[]>(() => {
     const firstConnected = initialDestinations.find(
       (d) => d.platform === "youtube" && d.connected && d.enabled,
@@ -486,6 +489,22 @@ export function ManualPublishClient({
     }
   };
 
+  const handleOauthConnect = async (destId: string) => {
+    if (oauthPendingId) return;
+    setOauthPendingId(destId);
+    const result = await actionGetOauthUrl(destId);
+    if (result.ok && result.url) {
+      window.location.assign(result.url);
+      return;
+    }
+    setOauthPendingId(null);
+    if (!result.ok) {
+      alert(result.error || oauthErrorMessage("oauth_unexpected_error"));
+      return;
+    }
+    alert("Không lấy được link kết nối Google.");
+  };
+
   // Destination stats
   const activeDestinations = destinations.filter((d) => d.platform === "youtube");
   const facebookDestinations = destinations.filter((d) => d.platform === "facebook");
@@ -809,12 +828,16 @@ export function ManualPublishClient({
                       <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-[11px] text-slate-400">
                         <span>{d.enabled ? "Active" : "Paused"}</span>
                         {!isConnected ? (
-                          <a
-                            href={`/api/youtube/oauth-url?destination_id=${d.id}`}
-                            className="font-bold text-indigo-600 hover:underline"
+                          <button
+                            type="button"
+                            onClick={() => handleOauthConnect(d.id)}
+                            disabled={oauthPendingId === d.id}
+                            className="font-bold text-indigo-600 hover:underline disabled:opacity-60"
                           >
-                            [ Connect ]
-                          </a>
+                            {oauthPendingId === d.id
+                              ? "[ Đang mở… ]"
+                              : "[ Connect ]"}
+                          </button>
                         ) : (
                           <span className="text-emerald-600 font-semibold">Sẵn sàng</span>
                         )}

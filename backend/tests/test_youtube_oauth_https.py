@@ -165,6 +165,7 @@ class TestCompleteOauthHttps(unittest.TestCase):
 
     def _run_complete(self, refresh_token="new-refresh-token"):
         flow = MagicMock()
+        flow.oauth2session.state = "st4te"
         flow.credentials.token = "new-access"
         flow.credentials.refresh_token = refresh_token
         flow.credentials.token_uri = "https://oauth2.googleapis.com/token"
@@ -187,21 +188,16 @@ class TestCompleteOauthHttps(unittest.TestCase):
             result = complete_oauth(
                 self.db,
                 state="st4te",
-                authorization_response=(
-                    "http://10.128.0.9:8000/auth/youtube/callback"
-                    "?code=4/abc&state=st4te"
-                ),
+                code="4/abc",
             )
         return flow, result
 
-    def test_http_authorization_response_rebuilt_before_fetch_token(self):
+    def test_code_exchanged_after_db_state_validation(self):
         flow, result = self._run_complete()
 
         fetch_kwargs = flow.fetch_token.call_args.kwargs
-        self.assertEqual(
-            fetch_kwargs["authorization_response"],
-            f"{CALLBACK}?code=4/abc&state=st4te",
-        )
+        self.assertEqual(fetch_kwargs["code"], "4/abc")
+        self.assertNotIn("authorization_response", fetch_kwargs)
         self.assertEqual(flow.redirect_uri, CALLBACK)
         self.assertEqual(result["destination_id"], self.dest.id)
 

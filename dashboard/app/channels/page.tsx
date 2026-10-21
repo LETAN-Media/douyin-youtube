@@ -5,7 +5,17 @@ import { ChannelsClient } from "./ChannelsClient";
 
 export const dynamic = "force-dynamic";
 
-export default async function ChannelsPage() {
+export default async function ChannelsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const sp = await searchParams;
+  const oauthError =
+    sp.oauth === "error" && typeof sp.oauth_error === "string"
+      ? sp.oauth_error
+      : undefined;
+
   let channels: ChannelItem[] = [];
   let pipelines: Pipeline[] = [];
 
@@ -26,6 +36,7 @@ export default async function ChannelsPage() {
       <ChannelsClient
         initialChannels={channels}
         pipelines={pipelines}
+        oauthError={oauthError}
       />
     </Shell>
   );

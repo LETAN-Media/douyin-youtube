@@ -22,6 +22,7 @@ import {
   actionToggleDestination,
 } from "@/lib/actions";
 import { formatTime, platformLabel } from "@/lib/format";
+import { oauthErrorMessage } from "@/lib/oauthErrors";
 import type { Destination, DestinationStatus } from "@/lib/types";
 import { IconDestinations } from "@/components/icons";
 
@@ -30,11 +31,13 @@ export function DestinationsPanel({
   destinations,
   statusById,
   oauthSuccess,
+  oauthError,
 }: {
   pipelineId: string;
   destinations: Destination[];
   statusById: Record<string, DestinationStatus | null>;
   oauthSuccess: boolean;
+  oauthError?: string | null;
 }) {
   const [showWizard, setShowWizard] = useState(false);
   const [items, setItems] = useState(destinations);
@@ -90,6 +93,13 @@ export function DestinationsPanel({
       {oauthSuccess ? (
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-900">
           YouTube đã kết nối. Trạng thái kênh hiển thị ở destination tương ứng.
+        </div>
+      ) : null}
+
+      {oauthError ? (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          <p className="font-bold">Kết nối YouTube thất bại</p>
+          <p className="mt-1">{oauthErrorMessage(oauthError)}</p>
         </div>
       ) : null}
 

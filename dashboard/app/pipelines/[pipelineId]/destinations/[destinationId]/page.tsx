@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import { formatDateTime, formatTime, platformLabel, publicationLabel } from "@/lib/format";
+import { oauthErrorMessage } from "@/lib/oauthErrors";
 import { DestinationActions, DestinationEditForm } from "@/components/pipeline/DestinationDetail";
 
 export const dynamic = "force-dynamic";
@@ -26,6 +27,8 @@ export default async function DestinationDetailPage({
   const { pipelineId, destinationId } = await params;
   const sp = await searchParams;
   const oauth = typeof sp.oauth === "string" ? sp.oauth : undefined;
+  const oauthError =
+    typeof sp.oauth_error === "string" ? sp.oauth_error : undefined;
 
   let destination;
   try {
@@ -69,6 +72,15 @@ export default async function DestinationDetailPage({
       {oauth === "success" ? (
         <div className="mt-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-900">
           YouTube OAuth thành công. Kiểm tra channel bên dưới.
+        </div>
+      ) : null}
+
+      {oauth === "error" ? (
+        <div className="mt-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          <p className="font-bold">Kết nối YouTube thất bại</p>
+          <p className="mt-1">
+            {oauthErrorMessage(oauthError ?? "oauth_unknown")}
+          </p>
         </div>
       ) : null}
 
