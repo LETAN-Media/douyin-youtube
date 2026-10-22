@@ -7,6 +7,17 @@ import type { FacebookPublicationDto } from "@/lib/facebook-api";
 
 const PAGE_SIZE = 100;
 
+function uploadModeLabel(publication: FacebookPublicationDto): string {
+  const mode = publication.youtube_upload_mode ?? "video";
+  if (mode === "shorts") return "Shorts";
+  if (mode === "both") {
+    if (publication.shorts_eligible === true) return "Shorts (auto)";
+    if (publication.shorts_eligible === false) return "Video (auto)";
+    return "Auto";
+  }
+  return "Video";
+}
+
 export function FacebookPublications({
   pipelineId,
   initialItems,
@@ -75,15 +86,20 @@ export function FacebookPublications({
                     <p className="mt-1 text-xs text-slate-500">
                       Video Type:{" "}
                       <span className="font-bold text-slate-700">
-                        {(p.youtube_upload_mode ?? "video") === "shorts" ? "Shorts" : "Video"}
+                        {uploadModeLabel(p)}
                       </span>
-                      {p.youtube_upload_mode === "shorts" && p.shorts_eligible === true ? (
-                        <span className="text-emerald-600"> · đã kiểm tra đủ điều kiện</span>
+                      {(p.youtube_upload_mode === "shorts" || p.youtube_upload_mode === "both")
+                        && p.shorts_eligible === true ? (
+                        <span className="text-emerald-600"> · đủ điều kiện Shorts</span>
+                      ) : p.youtube_upload_mode === "both" && p.shorts_eligible === false ? (
+                        <span className="text-amber-600" title={p.shorts_check_note ?? ""}>
+                          {" "}· không đủ ĐK Shorts → đăng video
+                        </span>
                       ) : p.youtube_upload_mode === "shorts" && p.shorts_eligible === false ? (
                         <span className="text-rose-600" title={p.shorts_check_note ?? ""}>
                           {" "}· không đủ điều kiện
                         </span>
-                      ) : p.youtube_upload_mode === "shorts" ? (
+                      ) : (p.youtube_upload_mode === "shorts" || p.youtube_upload_mode === "both") ? (
                         <span className="text-slate-400"> · chưa kiểm tra</span>
                       ) : null}
                     </p>

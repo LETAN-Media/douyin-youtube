@@ -463,3 +463,72 @@ def test_shorts_ineligible_refills_same_slot_with_next_reel(monkeypatch) -> None
         assert queued[0]["reel_db_id"] == reel2
 
     asyncio.run(_check())
+
+
+def test_both_mode_uploads_ineligible_shorts_as_video(monkeypatch) -> None:
+    """Both mode keeps the slot: ineligible Shorts are uploaded as normal videos."""
+    pipe_id, did = seed_connected("pl_both", "ytd_both")
+    reel1 = seed_ready_reel("pl_both", "r1")
+    pub_id = "pub_both"
+    publish_at = (datetime.now(timezone.utc) + timedelta(hours=3)).replace(microsecond=0)
+    publish_at_iso = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def _stage():
+        assert await reels.advance_status(reel1, "new", "queued")
+        await publications.get_or_create(
+            publication_id=pub_id, reel_db_id=reel1, destination_id=did
+        )
+        await publications.set_scheduled_publish_at(pub_id, publish_at_iso)
+        await publications.set_upload_snapshot(pub_id, "both")
+        await publish_queue.enqueue_publish_job(
+            pipeline_id=pipe_id, destination_id=did,
+            reel_db_id=reel1, publication_id=pub_id, priority=999,
+        )
+
+    asyncio.run(_stage())
+
+    class FakeResolver:
+        @classmethod
+        def from_settings(cls, transport=None):
+            return cls()
+
+        async def resolve(self, url):
+            return {"url": url}
+
+        async def download_media(self, media, job_id, tmp_root=None):
+            path = Path(tmp_root) / job_id / "video.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fake-video")
+            return path
+
+    async def _credentials(_destination_id):
+        return {"token": "test-token"}
+
+    async def _refresh(_destination_id, credentials):
+        return credentials
+
+    monkeypatch.setattr(publisher_module, "FacebookMediaResolver", FakeResolver)
+    monkeypatch.setattr(publisher_module, "load_destination_credentials_async", _credentials)
+    monkeypatch.setattr(publisher_module, "refresh_if_needed", _refresh)
+    monkeypatch.setattr(publisher_module, "upload_video", lambda *args, **kwargs: "vid_both")
+    import app.services.facebook_shorts as shorts_module
+    monkeypatch.setattr(
+        shorts_module,
+        "check_shorts_eligibility",
+        lambda _path: (False, "504s · 720x1280 vertical · vượt quá 180s"),
+    )
+
+    result = asyncio.run(run_publisher_once())
+    assert result is not None and result["result"] == "scheduled", result
+    assert result["youtube_video_id"] == "vid_both", result
+
+    async def _check():
+        pub = await publications.get_publication(pub_id)
+        assert pub is not None and pub["status"] == "scheduled"
+        assert pub["shorts_eligible"] is False
+        assert "vượt quá 180s" in (pub["shorts_check_note"] or "")
+        reel = await reels.get_reel(reel1)
+        assert reel is not None and reel["status"] == "scheduled"
+        assert await publish_queue.list_queued_jobs() == []
+
+    asyncio.run(_check())

@@ -35,7 +35,7 @@ async def create_pipeline(
     }
 
 
-YOUTUBE_UPLOAD_MODES = ("video", "shorts")
+YOUTUBE_UPLOAD_MODES = ("video", "shorts", "both")
 
 
 def normalize_upload_mode(value: Any) -> str:

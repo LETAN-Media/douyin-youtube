@@ -1,7 +1,8 @@
-"""YouTube upload modes: video (default) vs shorts.
+"""YouTube upload modes: video (default), shorts, and both.
 
 Video mode uploads untouched. Shorts mode verifies the real file with
 ffprobe (<=180s, vertical/square) and fails loud instead of trimming.
+Both mode uploads every file and lets eligible vertical clips become Shorts.
 """
 
 import asyncio
@@ -42,6 +43,7 @@ def test_normalize_upload_mode_defaults_and_validation():
     assert normalize_upload_mode(None) == "video"
     assert normalize_upload_mode("") == "video"
     assert normalize_upload_mode("SHORTS") == "shorts"
+    assert normalize_upload_mode("BOTH") == "both"
     assert normalize_upload_mode(" video ") == "video"
     with pytest.raises(ValueError):
         normalize_upload_mode("vertical")
@@ -101,6 +103,12 @@ def test_pipeline_mode_roundtrip_and_legacy_default(db):
     # Reload persists.
     again = client.get(f"/api/facebook/pipelines/{pipe['id']}", headers=headers)
     assert again.json()["youtube_upload_mode"] == "shorts"
+    both = client.patch(
+        f"/api/facebook/pipelines/{pipe['id']}",
+        headers=headers, json={"youtube_upload_mode": "both"},
+    )
+    assert both.status_code == 200, both.text
+    assert both.json()["youtube_upload_mode"] == "both"
 
 
 def test_scheduler_snapshots_mode_at_enqueue(db):

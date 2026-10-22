@@ -4,7 +4,11 @@ import { useEffect, useState } from "react";
 import { Card, CardHeader } from "@/components/ui";
 import { IconUpload } from "@/components/icons";
 
-type UploadMode = "video" | "shorts";
+type UploadMode = "video" | "shorts" | "both";
+
+function normalizeUploadMode(value: unknown): UploadMode {
+  return value === "shorts" ? "shorts" : value === "both" ? "both" : "video";
+}
 
 export function FacebookUploadMode({ pipelineId }: { pipelineId: string }) {
   const [mode, setMode] = useState<UploadMode | null>(null);
@@ -23,8 +27,7 @@ export function FacebookUploadMode({ pipelineId }: { pipelineId: string }) {
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        const current =
-          data.youtube_upload_mode === "shorts" ? "shorts" : "video";
+        const current = normalizeUploadMode(data.youtube_upload_mode);
         if (!cancelled) {
           setMode(current);
           setSavedMode(current);
@@ -61,8 +64,7 @@ export function FacebookUploadMode({ pipelineId }: { pipelineId: string }) {
             `HTTP ${res.status}`,
         );
       }
-      const current =
-        data.youtube_upload_mode === "shorts" ? "shorts" : "video";
+      const current = normalizeUploadMode(data.youtube_upload_mode);
       setMode(current);
       setSavedMode(current);
       setMessage("Đã lưu chế độ đăng. Áp dụng cho các batch mới.");
@@ -90,7 +92,7 @@ export function FacebookUploadMode({ pipelineId }: { pipelineId: string }) {
           <p className="text-xs text-slate-500">Đang tải chế độ đăng…</p>
         ) : (
           <>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               {(
                 [
                   {
@@ -99,8 +101,13 @@ export function FacebookUploadMode({ pipelineId }: { pipelineId: string }) {
                     desc: "Đăng nguyên bản, không kiểm tra hay cắt gì thêm.",
                   },
                   {
+                    value: "both",
+                    label: "Cả hai",
+                    desc: "File dọc/vuông ≤ 3 phút tự thành Shorts; file dài/ngang vẫn đăng video thường.",
+                  },
+                  {
                     value: "shorts",
-                    label: "YouTube Shorts",
+                    label: "Chỉ Shorts",
                     desc: "Chỉ đăng file dọc/vuông ≤ 3 phút, kiểm tra bằng ffprobe trước khi đăng.",
                   },
                 ] as Array<{ value: UploadMode; label: string; desc: string }>
@@ -134,7 +141,12 @@ export function FacebookUploadMode({ pipelineId }: { pipelineId: string }) {
                 );
               })}
             </div>
-            {mode === "shorts" ? (
+            {mode === "both" ? (
+              <p className="rounded-xl bg-emerald-50 p-2.5 text-[11px] leading-relaxed text-emerald-800 ring-1 ring-inset ring-emerald-100">
+                Mọi video đều được đăng. File dọc/vuông ≤ 3 phút sẽ được YouTube phân loại
+                là Shorts; file dài hoặc ngang vẫn đăng thành video thường, không bị bỏ slot.
+              </p>
+            ) : mode === "shorts" ? (
               <p className="rounded-xl bg-amber-50 p-2.5 text-[11px] leading-relaxed text-amber-800 ring-1 ring-inset ring-amber-100">
                 File không đủ điều kiện (dài quá 3 phút hoặc video ngang) sẽ báo lỗi rõ ràng
                 và được thay bằng video AI-ready kế tiếp cho cùng khung giờ (không cắt file).
