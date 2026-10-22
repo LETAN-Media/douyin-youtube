@@ -72,6 +72,48 @@ async def test_generate_metadata_with_mock_toolnet(monkeypatch):
     assert meta.model == "groq/qwen/qwen3.8-27b"
 
 
+@pytest.mark.asyncio
+async def test_generate_metadata_falls_back_to_secondary_model(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "TOOLNET_BASE_URL", "https://api.toolnet.tech/v1")
+    monkeypatch.setattr(app_settings, "TOOLNET_API_KEY", "test_key")
+    monkeypatch.setattr(app_settings, "TOOLNET_MODEL", "primary/model")
+    monkeypatch.setattr(app_settings, "TOOLNET_FALLBACK_MODEL",
+                        "agnes/agnes-3.0-flash")
+    monkeypatch.setattr(app_settings, "TOOLNET_AI_ENABLED", True)
+
+    fallback_response = (
+        '{"id":"chatcmpl-mock","choices":[{"message":{"content":"{\\"title\\": \\"Audio Fallback\\", \\"description\\": \\"Mo ta\\", \\"hashtags\\": [\\"#A\\", \\"#B\\", \\"#C\\"]}"}}],'
+        '"usage":{"total_tokens":50}}\ndata: [DONE]\n\n'
+    )
+    seen_models = []
+
+    async def fake_handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        seen_models.append(model)
+        if model == "primary/model":
+            return httpx.Response(500, text="upstream down", request=request)
+        return httpx.Response(200, text=fallback_response, request=request)
+
+    ctx = ai.AiContext(source_title="Nguồn truyện 1")
+    settings_row = {
+        "enabled": True,
+        "language": "vi",
+        "generate_title": True,
+        "generate_description": True,
+        "generate_hashtags": True,
+    }
+
+    meta = await ai.generate_metadata(ctx, settings_row,
+                                      transport=httpx.MockTransport(fake_handler))
+
+    assert meta.model == "agnes/agnes-3.0-flash"
+    assert meta.title == "Audio Fallback"
+    assert seen_models == ["primary/model"] * (ai.MAX_RETRIES + 1) + [
+        "agnes/agnes-3.0-flash"]
+
+
 def test_parse_genre_nested_and_corrupted():
     # Normal list
     assert _parse_genre(["Audio Ngôn Tình", "Audio Tổng Tài"]) == ["Audio Ngôn Tình", "Audio Tổng Tài"]

@@ -260,62 +260,78 @@ async def generate_metadata(ctx: AiContext, settings_row: dict,
         user_lines.append(f"Kênh đích: {ctx.channel_name}")
     user_lines.append("Hãy tạo metadata theo đúng yêu cầu hệ thống.")
 
-    payload = {
-        "model": chosen,
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": "\n".join(user_lines)}],
-        "temperature": 0.3,
-        "max_tokens": 900,
-    }
+    fallback_model = (app_settings.TOOLNET_FALLBACK_MODEL or "").strip()
+    models = [chosen]
+    if fallback_model and fallback_model != chosen:
+        models.append(fallback_model)
+
     last_error: MetadataError | None = None
-    for _ in range(MAX_RETRIES + 1):
-        try:
-            async with httpx.AsyncClient(
-                    transport=transport,
-                    timeout=app_settings.TOOLNET_TIMEOUT) as client:
-                resp = await client.post(f"{base_url}/chat/completions",
-                                         headers={
-                                             "Authorization": f"Bearer {api_key}",
-                                             "Content-Type": "application/json"},
-                                         json=payload)
-        except httpx.TimeoutException:
-            last_error = MetadataError(TIMEOUT, "ToolNet timeout.")
-            continue
-        except (httpx.ConnectError, httpx.NetworkError):
-            last_error = MetadataError(UPSTREAM_ERROR, "ToolNet unreachable.")
-            break
-        if resp.status_code == 401:
-            raise MetadataError(AUTH_FAILED, "ToolNet credential invalid (401).")
-        if resp.status_code == 429:
-            last_error = MetadataError(RATE_LIMITED, "ToolNet rate limited (429).")
-            continue
-        if 500 <= resp.status_code <= 599:
-            last_error = MetadataError(UPSTREAM_ERROR, f"ToolNet error ({resp.status_code}).")
-            continue
-        if resp.status_code != 200:
-            raise MetadataError(UPSTREAM_ERROR, f"ToolNet HTTP {resp.status_code}.")
-        try:
-            _, content, usage = parse_chat_body(resp.text)
-            data = extract_json_object(content if isinstance(content, str) else "")
-            title, description, hashtags = validate_metadata(data)
-            final_title = (apply_title_template(settings_row.get("title_template"), title)
-                           if settings_row.get("generate_title", True) else "")
-            final_tags = (apply_locked_hashtags(
-                _parse_locked(settings_row.get("locked_hashtags_json")), hashtags)
-                if settings_row.get("generate_hashtags", True) else
-                apply_locked_hashtags(
-                    _parse_locked(settings_row.get("locked_hashtags_json")), []))
-            final_desc = (apply_description_template(
-                settings_row.get("description_template"), description, final_tags)
-                if settings_row.get("generate_description", True) else "")
-            if not final_title.strip():
-                raise MetadataError(INVALID_RESPONSE, "Empty title after template.")
-            return GeneratedMetadata(title=final_title, description=final_desc,
-                                     hashtags=final_tags, model=chosen,
-                                     usage=usage if isinstance(usage, dict) else {})
-        except MetadataError as me:
-            last_error = me
-            continue
+    for model_index, attempt_model in enumerate(models):
+        payload = {
+            "model": attempt_model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": "\n".join(user_lines)}],
+            "temperature": 0.3,
+            "max_tokens": 900,
+        }
+        model_error: MetadataError | None = None
+        for _ in range(MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(
+                        transport=transport,
+                        timeout=app_settings.TOOLNET_TIMEOUT) as client:
+                    resp = await client.post(f"{base_url}/chat/completions",
+                                             headers={
+                                                 "Authorization": f"Bearer {api_key}",
+                                                 "Content-Type": "application/json"},
+                                             json=payload)
+            except httpx.TimeoutException:
+                model_error = MetadataError(TIMEOUT, "ToolNet timeout.")
+                continue
+            except (httpx.ConnectError, httpx.NetworkError):
+                model_error = MetadataError(UPSTREAM_ERROR, "ToolNet unreachable.")
+                break
+            if resp.status_code == 401:
+                raise MetadataError(AUTH_FAILED, "ToolNet credential invalid (401).")
+            if resp.status_code == 429:
+                model_error = MetadataError(RATE_LIMITED, "ToolNet rate limited (429).")
+                continue
+            if 500 <= resp.status_code <= 599:
+                model_error = MetadataError(
+                    UPSTREAM_ERROR, f"ToolNet error ({resp.status_code}).")
+                continue
+            if resp.status_code != 200:
+                model_error = MetadataError(
+                    UPSTREAM_ERROR, f"ToolNet HTTP {resp.status_code}.")
+                break
+            try:
+                _, content, usage = parse_chat_body(resp.text)
+                data = extract_json_object(content if isinstance(content, str) else "")
+                title, description, hashtags = validate_metadata(data)
+                final_title = (apply_title_template(settings_row.get("title_template"), title)
+                               if settings_row.get("generate_title", True) else "")
+                final_tags = (apply_locked_hashtags(
+                    _parse_locked(settings_row.get("locked_hashtags_json")), hashtags)
+                    if settings_row.get("generate_hashtags", True) else
+                    apply_locked_hashtags(
+                        _parse_locked(settings_row.get("locked_hashtags_json")), []))
+                final_desc = (apply_description_template(
+                    settings_row.get("description_template"), description, final_tags)
+                    if settings_row.get("generate_description", True) else "")
+                if not final_title.strip():
+                    raise MetadataError(INVALID_RESPONSE, "Empty title after template.")
+                return GeneratedMetadata(title=final_title, description=final_desc,
+                                         hashtags=final_tags, model=attempt_model,
+                                         usage=usage if isinstance(usage, dict) else {})
+            except MetadataError as me:
+                model_error = me
+                continue
+        last_error = model_error or MetadataError(
+            INVALID_RESPONSE, "ToolNet returned no usable response.")
+        if model_index + 1 < len(models):
+            logger.warning("AI model %s failed (%s: %s); falling back to %s",
+                           attempt_model, last_error.code, last_error,
+                           models[model_index + 1])
     assert last_error is not None
     raise last_error
 
