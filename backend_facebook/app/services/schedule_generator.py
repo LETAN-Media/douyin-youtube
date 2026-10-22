@@ -206,6 +206,83 @@ def _minutes_to_time(m: int) -> str:
     return f"{h:02d}:{m:02d}"
 
 
+AUTO_SLOT_START = "09:00"
+AUTO_SLOT_END = "22:30"
+MINUTES_PER_DAY = 24 * 60
+
+
+def _distribute_day_slots(
+    max_daily: int,
+    current_times: list[str],
+    fallback_start: int,
+    fallback_end: int,
+) -> list[str]:
+    if max_daily <= 0:
+        return []
+
+    minutes: list[int] = []
+    for value in current_times:
+        try:
+            minutes.append(_time_to_minutes(value))
+        except (ValueError, AttributeError):
+            continue
+    minutes.sort()
+
+    start = minutes[0] if len(minutes) >= 2 else fallback_start
+    end = minutes[-1] if len(minutes) >= 2 else fallback_end
+    if end <= start:
+        start, end = fallback_start, fallback_end
+    if end <= start:
+        return []
+
+    if max_daily == 1:
+        return [_minutes_to_time(start)]
+
+    span = end - start
+    if max_daily > span + 1:
+        return [
+            _minutes_to_time((index * MINUTES_PER_DAY) // max_daily)
+            for index in range(max_daily)
+        ]
+
+    return [
+        _minutes_to_time(math.floor(start + (span * index) / (max_daily - 1) + 0.5))
+        for index in range(max_daily)
+    ]
+
+
+def generate_auto_slots(
+    max_daily_publish: int,
+    existing_slots: dict[int, list[str]] | None = None,
+) -> dict[int, list[str]]:
+    """Distribute max_daily_publish slots evenly across the current day windows."""
+    existing = existing_slots or {}
+    all_minutes: list[int] = []
+    for times in existing.values():
+        for value in times:
+            try:
+                all_minutes.append(_time_to_minutes(value))
+            except (ValueError, AttributeError):
+                continue
+
+    fallback_start = (
+        min(all_minutes) if len(all_minutes) >= 2 else _time_to_minutes(AUTO_SLOT_START)
+    )
+    fallback_end = (
+        max(all_minutes) if len(all_minutes) >= 2 else _time_to_minutes(AUTO_SLOT_END)
+    )
+
+    return {
+        day: _distribute_day_slots(
+            max_daily_publish,
+            list(existing.get(day, [])),
+            fallback_start,
+            fallback_end,
+        )
+        for day in range(7)
+    }
+
+
 def _is_in_peak_hours(hour: int, is_weekend: bool) -> bool:
     """Check if an hour falls in peak engagement hours."""
     if is_weekend:

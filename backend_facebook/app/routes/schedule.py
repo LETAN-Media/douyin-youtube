@@ -16,6 +16,7 @@ from ..services.schedule_generator import (
     DistributionMode,
     ScheduleGenerationConfig,
     ScheduleGenerationError,
+    generate_auto_slots,
     generate_weekly_schedule,
     preview_generated_schedule,
     slots_to_dict,
@@ -82,13 +83,25 @@ async def put_schedule(
 ) -> dict:
     if await pipelines.get_pipeline(pipeline_id) is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+
+    current = await schedules.get_schedule(pipeline_id)
+    slots = body.slots
+    if slots is None:
+        if current is None:
+            if body.max_daily_publish > 5:
+                slots = generate_auto_slots(body.max_daily_publish)
+        elif body.max_daily_publish != current["max_daily_publish"]:
+            slots = generate_auto_slots(body.max_daily_publish, current["slots"])
+        else:
+            slots = current["slots"]
+
     try:
         schedule = await schedules.upsert_schedule(
             pipeline_id,
             enabled=body.enabled,
             timezone=body.timezone,
             max_daily_publish=body.max_daily_publish,
-            slots=body.slots,
+            slots=slots,
             batch_time=body.batch_time,
         )
     except ValueError as exc:

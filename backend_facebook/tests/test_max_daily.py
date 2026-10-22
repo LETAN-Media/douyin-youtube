@@ -91,6 +91,64 @@ def test_max_daily_publish_persists_above_five(db, max_daily: int) -> None:
     assert row.rows[0][0] == max_daily
 
 
+def test_auto_generates_slots_when_max_daily_above_default(db) -> None:
+    pipe = make_pipeline("mxauto")
+    make_source("mxauto")
+    client = TestClient(create_app())
+
+    response = client.put(
+        f"/api/facebook/pipelines/{pipe['id']}/schedule",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"enabled": True, "max_daily_publish": 8},
+    )
+    assert response.status_code == 200, response.text
+    slots = response.json()["slots"]
+    for day in WEEKDAY_NAMES:
+        assert len(slots[day]) == 8, (day, slots[day])
+        assert slots[day][0] == "09:00"
+        assert slots[day][-1] == "22:30"
+
+
+def test_auto_redistributes_slots_when_max_daily_changes(db) -> None:
+    pipe = make_pipeline("mxchange")
+    make_source("mxchange")
+    _enable_with_slots(pipe["id"], max_daily=3, slots=["11:00", "15:00", "19:00"])
+
+    client = TestClient(create_app())
+    response = client.put(
+        f"/api/facebook/pipelines/{pipe['id']}/schedule",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"enabled": True, "max_daily_publish": 10},
+    )
+    assert response.status_code == 200, response.text
+    slots = response.json()["slots"]
+    for day in WEEKDAY_NAMES:
+        assert len(slots[day]) == 10, (day, slots[day])
+        assert slots[day][0] == "11:00"
+        assert slots[day][-1] == "19:00"
+
+
+def test_put_without_slots_preserves_existing_slots(db) -> None:
+    pipe = make_pipeline("mxpreserve")
+    make_source("mxpreserve")
+    client = TestClient(create_app())
+    custom = {day: ["12:34"] for day in WEEKDAY_NAMES}
+    created = client.put(
+        f"/api/facebook/pipelines/{pipe['id']}/schedule",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"enabled": True, "max_daily_publish": 5, "slots": custom},
+    )
+    assert created.status_code == 200, created.text
+
+    updated = client.put(
+        f"/api/facebook/pipelines/{pipe['id']}/schedule",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        json={"enabled": True, "max_daily_publish": 5},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["slots"] == custom
+
+
 def test_max_daily_rejects_invalid_values(db) -> None:
     pipe = make_pipeline("mxinvalid")
     make_source("mxinvalid")

@@ -50,6 +50,83 @@ const DISTRIBUTION_MODES = [
 ];
 
 const MAX_SLOTS_PER_DAY = 1000;
+const AUTO_SLOT_START = "09:00";
+const AUTO_SLOT_END = "22:30";
+const MINUTES_PER_DAY = 24 * 60;
+
+function timeToMinutes(value: string): number | null {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function minutesToTime(total: number): string {
+  const normalized = ((total % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  const hour = Math.floor(normalized / 60);
+  const minute = normalized % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function distributeSlots(
+  maxDaily: number,
+  currentTimes: string[],
+  fallbackStart: number,
+  fallbackEnd: number,
+): string[] {
+  if (maxDaily <= 0) return [];
+  const minutes = currentTimes
+    .map(timeToMinutes)
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => a - b);
+
+  let start = minutes.length >= 2 ? minutes[0] : fallbackStart;
+  let end = minutes.length >= 2 ? minutes[minutes.length - 1] : fallbackEnd;
+  if (end <= start) {
+    start = fallbackStart;
+    end = fallbackEnd;
+  }
+  if (end <= start) return [];
+
+  if (maxDaily === 1) return [minutesToTime(start)];
+
+  const span = end - start;
+  if (maxDaily > span + 1) {
+    return Array.from({ length: maxDaily }, (_, index) =>
+      minutesToTime(Math.floor((index * MINUTES_PER_DAY) / maxDaily)),
+    );
+  }
+
+  return Array.from({ length: maxDaily }, (_, index) =>
+    minutesToTime(Math.round(start + (span * index) / (maxDaily - 1))),
+  );
+}
+
+function buildAutoSlotMap(
+  maxDaily: number,
+  currentSlots: Record<string, string[]>,
+): Record<string, string[]> {
+  const allMinutes = Object.values(currentSlots)
+    .flat()
+    .map(timeToMinutes)
+    .filter((value): value is number => value !== null);
+
+  const fallbackStart =
+    allMinutes.length >= 2 ? Math.min(...allMinutes) : timeToMinutes(AUTO_SLOT_START)!;
+  const fallbackEnd =
+    allMinutes.length >= 2 ? Math.max(...allMinutes) : timeToMinutes(AUTO_SLOT_END)!;
+
+  return Object.fromEntries(
+    WEEKDAY_KEYS.map((dayKey) => [
+      dayKey,
+      distributeSlots(
+        maxDaily,
+        currentSlots[dayKey] || [],
+        fallbackStart,
+        fallbackEnd,
+      ),
+    ]),
+  );
+}
 
 function parseMaxDailyInput(raw: string): { value: number | null; error: string | null } {
   const text = raw.trim();
@@ -294,6 +371,10 @@ export function FacebookScheduler({
       setTimeout(() => setRunResult(null), 5000);
       return;
     }
+    const slotsToSave =
+      parsed.value !== toSave.max_daily_publish
+        ? buildAutoSlotMap(parsed.value, toSave.slots)
+        : toSave.slots;
     setSaving(true);
     try {
       const payload: UpdateFacebookScheduleDto = {
@@ -301,7 +382,7 @@ export function FacebookScheduler({
         timezone: toSave.timezone,
         max_daily_publish: parsed.value,
         batch_time: toSave.batch_time,
-        slots: toSave.slots,
+        slots: slotsToSave,
       };
       const updated = await saveSchedule(pipelineId, payload);
       setSchedule(updated);
@@ -396,8 +477,26 @@ export function FacebookScheduler({
     }
   }, [pipelineId, genConfig, previewData, refreshStatus]);
 
+  const handleMaxDailyChange = (raw: string) => {
+    setMaxDailyInput(raw);
+    const parsed = parseMaxDailyInput(raw);
+    const maxDaily = parsed.value;
+    if (maxDaily === null) return;
+    setSchedule(prev => {
+      const base = prev || scheduleRef;
+      return {
+        ...base,
+        max_daily_publish: maxDaily,
+        slots: buildAutoSlotMap(maxDaily, base.slots),
+      };
+    });
+  };
+
   const handleSlotChange = (dayKey: string, times: string[]) => {
-    setSchedule(prev => prev ? { ...prev, slots: { ...prev.slots, [dayKey]: times } } : null);
+    setSchedule(prev => {
+      const base = prev || scheduleRef;
+      return { ...base, slots: { ...base.slots, [dayKey]: times } };
+    });
   };
 
   const handleAddSlot = (dayKey: string) => {
@@ -678,13 +777,13 @@ export function FacebookScheduler({
                     step={1}
                     inputMode="numeric"
                     value={maxDailyInput}
-                    onChange={(e) => setMaxDailyInput(e.target.value)}
+                    onChange={(e) => handleMaxDailyChange(e.target.value)}
                     className={inputCls}
                     aria-invalid={Boolean(parsedMaxDaily.error)}
                   />
                   <p className={`mt-1 text-xs ${parsedMaxDaily.error ? "text-rose-600" : "text-slate-500"}`}>
                     {parsedMaxDaily.error
-                      ?? "Số nguyên từ 1 trở lên. Đây là giới hạn tối đa, không phải cam kết đăng đủ."}
+                      ?? "Số nguyên từ 1 trở lên. Slot sẽ tự động chia đều theo số lượng này trong khung giờ hiện tại."}
                   </p>
                 </div>
               </div>
