@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     FACEBOOK_SCAN_WRITE_CHUNK: int = 100
     FACEBOOK_INCREMENTAL_KNOWN_PAGES_STOP: int = 2
 
+    SELFHOSTED_API_BASE_URL: str = "http://38.127.216.174:8080"
+    SELFHOSTED_API_KEY: str | None = None
+    SELFHOSTED_API_TIMEOUT: float = 60.0
+    SELFHOSTED_API_MAX_REELS: int = 5000
+
     # Primary Facebook media resolver (Task 6B). Key lives only in env/Northflank,
     # never hard-coded, never logged, never committed.
     FASTSAVER_BASE_URL: str = "https://api.fastsaver.io/v1"
