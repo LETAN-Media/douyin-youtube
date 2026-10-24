@@ -358,7 +358,7 @@ export function FacebookScheduler({
   }, [pipelineId]);
 
   useEffect(() => {
-    const timer = setInterval(refreshStatus, 30000);
+    const timer = setInterval(refreshStatus, 60000);
     return () => clearInterval(timer);
   }, [refreshStatus]);
 

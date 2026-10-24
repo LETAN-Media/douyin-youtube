@@ -7,7 +7,7 @@ import {
   type FacebookFlowStep,
 } from "./FacebookPipelineFlow";
 
-const POLL_MS = 2500;
+const POLL_MS = 5000;
 
 const STEP_DEFS: Array<{ key: keyof FacebookFlowState["steps"]; title: string; subtitle: string }> = [
   { key: "source", title: "Source", subtitle: "Facebook Fanpage" },
