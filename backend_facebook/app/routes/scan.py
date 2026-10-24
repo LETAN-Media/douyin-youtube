@@ -72,6 +72,7 @@ def _client_from_settings() -> FacebookRapidApiClient:
             settings.RAPIDAPI_KEY_FALLBACK2,
             settings.RAPIDAPI_KEY_FALLBACK3,
             settings.RAPIDAPI_KEY_FALLBACK4,
+            settings.RAPIDAPI_KEY_FALLBACK5,
         ) if k
     ]
     if not keys:
