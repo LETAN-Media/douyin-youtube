@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     FACEBOOK_RAPIDAPI_BASE_URL: str | None = None
     RAPIDAPI_KEY: str | None = None
     RAPIDAPI_KEY_FALLBACK: str | None = None
+    RAPIDAPI_KEY_FALLBACK2: str | None = None
+    RAPIDAPI_KEY_FALLBACK3: str | None = None
+    RAPIDAPI_KEY_FALLBACK4: str | None = None
 
     FACEBOOK_RAPIDAPI_MAX_PAGES: int = 200
     FACEBOOK_RAPIDAPI_MAX_REELS: int = 5000

@@ -65,7 +65,15 @@ def _resolve_mode(requested: str, source: dict) -> str:
 
 
 def _client_from_settings() -> FacebookRapidApiClient:
-    keys = [k for k in (settings.RAPIDAPI_KEY, settings.RAPIDAPI_KEY_FALLBACK) if k]
+    keys = [
+        k for k in (
+            settings.RAPIDAPI_KEY,
+            settings.RAPIDAPI_KEY_FALLBACK,
+            settings.RAPIDAPI_KEY_FALLBACK2,
+            settings.RAPIDAPI_KEY_FALLBACK3,
+            settings.RAPIDAPI_KEY_FALLBACK4,
+        ) if k
+    ]
     if not keys:
         raise RapidApiError("RAPIDAPI_AUTH_ERROR", "RAPIDAPI_KEY is not configured.")
     if not settings.FACEBOOK_RAPIDAPI_BASE_URL or not settings.FACEBOOK_RAPIDAPI_HOST:

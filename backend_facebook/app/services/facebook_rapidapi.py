@@ -167,17 +167,27 @@ class FacebookRapidApiClient:
         params: dict,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> object:
-        """Try primary key, then fallback key once for auth/rate/quota errors."""
+        """Try all keys sequentially for auth/rate/quota errors."""
         keys = self.config.api_keys
-        try:
-            async with self._client(keys[0], transport) as client:
-                return await self._get_json(client, path, params)
-        except RapidApiError as exc:
-            if len(keys) > 1 and exc.code in (AUTH_ERROR, RATE_LIMITED, QUOTA_EXCEEDED):
-                logger.warning("primary key hit %s, trying fallback key", exc.code)
-                async with self._client(keys[1], transport) as client:
+        last_error: RapidApiError | None = None
+        
+        for i, key in enumerate(keys):
+            try:
+                async with self._client(key, transport) as client:
                     return await self._get_json(client, path, params)
-            raise
+            except RapidApiError as exc:
+                # If quota/auth/rate error and have more keys, try next
+                if exc.code in (AUTH_ERROR, RATE_LIMITED, QUOTA_EXCEEDED) and i < len(keys) - 1:
+                    logger.warning("key %d/%d hit %s, trying next key", i+1, len(keys), exc.code)
+                    last_error = exc
+                    continue
+                # Non-recoverable error or last key failed
+                raise
+        
+        # All keys failed with quota/auth/rate errors
+        if last_error:
+            raise last_error
+        raise RapidApiError(AUTH_ERROR, "No API keys available")
 
     async def resolve_reels_page_id(
         self,
