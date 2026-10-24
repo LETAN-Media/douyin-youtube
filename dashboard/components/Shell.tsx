@@ -3,15 +3,14 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
-import { IconChannels, IconDashboard, IconFacebook, IconFilm, IconLogout, IconMenu, IconPlus, IconX, IconSearch } from "./icons";
+import { IconChannels, IconDashboard, IconFacebook, IconLogout, IconMenu, IconPlus, IconX, IconSearch, IconHeadphones } from "./icons";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: <IconDashboard size={17} /> },
   { href: "/channels", label: "Channels", icon: <IconChannels size={17} /> },
   { href: "/pipelines/new", label: "New Pipeline", icon: <IconPlus size={17} /> },
   { href: "/facebook", label: "Facebook", icon: <IconFacebook size={17} /> },
-  { href: "/drama", label: "Drama", icon: <IconFilm size={17} /> },
-  { href: "/audio", label: "Audio", icon: <IconFilm size={17} /> },
+  { href: "/audio", label: "Audio", icon: <IconHeadphones size={17} /> },
 ];
 
 const adminNav = [
