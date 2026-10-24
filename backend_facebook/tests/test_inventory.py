@@ -10,7 +10,7 @@ import app.db.client as client_module
 import app.routes.scan as scan_module
 from app.config import settings
 from app.db.client import get_client, migrate
-from app.db.repositories import pipelines, reels, scan_runs, sources
+from app.db.repositories import ai_metadata, pipelines, reels, scan_runs, sources
 from app.main import create_app
 from app.routes.scan import run_initial_scan
 
@@ -352,6 +352,43 @@ def test_inventory_stats(db) -> None:
     client = TestClient(create_app())
     r = client.get(f"/api/facebook/pipelines/{pipe['id']}/inventory/stats")
     assert r.status_code == 200 and r.json()["total"] == 5
+
+
+def test_combined_reel_ai_counts_matches_separate_queries(db) -> None:
+    pipe = make_pipeline("hc")
+    src = make_source("hc")
+    seed_reel(src["id"], "n1", status="new")
+    seed_reel(src["id"], "n2", status="new")
+    seed_reel(src["id"], "q1", status="queued")
+    seed_reel(src["id"], "p1", status="published")
+    seed_reel(src["id"], "f1", status="failed")
+
+    async def _seed_metadata() -> None:
+        for rid in ("n1", "p1"):
+            await ai_metadata.upsert_generated(
+                reel_db_id=f"{src['id']}_{rid}",
+                title="T",
+                description="D",
+                hashtags=[],
+                model="m",
+                source_hash=f"h-{rid}",
+                config_hash="config",
+            )
+        await ai_metadata.mark_failed(f"{src['id']}_n2", "boom")
+
+    asyncio.run(_seed_metadata())
+
+    combined = asyncio.run(reels.pipeline_reel_ai_counts(pipe["id"]))
+    assert combined["inventory"] == asyncio.run(reels.inventory_stats(pipe["id"]))
+    assert combined["ai"] == {
+        "generated": 2,
+        "failed": 1,
+        "pending": 2,
+        "total_reels": 5,
+        "ready": 0,
+    }
+    with_hash = asyncio.run(reels.pipeline_reel_ai_counts(pipe["id"], "config"))
+    assert with_hash["ai"]["ready"] == 1
 
 
 # ---------- 11/12. selection priority + fallback ----------

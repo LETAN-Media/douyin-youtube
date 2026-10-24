@@ -46,7 +46,8 @@ async def _worker_loop(
 
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def worker_task() -> None:
+    async def worker_task() -> bool:
+        did_work = False
         while True:
             async with semaphore:
                 # Recover stale AI jobs first
@@ -57,8 +58,9 @@ async def _worker_loop(
                 # Claim next reel needing AI metadata
                 job = await _claim_next_ai_job(worker_id=WORKER_ID, max_ttl_seconds=stale_ttl_seconds)
                 if job is None:
-                    break  # No work, exit inner loop to sleep
+                    return did_work
 
+                did_work = True
                 try:
                     await _process_ai_job(job, transport=transport)
                 except asyncio.CancelledError:
@@ -70,16 +72,26 @@ async def _worker_loop(
             # Small delay between jobs
             await asyncio.sleep(0.1)
 
+    idle_cycles = 0
     while True:
+        did_work = False
         try:
-            await worker_task()
+            did_work = await worker_task()
         except asyncio.CancelledError:
             logger.info("AI metadata worker cancelled")
             raise
         except Exception as exc:
             logger.exception("AI worker loop error: %s", exc)
 
-        await asyncio.sleep(max(1, poll_seconds))
+        base = max(1, poll_seconds)
+        if did_work:
+            idle_cycles = 0
+            delay = base
+        else:
+            idle_cycles += 1
+            factor = 2 ** min(max(0, idle_cycles - 1), 3)
+            delay = max(base, min(60, base * factor))
+        await asyncio.sleep(delay)
 
 
 async def _claim_next_ai_job(
@@ -165,33 +177,19 @@ async def _claim_next_ai_job(
 async def _find_reel_needing_ai(pipeline_id: str) -> dict | None:
     """Find a reel in 'new' status that needs AI metadata generation."""
     from ..db.repositories import reels as reels_repo
-    from ..db.repositories import ai_metadata as ai_metadata_repo
     from ..db.repositories import ai_settings as ai_settings_repo
 
     # Canonical hash shared with scheduler/publisher/ensure: always
     # recomputed from live fields + live model, never the stored hash.
-    model = settings.TOOLNET_MODEL or ""
-    pipe_ai_settings, config_hash = await ai_settings_repo.current_config_hash(pipeline_id)
+    _, config_hash = await ai_settings_repo.current_config_hash(pipeline_id)
 
-    # Find reels needing AI, excluding those in backoff
-    reels_needing_ai = await reels_repo.list_reels_needing_ai(pipeline_id, config_hash)
-    if not reels_needing_ai:
-        return None
-
-    # Filter out reels that are in backoff (failed but not ready for retry)
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    for reel in reels_needing_ai:
-        meta = await ai_metadata_repo.get_for_reel(reel["id"])
-        if meta and meta.get("status") == "failed":
-            next_retry = meta.get("next_retry_at")
-            if next_retry and next_retry > now_iso:
-                continue  # Still in backoff, skip
-            retry_count = meta.get("retry_count", 0)
-            if retry_count >= settings.FACEBOOK_AI_MAX_RETRIES:
-                continue  # Max retries exceeded, skip permanently
-        return reel  # This reel is ready for AI processing
-
-    return None
+    reels_needing_ai = await reels_repo.list_reels_needing_ai(
+        pipeline_id,
+        config_hash,
+        limit=100,
+        max_retries=settings.FACEBOOK_AI_MAX_RETRIES,
+    )
+    return reels_needing_ai[0] if reels_needing_ai else None
 
 
 async def _process_ai_job(job: dict, transport: httpx.AsyncBaseTransport | None = None) -> dict:

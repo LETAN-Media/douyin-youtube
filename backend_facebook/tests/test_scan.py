@@ -478,7 +478,7 @@ def test_health(db) -> None:
     client = TestClient(create_app())
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "service": "backend-facebook", "version": "1.0.0"}
+    b = r.json(); assert b["ok"] and b["service"] == "backend-facebook" and b["version"] == "1.0.0"
 
 
 def test_error_codes_have_no_key_leak(db, no_sleep) -> None:

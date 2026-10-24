@@ -831,16 +831,16 @@ async def _ai_readiness_counts(
         "batch_last_error": None,
     }
     try:
-        from ..db.repositories import ai_metadata as ai_metadata_repo
         from ..db.repositories import publish_queue as publish_queue_repo
 
-        inv = await reels.inventory_stats(pipeline_id)
-        ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
         pipe_ai_settings, config_hash = await ai_settings_repo.current_config_hash(pipeline_id)
         ai_enabled = pipe_ai_settings.get("enabled", True)
-        ai_ready = 0
-        if ai_enabled:
-            ai_ready = len(await reels.list_ai_ready_reels(pipeline_id, config_hash))
+        counts = await reels.pipeline_reel_ai_counts(
+            pipeline_id, config_hash if ai_enabled else None
+        )
+        inv = counts["inventory"]
+        ai_stats = counts["ai"]
+        ai_ready = int(ai_stats.get("ready", 0)) if ai_enabled else 0
         queue_stats = await publish_queue_repo.get_pipeline_queue_stats(pipeline_id)
         return {
             **fallback,

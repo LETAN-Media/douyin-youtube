@@ -355,6 +355,62 @@ async def inventory_stats(pipeline_id: str) -> dict[str, int]:
     }
 
 
+async def pipeline_reel_ai_counts(
+    pipeline_id: str, config_hash: str | None = None
+) -> dict[str, dict[str, int]]:
+    """Inventory and AI metadata counts in one grouped join."""
+    client = get_client()
+    params: dict[str, Any] = {"pipeline_id": pipeline_id}
+    ready_expr = "0"
+    if config_hash:
+        ready_expr = (
+            "SUM(CASE WHEN r.status = 'new' AND m.status = 'generated' "
+            "AND m.config_hash = :config_hash THEN 1 ELSE 0 END)"
+        )
+        params["config_hash"] = config_hash
+    rows = await client.execute(
+        f"SELECT r.status, m.status, {ready_expr}, COUNT(*) FROM facebook_reels r "
+        "LEFT JOIN facebook_ai_metadata m ON m.reel_db_id = r.id "
+        f"WHERE {_pipeline_scope(pipeline_id)} "
+        "GROUP BY r.status, m.status",
+        params,
+    )
+    inventory_by_status: dict[str, int] = {}
+    ai_by_status: dict[str, int] = {}
+    total = 0
+    ready = 0
+    for reel_status, meta_status, ready_count, count in rows.rows or []:
+        value = int(count or 0)
+        total += value
+        ready += int(ready_count or 0)
+        inventory_by_status[reel_status] = inventory_by_status.get(reel_status, 0) + value
+        if meta_status:
+            ai_by_status[meta_status] = ai_by_status.get(meta_status, 0) + value
+    published = inventory_by_status.get("published", 0)
+    generated = ai_by_status.get("generated", 0)
+    failed = ai_by_status.get("failed", 0)
+    return {
+        "inventory": {
+            "total": total,
+            "new": inventory_by_status.get("new", 0),
+            "ai_processing": inventory_by_status.get("ai_processing", 0),
+            "queued": inventory_by_status.get("queued", 0),
+            "processing": inventory_by_status.get("processing", 0),
+            "published": published,
+            "failed": inventory_by_status.get("failed", 0),
+            "skipped": inventory_by_status.get("skipped", 0),
+            "unpublished": total - published,
+        },
+        "ai": {
+            "generated": generated,
+            "failed": failed,
+            "pending": max(0, total - generated - failed),
+            "total_reels": total,
+            "ready": ready,
+        },
+    }
+
+
 async def select_next_unpublished_reel(pipeline_id: str) -> dict[str, Any] | None:
     """Newest unpublished reel: status=new, freshest source_published_at first.
 
@@ -520,52 +576,73 @@ async def list_reels_needing_ai(
     pipeline_id: str,
     config_hash: str | None = None,
     limit: int = 100,
+    *,
+    max_retries: int | None = None,
+    now_iso: str | None = None,
 ) -> list[dict[str, Any]]:
     """Find reels in 'new' status that need AI metadata generation.
-    
+
     A reel needs AI if:
     - status = 'new'
     - no generated AI metadata with matching config_hash
-    - pipeline has AI enabled
+    - no failed metadata still in backoff or past max retries
     """
     client = get_client()
-    
+    source_rows = await client.execute(
+        "SELECT id FROM facebook_sources WHERE pipeline_id = :pipeline_id",
+        {"pipeline_id": pipeline_id},
+    )
+    source_ids = [str(r[0]) for r in source_rows.rows or []]
+    if not source_ids:
+        return []
+    placeholders = ",".join(f":src{i}" for i in range(len(source_ids)))
+    scope = f"r.source_id IN ({placeholders})"
+    params: dict[str, Any] = {
+        f"src{i}": source_id for i, source_id in enumerate(source_ids)
+    }
+    params["limit"] = limit
+
     if config_hash is None:
-        # Find reels with no AI metadata at all
-        rows = await client.execute(
-            f"""
-            SELECT {_REEL_COLUMNS} FROM facebook_reels r
-            WHERE {_pipeline_scope(pipeline_id)}
-            AND r.status = 'new'
-            AND NOT EXISTS (
-                SELECT 1 FROM facebook_ai_metadata m
-                WHERE m.reel_db_id = r.id
-                AND m.status = 'generated'
-            )
-            ORDER BY r.discovered_at DESC, r.id ASC
-            LIMIT :limit
-            """,
-            {"pipeline_id": pipeline_id, "limit": limit},
+        missing_clause = (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM facebook_ai_metadata m "
+            "WHERE m.reel_db_id = r.id AND m.status = 'generated')"
         )
     else:
-        # Find reels where AI metadata is missing or stale
-        rows = await client.execute(
-            f"""
-            SELECT {_REEL_COLUMNS} FROM facebook_reels r
-            WHERE {_pipeline_scope(pipeline_id)}
-            AND r.status = 'new'
-            AND NOT EXISTS (
-                SELECT 1 FROM facebook_ai_metadata m
-                WHERE m.reel_db_id = r.id
-                AND m.status = 'generated'
-                AND m.config_hash = :config_hash
-            )
-            ORDER BY r.discovered_at DESC, r.id ASC
-            LIMIT :limit
-            """,
-            {"pipeline_id": pipeline_id, "config_hash": config_hash, "limit": limit},
+        missing_clause = (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM facebook_ai_metadata m "
+            "WHERE m.reel_db_id = r.id AND m.status = 'generated' "
+            "AND m.config_hash = :config_hash)"
         )
-    
+        params["config_hash"] = config_hash
+
+    backoff_clause = ""
+    if max_retries is not None:
+        backoff_clause = (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM facebook_ai_metadata mb "
+            "WHERE mb.reel_db_id = r.id AND mb.status = 'failed' "
+            "AND (mb.retry_count >= :max_retries "
+            "OR (mb.next_retry_at IS NOT NULL AND mb.next_retry_at > :now_iso)))"
+        )
+        params["max_retries"] = max_retries
+        params["now_iso"] = now_iso or datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    rows = await client.execute(
+        f"""
+        SELECT {_REEL_COLUMNS} FROM facebook_reels r
+        WHERE {scope}
+        AND r.status = 'new'
+        {missing_clause}
+        {backoff_clause}
+        ORDER BY r.discovered_at DESC, r.id ASC
+        LIMIT :limit
+        """,
+        params,
+    )
     return [_reel_to_dict(r) for r in (rows.rows or [])]
 
 
@@ -584,10 +661,23 @@ async def list_ai_ready_reels(
     - pipeline has AI enabled
     """
     client = get_client()
+    source_rows = await client.execute(
+        "SELECT id FROM facebook_sources WHERE pipeline_id = :pipeline_id",
+        {"pipeline_id": pipeline_id},
+    )
+    source_ids = [str(r[0]) for r in source_rows.rows or []]
+    if not source_ids:
+        return []
+    placeholders = ",".join(f":src{i}" for i in range(len(source_ids)))
+    params: dict[str, Any] = {
+        f"src{i}": source_id for i, source_id in enumerate(source_ids)
+    }
+    params["config_hash"] = config_hash
+    params["limit"] = limit
     rows = await client.execute(
         f"""
         SELECT {_REEL_COLUMNS} FROM facebook_reels r
-        WHERE {_pipeline_scope(pipeline_id)}
+        WHERE r.source_id IN ({placeholders})
         AND r.status = 'new'
         AND EXISTS (
             SELECT 1 FROM facebook_ai_metadata m
@@ -598,7 +688,7 @@ async def list_ai_ready_reels(
         ORDER BY r.discovered_at DESC, r.id ASC
         LIMIT :limit
         """,
-        {"pipeline_id": pipeline_id, "config_hash": config_hash, "limit": limit},
+        params,
     )
     return [_reel_to_dict(r) for r in (rows.rows or [])]
 

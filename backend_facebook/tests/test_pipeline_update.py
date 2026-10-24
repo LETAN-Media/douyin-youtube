@@ -305,6 +305,37 @@ def test_manual_top_up_never_double_books_a_slot(db) -> None:
     assert used == ["14:30", "18:30", "20:30", "22:30"], used
 
 
+def test_used_slots_only_returns_requested_local_day(db) -> None:
+    from app.db.repositories import publications as publications_repo
+
+    pipe, src, dest = _enable("tp4", slots=MONDAY_SLOTS)
+    r1 = _ready(pipe["id"], src["id"], "r1")
+    r2 = _ready(pipe["id"], src["id"], "r2")
+    r3 = _ready(pipe["id"], src["id"], "r3")
+
+    async def _seed() -> None:
+        for pub_id, reel_db_id, scheduled_at in (
+            ("pub_tp4_1", r1, "2026-10-05T07:30:00Z"),
+            ("pub_tp4_2", r2, "2026-10-06T07:30:00Z"),
+            ("pub_tp4_3", r3, "2026-10-05T17:30:00Z"),
+        ):
+            await publications_repo.create_publication(
+                publication_id=pub_id,
+                reel_db_id=reel_db_id,
+                destination_id=dest["id"],
+            )
+            await publications_repo.set_scheduled_publish_at(pub_id, scheduled_at)
+
+    asyncio.run(_seed())
+
+    assert asyncio.run(
+        publications_repo.used_slot_times_for_date(pipe["id"], "2026-10-05")
+    ) == ["14:30"]
+    assert asyncio.run(
+        publications_repo.used_slot_times_for_date(pipe["id"], "2026-10-06")
+    ) == ["00:30", "14:30"]
+
+
 def test_auto_tick_never_tops_up_completed_batch(db) -> None:
     from app.services.facebook_scheduler import run_scheduler_tick
 

@@ -19,9 +19,13 @@ import httpx
 
 import app.db.client as client_module
 from app.config import settings
-from app.db.client import migrate
+from app.db.client import get_client, migrate
 from app.db.repositories import ai_metadata, ai_settings, pipelines, reels, sources
-from app.services.facebook_ai_worker import get_ai_worker_status, run_ai_worker_once
+from app.services.facebook_ai_worker import (
+    _find_reel_needing_ai,
+    get_ai_worker_status,
+    run_ai_worker_once,
+)
 
 TEST_DB_PATH = Path("/tmp/backend_facebook_ai_worker_test.db")
 TEST_DB_URL = f"file:{TEST_DB_PATH}"
@@ -200,6 +204,52 @@ def test_worker_regenerates_stale_config_hash() -> None:
         assert [r["id"] for r in ready] == [reel_db_id]
 
     asyncio.run(_ready_after())
+
+
+def test_failed_backoff_is_filtered_without_n_plus_one(monkeypatch) -> None:
+    """Backoff/max-retry reels are excluded in SQL, so the worker does not
+    perform one metadata lookup per candidate to find the next eligible reel."""
+    seed_pipeline()
+    old_id = seed_reel(rid="old")
+    new_id = seed_reel(rid="new")
+
+    async def _seed() -> None:
+        client = get_client()
+        await client.execute(
+            "UPDATE facebook_reels SET discovered_at = '2026-01-01T00:00:00Z' "
+            "WHERE id = :id",
+            {"id": old_id},
+        )
+        await client.execute(
+            "UPDATE facebook_reels SET discovered_at = '2026-10-20T00:00:00Z' "
+            "WHERE id = :id",
+            {"id": new_id},
+        )
+        await ai_metadata.mark_failed(
+            new_id,
+            "boom",
+            retry_count=settings.FACEBOOK_AI_MAX_RETRIES,
+            next_retry_at="2999-01-01T00:00:00Z",
+        )
+
+    asyncio.run(_seed())
+
+    async def _unexpected(_reel_db_id: str):
+        raise AssertionError("N+1 metadata lookup must not run")
+
+    monkeypatch.setattr(ai_metadata, "get_for_reel", _unexpected)
+
+    found = asyncio.run(_find_reel_needing_ai("pl_w1"))
+    assert found is not None and found["id"] == old_id
+
+    rows = asyncio.run(
+        reels.list_reels_needing_ai(
+            "pl_w1",
+            scheduler_hash(),
+            max_retries=settings.FACEBOOK_AI_MAX_RETRIES,
+        )
+    )
+    assert [r["id"] for r in rows] == [old_id]
 
 
 def test_worker_status_does_not_crash() -> None:

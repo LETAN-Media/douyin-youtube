@@ -384,6 +384,11 @@ async def migrate() -> None:
         """,
     ]
     await _apply_migration(client, applied, "20261021_21", statements_21)
+    statements_22 = [
+        "CREATE INDEX IF NOT EXISTS idx_facebook_reels_source_status_discovered "
+        "ON facebook_reels(source_id, status, discovered_at DESC, id)",
+    ]
+    await _apply_migration(client, applied, "20261024_22", statements_22)
 
 
 async def _repair_ai_metadata_column(client: Any) -> None:

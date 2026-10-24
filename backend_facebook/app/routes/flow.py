@@ -9,7 +9,9 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter
 from zoneinfo import ZoneInfo
 
+from ..config import settings
 from ..db.repositories import destinations, pipelines, publications, reels, scan_runs, schedules, sources
+from ..services import dashboard_cache
 from .facebook import _err
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-flow"])
@@ -22,7 +24,8 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         return None
 
     fb_sources = await sources.list_sources(pipeline_id)
-    stats = await reels.inventory_stats(pipeline_id)
+    counts = await reels.pipeline_reel_ai_counts(pipeline_id)
+    stats = counts["inventory"]
     inventory = stats["total"]
 
     latest_runs = []
@@ -110,20 +113,17 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
         publisher_status = "idle"
         publisher_detail = "no publications"
 
-    from ..db.repositories import ai_metadata as ai_metadata_repo
-    from ..config import settings as app_settings
-
     from ..db.repositories import ai_settings as ai_settings_repo
 
     pipeline_ai_settings = await ai_settings_repo.get_settings(pipeline_id)
     ai_configured = bool(
-        app_settings.TOOLNET_AI_ENABLED
-        and app_settings.TOOLNET_BASE_URL
-        and app_settings.TOOLNET_API_KEY
-        and app_settings.TOOLNET_MODEL
+        settings.TOOLNET_AI_ENABLED
+        and settings.TOOLNET_BASE_URL
+        and settings.TOOLNET_API_KEY
+        and settings.TOOLNET_MODEL
         and pipeline_ai_settings.get("enabled", True)
     )
-    ai_stats = await ai_metadata_repo.pipeline_stats(pipeline_id)
+    ai_stats = counts["ai"]
     pending = ai_stats.get("pending", 0)
     generated = ai_stats.get("generated", 0)
     failed = ai_stats.get("failed", 0)
@@ -238,7 +238,11 @@ async def build_flow_state(pipeline_id: str) -> dict | None:
 
 @router.get("/pipelines/{pipeline_id}/flow-state")
 async def get_flow_state(pipeline_id: str) -> dict:
-    state = await build_flow_state(pipeline_id)
+    state = await dashboard_cache.get_or_compute(
+        f"flow:{pipeline_id}",
+        settings.FACEBOOK_FLOW_CACHE_SECONDS,
+        lambda: build_flow_state(pipeline_id),
+    )
     if state is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
     return state

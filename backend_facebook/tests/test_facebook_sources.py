@@ -344,7 +344,7 @@ def test_health(db) -> None:
     client = make_client()
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "service": "backend-facebook", "version": "1.0.0"}
+    b = r.json(); assert b["ok"] and b["service"] == "backend-facebook" and b["version"] == "1.0.0"
 
 
 # ---------- source update (enable/disable) + delete ----------

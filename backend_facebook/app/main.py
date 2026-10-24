@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .db.client import migrate
 from .routes import ai_metadata, facebook, flow, health, inventory, manual, publish, scan, schedule, youtube
+from .services import dashboard_cache
 
 logger = logging.getLogger("backend-facebook.main")
 
@@ -172,6 +173,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _invalidate_dashboard_cache(request: Request, call_next):
+        response = await call_next(request)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            dashboard_cache.clear()
+        return response
 
     app.include_router(health.router)
     app.include_router(facebook.router)

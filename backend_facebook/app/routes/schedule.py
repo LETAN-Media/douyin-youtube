@@ -8,8 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
+from ..config import settings
 from ..db.repositories import pipelines, publish_queue, schedules
 from ..db.repositories.schedules import MAX_DAILY_PUBLISH
+from ..services import dashboard_cache
 from ..services.facebook_global_publisher import get_publisher_status, run_publisher_once
 from ..services.facebook_scheduler import describe_schedule_status, run_scheduler_tick
 from ..services.schedule_generator import (
@@ -208,7 +210,11 @@ async def generate_and_save_schedule(
 
 @router.get("/pipelines/{pipeline_id}/schedule/status")
 async def get_schedule_status(pipeline_id: str) -> dict:
-    status = await describe_schedule_status(pipeline_id)
+    status = await dashboard_cache.get_or_compute(
+        f"schedule-status:{pipeline_id}",
+        settings.FACEBOOK_SCHEDULE_STATUS_CACHE_SECONDS,
+        lambda: describe_schedule_status(pipeline_id),
+    )
     if status is None:
         raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
     return status

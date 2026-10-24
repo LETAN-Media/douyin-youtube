@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -8,6 +10,7 @@ class HealthResponse(BaseModel):
     ok: bool
     service: str
     version: str
+    commit: str | None = None
 
 
 router = APIRouter()
@@ -15,7 +18,8 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse, include_in_schema=False)
 async def health() -> HealthResponse:
-    return HealthResponse(ok=True, service="backend-facebook", version="1.0.0")
+    commit = os.getenv("GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("VERCEL_GIT_COMMIT_SHA")
+    return HealthResponse(ok=True, service="backend-facebook", version="1.0.0", commit=commit)
 
 
 def _redact(message: str) -> str:

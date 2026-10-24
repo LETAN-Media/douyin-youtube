@@ -286,24 +286,32 @@ async def used_slot_times_for_date(
     each timestamp is converted to the pipeline timezone before comparing.
     Used to keep a manual top-up from double-booking an already taken slot.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, time as datetime_time, timedelta, timezone
     from zoneinfo import ZoneInfo
 
     try:
         tz = ZoneInfo(tz_name or "Asia/Ho_Chi_Minh")
     except Exception:
         tz = timezone.utc
+    try:
+        day = datetime.strptime(date_iso, "%Y-%m-%d").date()
+    except ValueError:
+        return []
+    start_local = datetime.combine(day, datetime_time.min, tzinfo=tz)
+    end_local = datetime.combine(day + timedelta(days=1), datetime_time.min, tzinfo=tz)
+    start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     client = get_client()
     rows = await client.execute(
         """
         SELECT DISTINCT p.scheduled_publish_at
         FROM publications p
-        JOIN facebook_reels r ON r.id = p.reel_db_id
-        JOIN facebook_sources s ON s.id = r.source_id
-        WHERE s.pipeline_id = :pipeline_id
-        AND p.scheduled_publish_at IS NOT NULL
+        JOIN youtube_destinations d ON d.id = p.destination_id
+        WHERE d.pipeline_id = :pipeline_id
+        AND p.scheduled_publish_at >= :start
+        AND p.scheduled_publish_at < :end
         """,
-        {"pipeline_id": pipeline_id},
+        {"pipeline_id": pipeline_id, "start": start_utc, "end": end_utc},
     )
     out: set[str] = set()
     for row in rows.rows or []:

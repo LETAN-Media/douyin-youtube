@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     FACEBOOK_SCHEDULER_SLOT_WINDOW_MINUTES: int = 60
     SCHEDULER_JITTER_MINUTES: int = 0
 
+    # Dashboard-only read caches. 0 disables; workers never read these.
+    FACEBOOK_FLOW_CACHE_SECONDS: int = 10
+    FACEBOOK_SCHEDULE_STATUS_CACHE_SECONDS: int = 40
+
     # YouTube scheduled-publication reconciler (Task 10).
     FACEBOOK_RECONCILE_ENABLED: bool = False
     FACEBOOK_RECONCILE_POLL_SECONDS: int = 300
