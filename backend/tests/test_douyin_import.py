@@ -339,9 +339,25 @@ class TestJustOneClientQuota(unittest.TestCase):
         self.Session = _session_factory(self.engine)
         self._qd = patch.object(douyin_quota, "SessionLocal", self.Session)
         self._qd.start()
+        from app.integrations.rapidapi.provider_config import RapidApiProviderConfig
+        self._mock_cfg = RapidApiProviderConfig(
+            provider_id="rapidapi_justone",
+            name="RapidAPI JustOne",
+            api_key="test-key",
+            host="example.p.rapidapi.com",
+            base_url="https://example.p.rapidapi.com",
+            path="/api/douyin/get-user-video-list/v3",
+            schema="justone_v3",
+            priority=0,
+            monthly_request_limit=20,
+        )
+        from app.integrations.rapidapi import justone
+        self._cfg_patch = patch.object(justone, "_primary_config", return_value=self._mock_cfg)
+        self._cfg_patch.start()
         douyin_quota.reset_for_tests()
 
     def tearDown(self):
+        self._cfg_patch.stop()
         self._qd.stop()
         self.engine.dispose()
 
@@ -364,6 +380,7 @@ class TestJustOneClientQuota(unittest.TestCase):
 
         with patch.object(justone.httpx, "Client", return_value=client), \
              patch.object(settings, "rapidapi_key", "test-key"), \
+             patch.object(settings, "douyin_rapidapi_primary_key", ""), \
              patch.object(settings, "douyin_rapidapi_host", "example.p.rapidapi.com"):
             with self.assertRaises(justone.JustOneQuotaError):
                 justone.fetch_user_videos("SEC123")
@@ -401,6 +418,7 @@ class TestJustOneClientQuota(unittest.TestCase):
 
         with patch.object(justone.httpx, "Client", return_value=client), \
              patch.object(settings, "rapidapi_key", "test-key"), \
+             patch.object(settings, "douyin_rapidapi_primary_key", ""), \
              patch.object(settings, "douyin_rapidapi_host", "example.p.rapidapi.com"):
             result = justone.fetch_user_videos("SEC123")
 

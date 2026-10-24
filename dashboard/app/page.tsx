@@ -328,11 +328,16 @@ async function DashboardView() {
                             {p.name}
                           </h3>
                         </div>
-                        {p.enabled ? (
-                          <Badge tone="green" dot>AUTO ON</Badge>
-                        ) : (
-                          <Badge tone="slate" dot>AUTO OFF</Badge>
-                        )}
+                        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                          {p.enabled ? (
+                            <Badge tone="green" dot>AUTO ON</Badge>
+                          ) : (
+                            <Badge tone="slate" dot>AUTO OFF</Badge>
+                          )}
+                          {p.enabled && (p.sources_count ?? 0) > 0 && (
+                            <Badge tone="indigo" dot>SCAN ON</Badge>
+                          )}
+                        </div>
                       </div>
 
                       <dl className="mt-4 grid grid-cols-3 gap-2 text-center">
@@ -356,7 +361,11 @@ async function DashboardView() {
                         <div className="mt-1.5">
                           <ProgressBar value={done} tone={p.failed > 0 ? "amber" : "indigo"} />
                         </div>
-                        {reasonLabel ? (
+                        {noInventory && p.enabled ? (
+                          <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] font-bold text-rose-700">
+                            Hết video khả dụng (0 video) · Tự bổ sung khi có video mới
+                          </p>
+                        ) : reasonLabel ? (
                           <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-700">
                             {reasonLabel}
                           </p>

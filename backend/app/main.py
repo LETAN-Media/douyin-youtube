@@ -173,6 +173,12 @@ async def lifespan(
     run_migrations()
 
     recover_incomplete_jobs()
+    try:
+        from app.douyin_import import recover_incomplete_scan_jobs
+
+        recover_incomplete_scan_jobs()
+    except Exception:
+        logger.exception("Failed to recover incomplete Douyin scan jobs")
 
     if settings.worker_enabled:
         worker_task = (
@@ -3435,6 +3441,96 @@ def get_source_inventory(
 
 
 @app.get(
+    "/api/sources/{source_id}/scan-jobs",
+    dependencies=[Depends(authenticate_request)],
+)
+def list_source_scan_jobs(
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    """List historical and active scan jobs for a source."""
+    source = require_source(db, source_id)
+    from app.models import DouyinScanJob
+
+    jobs = db.execute(
+        select(DouyinScanJob)
+        .where(DouyinScanJob.source_id == source.id)
+        .order_by(DouyinScanJob.created_at.desc())
+        .limit(20)
+    ).scalars().all()
+    return [
+        {
+            "id": j.id,
+            "source_id": j.source_id,
+            "pipeline_id": j.pipeline_id,
+            "workspace_id": j.workspace_id,
+            "scan_mode": j.scan_mode,
+            "status": j.status,
+            "cursor": j.cursor,
+            "pages_scanned": j.pages_scanned,
+            "videos_discovered": j.videos_discovered,
+            "videos_new": j.videos_new,
+            "videos_duplicate": j.videos_duplicate,
+            "stop_reason": j.stop_reason,
+            "error": j.error,
+            "provider_id": j.provider_id,
+            "retry_count": j.retry_count,
+            "started_at": j.started_at.isoformat() if j.started_at else None,
+            "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+            "created_at": j.created_at.isoformat() if j.created_at else None,
+        }
+        for j in jobs
+    ]
+
+
+@app.post(
+    "/api/sources/{source_id}/scan",
+    status_code=202,
+    dependencies=[Depends(authenticate_request)],
+)
+def queue_source_scan(
+    source_id: str,
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+):
+    """Trigger a scan job with explicit mode ('initial', 'replenish', 'manual_refresh')."""
+    source = require_source(db, source_id)
+    from app import douyin_import
+
+    if not douyin_import.can_start_import():
+        raise HTTPException(
+            status_code=429,
+            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
+        )
+
+    scan_mode = "initial"
+    resume = False
+    if payload and isinstance(payload, dict):
+        scan_mode = str(payload.get("mode") or "initial").strip()
+        resume = bool(payload.get("resume", False))
+
+    job = douyin_import.queue_scan_job(
+        db, source.id, scan_mode=scan_mode, resume=resume
+    )
+
+    import threading as _threading
+
+    _threading.Thread(
+        target=douyin_import.claim_and_run_scan_job,
+        args=(job.id,),
+        daemon=True,
+    ).start()
+
+    return {
+        "ok": True,
+        "job_id": job.id,
+        "source_id": source.id,
+        "scan_mode": job.scan_mode,
+        "status": job.status,
+    }
+
+
+@app.get(
     "/api/douyin/quota",
     response_model=DouyinQuotaOut,
     dependencies=[
@@ -5555,6 +5651,7 @@ def _source_stats_map(db: Session, source_ids: list[str]) -> dict[str, dict[str,
             "total": 0,
             "new": 0,
             "backlog": 0,
+            "inventory": 0,
             "scheduled": 0,
             "published": 0,
             "failed": 0,
@@ -5571,7 +5668,7 @@ def _source_stats_map(db: Session, source_ids: list[str]) -> dict[str, dict[str,
         if bucket is None:
             continue
         bucket["total"] += int(count or 0)
-        if status in ("new", "backlog", "scheduled", "published"):
+        if status in ("new", "backlog", "inventory", "scheduled", "published"):
             bucket[status] += int(count or 0)
 
     failed_rows = db.execute(
@@ -5661,11 +5758,20 @@ def _source_with_cookie_out(
         ),
         "saved_count": total,
         "new_count": int(stats.get("new") or 0),
-        "available_count": int(stats.get("new") or 0) + int(stats.get("backlog") or 0),
+        "available_count": (
+            int(stats.get("new") or 0)
+            + int(stats.get("backlog") or 0)
+            + int(stats.get("inventory") or 0)
+        ),
         "scheduled_count": int(stats.get("scheduled") or 0),
         "published_count": int(stats.get("published") or 0),
         "failed_count": int(stats.get("failed") or 0),
         "last_scan_at": last_scan,
+        "last_scan_stats": (
+            json.loads(s.last_scan_stats)
+            if isinstance(getattr(s, "last_scan_stats", None), str)
+            else getattr(s, "last_scan_stats", None)
+        ),
     }
 
 

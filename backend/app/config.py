@@ -216,6 +216,14 @@ class Settings(BaseSettings):
     # when a creator published more than one page of new videos.
     douyin_refresh_max_pages: int = 3
 
+    # Auto replenishment configuration (replaces unguided legacy crawl)
+    douyin_auto_replenish_enabled: bool = True
+    douyin_replenish_threshold: int = 3
+    douyin_refresh_min_interval_hours: int = 6
+    douyin_scan_max_concurrent_sources: int = 1
+    douyin_periodic_refresh_days: int = 7
+    douyin_known_pages_stop: int = 1
+
     # Douyin creator discovery NEVER runs on a schedule. The scheduler only
     # reads Inventory. Set true only for a deliberate one-off backfill.
     douyin_auto_scan_enabled: bool = False

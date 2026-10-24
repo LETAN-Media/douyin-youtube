@@ -1165,6 +1165,61 @@ def _apply_017(cache: SchemaCache, engine: Any) -> None:
             cache.add_column("douyin_sources", "last_scan_stats")
 
 
+# --- Migration 018: Douyin scan jobs queue ---
+def _verify_018(cache: SchemaCache, engine: Any) -> bool:
+    return cache.table_exists("douyin_scan_jobs")
+
+
+def _apply_018(cache: SchemaCache, engine: Any) -> None:
+    if not cache.table_exists("douyin_scan_jobs"):
+        ts_type = _timestamp_type(engine)
+        now_val = _now_expr(engine)
+        with log_step("create_table_douyin_scan_jobs"):
+            with engine.begin() as conn:
+                conn.execute(
+                    text(f"""
+                    CREATE TABLE IF NOT EXISTS douyin_scan_jobs (
+                        id VARCHAR(36) PRIMARY KEY,
+                        workspace_id VARCHAR(36),
+                        pipeline_id VARCHAR(36),
+                        source_id VARCHAR(36) NOT NULL,
+                        scan_mode VARCHAR(30) NOT NULL DEFAULT 'initial',
+                        status VARCHAR(30) NOT NULL DEFAULT 'pending',
+                        cursor VARCHAR(64),
+                        pages_scanned INTEGER NOT NULL DEFAULT 0,
+                        videos_discovered INTEGER NOT NULL DEFAULT 0,
+                        videos_new INTEGER NOT NULL DEFAULT 0,
+                        videos_duplicate INTEGER NOT NULL DEFAULT 0,
+                        stop_reason VARCHAR(50),
+                        error TEXT,
+                        provider_id VARCHAR(50),
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        next_retry_at {ts_type},
+                        locked_at {ts_type},
+                        locked_by VARCHAR(100),
+                        created_at {ts_type} NOT NULL DEFAULT {now_val},
+                        started_at {ts_type},
+                        completed_at {ts_type},
+                        updated_at {ts_type} NOT NULL DEFAULT {now_val}
+                    )
+                    """)
+                )
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_douyin_scan_jobs_source_id ON douyin_scan_jobs(source_id)")
+                )
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_douyin_scan_jobs_status ON douyin_scan_jobs(status)")
+                )
+            cache.add_table("douyin_scan_jobs", [
+                "id", "workspace_id", "pipeline_id", "source_id", "scan_mode", "status",
+                "cursor", "pages_scanned", "videos_discovered", "videos_new", "videos_duplicate",
+                "stop_reason", "error", "provider_id", "retry_count", "next_retry_at",
+                "locked_at", "locked_by", "created_at", "started_at", "completed_at", "updated_at"
+            ])
+            cache.add_index("douyin_scan_jobs", "ix_douyin_scan_jobs_source_id")
+            cache.add_index("douyin_scan_jobs", "ix_douyin_scan_jobs_status")
+
+
 # Registry of all migrations in chronological order
 MIGRATIONS = [
     MigrationDefinition("20240101_001_core_tables", "Core base tables", _verify_001, _apply_001),
@@ -1184,6 +1239,7 @@ MIGRATIONS = [
     MigrationDefinition("20240115_015_performance_indexes", "Channel workspace performance indexes", _verify_015, _apply_015),
     MigrationDefinition("20240116_016_douyin_video_duration", "Douyin video duration seconds", _verify_016, _apply_016),
     MigrationDefinition("20240117_017_douyin_source_scan_stats", "Douyin source last scan stats", _verify_017, _apply_017),
+    MigrationDefinition("20240118_018_douyin_scan_jobs", "Douyin scan jobs queue", _verify_018, _apply_018),
 ]
 
 

@@ -627,20 +627,33 @@ def process_job(
                 publish_at_utc = publish_at_utc.replace(tzinfo=timezone.utc)
             privacy_for_upload = MODE_TO_PRIVACY.get(publish_mode, "public")
 
+            # Layer C Dedup: check if job or publication already has youtube_video_id
+            existing_yt_id = getattr(job, "youtube_video_id", None)
+            if not existing_yt_id and _pub_for_upload is not None:
+                existing_yt_id = getattr(_pub_for_upload, "youtube_video_id", None)
+
             try:
-                video_id = upload_video(
-                    db=db,
-                    file_path=(
-                        download.file_path
-                    ),
-                    title=title,
-                    description=description,
-                    privacy_status=privacy_for_upload,
-                    pipeline_id=job.pipeline_id,
-                    destination_id=destination_id,
-                    publish_at=publish_at_utc,
-                    publish_mode=publish_mode,
-                )
+                if existing_yt_id:
+                    logger.info(
+                        "Job %s already has youtube_video_id=%s; skipping re-upload to YouTube",
+                        job_id,
+                        existing_yt_id,
+                    )
+                    video_id = existing_yt_id
+                else:
+                    video_id = upload_video(
+                        db=db,
+                        file_path=(
+                            download.file_path
+                        ),
+                        title=title,
+                        description=description,
+                        privacy_status=privacy_for_upload,
+                        pipeline_id=job.pipeline_id,
+                        destination_id=destination_id,
+                        publish_at=publish_at_utc,
+                        publish_mode=publish_mode,
+                    )
             except Exception as exc:
                 # Store exact normalized YouTube error (invalidPublishAt etc.)
                 try:

@@ -204,22 +204,115 @@ def _scan_one_source_impl(source_id: str) -> None:
         logger.exception("Failed to process source=%s", source_id)
 
 
+def count_available_inventory_for_source(db: Session, source_id: str) -> int:
+    """Number of unposted videos in pickable statuses for this source."""
+    from sqlalchemy import func
+    from app.models import DouyinVideo
+    from app.scheduler import PICKABLE_VIDEO_STATUSES
+
+    count = db.execute(
+        select(func.count(DouyinVideo.id))
+        .where(DouyinVideo.source_id == source_id)
+        .where(DouyinVideo.status.in_(PICKABLE_VIDEO_STATUSES))
+    ).scalar_one_or_none()
+    return int(count or 0)
+
+
+def check_and_schedule_replenishments(db: Session) -> list[str]:
+    """Evaluate sources for auto-replenishment when inventory is low or stale."""
+    if not getattr(settings, "douyin_auto_replenish_enabled", True):
+        return []
+
+    from app import douyin_import
+    from app.models import DouyinScanJob
+
+    if not douyin_import.can_start_import():
+        logger.info("RapidAPI quota floor reached; auto-replenishment skipped this cycle")
+        return []
+
+    now = utcnow()
+    threshold = int(getattr(settings, "douyin_replenish_threshold", 3) or 3)
+    min_interval_hours = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
+    periodic_days = float(getattr(settings, "douyin_periodic_refresh_days", 7.0) or 7.0)
+
+    sources = db.execute(
+        select(DouyinSource)
+        .where(DouyinSource.enabled == True)  # noqa: E712
+    ).scalars().all()
+
+    scheduled: list[str] = []
+    for source in sources:
+        pipeline = db.get(Pipeline, source.pipeline_id) if source.pipeline_id else None
+        if pipeline is None or not pipeline.enabled:
+            continue
+
+        # Check if an active scan job already exists
+        has_active_job = db.execute(
+            select(DouyinScanJob.id)
+            .where(DouyinScanJob.source_id == source.id)
+            .where(DouyinScanJob.status.in_(["pending", "running"]))
+            .limit(1)
+        ).scalar_one_or_none()
+        if has_active_job:
+            continue
+
+        # Cooldown check
+        last_scan = source.last_scan_at or source.last_refresh_at
+        if last_scan is not None:
+            if last_scan.tzinfo is None:
+                last_scan = last_scan.replace(tzinfo=timezone.utc)
+            elapsed_hours = (now - last_scan).total_seconds() / 3600.0
+            if elapsed_hours < min_interval_hours:
+                continue
+
+        available = count_available_inventory_for_source(db, source.id)
+        should_replenish = False
+        reason = ""
+
+        if available <= threshold:
+            should_replenish = True
+            reason = f"LOW_INVENTORY (available={available} <= {threshold})"
+        elif last_scan is not None:
+            elapsed_days = (now - last_scan).total_seconds() / 86400.0
+            if elapsed_days >= periodic_days:
+                should_replenish = True
+                reason = f"PERIODIC_REFRESH ({elapsed_days:.1f} days >= {periodic_days} days)"
+
+        if should_replenish:
+            logger.info("Scheduling replenish scan for source %s: %s", source.id, reason)
+            job = douyin_import.queue_scan_job(db, source.id, scan_mode="replenish")
+            scheduled.append(job.id)
+
+    return scheduled
+
+
 def run_monitor_once() -> None:
-    """Shared scheduler: every cycle scans sources where next_scan_at <= now.
+    """Monitor cycle: handles auto-replenishment, scan jobs execution, and legacy auto-scan."""
+    from app import douyin_import
 
-    Limited concurrency (DOUYIN_SCAN_CONCURRENCY, default 2). One failing
-    source never kills the cycle for the others.
+    # 1. Evaluate auto-replenishment
+    with SessionLocal() as db:
+        try:
+            scheduled_ids = check_and_schedule_replenishments(db)
+            if scheduled_ids:
+                logger.info("Scheduled %s replenishment scan job(s)", len(scheduled_ids))
+        except Exception:
+            logger.exception("Failed checking auto-replenishments")
 
-    Manual-inventory mode: when DOUYIN_AUTO_SCAN_ENABLED=false (the default)
-    this is a no-op — the loop stays alive but never polls Douyin, so no
-    RapidAPI quota is spent in the background. Inventory is refreshed only by
-    an admin action (see app.douyin_import).
-    """
+    # 2. Claim and run pending scan jobs up to max concurrency
+    max_concurrent = max(1, int(getattr(settings, "douyin_scan_max_concurrent_sources", 1) or 1))
+    for _ in range(max_concurrent):
+        try:
+            summary = douyin_import.claim_and_run_scan_job(worker_id="monitor_worker")
+            if summary is None:
+                break
+            logger.info("Executed scan job from queue: %s", summary)
+        except Exception:
+            logger.exception("Failed executing queued scan job")
+            break
+
+    # 3. Legacy auto-scan if enabled
     if not getattr(settings, "douyin_auto_scan_enabled", False):
-        logger.info(
-            "Douyin auto-scan disabled (DOUYIN_AUTO_SCAN_ENABLED=false); "
-            "monitor cycle is a no-op"
-        )
         return
 
     now = utcnow()

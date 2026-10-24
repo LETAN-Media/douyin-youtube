@@ -659,6 +659,12 @@ class DouyinSource(Base):
         nullable=True,
     )
 
+    scan_jobs: Mapped[list["DouyinScanJob"]] = relationship(
+        back_populates="source",
+        lazy="selectin",
+        cascade="all, delete-orphan",
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -670,6 +676,148 @@ class DouyinSource(Base):
         default=utcnow,
         onupdate=utcnow,
         nullable=False,
+    )
+
+
+class DouyinScanJob(Base):
+    """Database-backed scan queue for durable inventory discovery & replenishment."""
+
+    __tablename__ = "douyin_scan_jobs"
+
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    pipeline_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("pipelines.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    source_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("douyin_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # initial | replenish | manual_refresh | resume
+    scan_mode: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="initial",
+    )
+
+    # pending | running | paused_quota | partial | completed | failed
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="pending",
+        index=True,
+    )
+
+    cursor: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    pages_scanned: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    videos_discovered: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    videos_new: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    videos_duplicate: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    # END_OF_RESULTS | QUOTA_EXHAUSTED | MAX_PAGES_REACHED | KNOWN_REELS_REACHED | SAFETY_LIMIT | ERROR
+    stop_reason: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    provider_id: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    retry_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Worker lease lock
+    locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    locked_by: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+    )
+
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    source: Mapped["DouyinSource"] = relationship(
+        back_populates="scan_jobs",
     )
 
 

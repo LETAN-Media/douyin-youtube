@@ -238,10 +238,12 @@ def _upsert_videos(
         video_id = str(video.get("video_id") or "").strip()
         if not video_id:
             continue
+        # Multilayer dedup: query by pipeline_id and video_id to match both
+        # source-linked videos and legacy unlinked videos (source_id=NULL).
         existing = db.execute(
             select(DouyinVideo)
             .where(
-                DouyinVideo.source_id == source.id,
+                DouyinVideo.pipeline_id == pipeline.id,
                 DouyinVideo.video_id == video_id,
             )
             .limit(1)
@@ -255,6 +257,8 @@ def _upsert_videos(
         title = str(video.get("title") or "")[:200]
         description = str(video.get("description") or "")[:1000]
         url = str(video.get("url") or "")
+        if not url or url.rstrip("/").endswith(video_id) is False and "/video/" not in url:
+            url = f"https://www.douyin.com/video/{video_id}"
         thumbnail_url = str(
             video.get("thumbnail_url")
             or video.get("cover")
@@ -270,15 +274,21 @@ def _upsert_videos(
             duration = duration // 1000
 
         if existing is not None:
+            # If legacy video had source_id=NULL, link it to the source
+            if existing.source_id is None:
+                existing.source_id = source.id
             existing.title = title
             existing.description = description
-            existing.url = url
-            existing.douyin_created_at = douyin_created_at
-            existing.is_backlog = is_backlog
+            if url:
+                existing.url = url
+            if douyin_created_at:
+                existing.douyin_created_at = douyin_created_at
             if thumbnail_url:
                 existing.thumbnail_url = thumbnail_url
             if duration is not None:
                 existing.duration = duration
+            # CRITICAL: Preserve published/scheduled/in-progress status!
+            # Never revert published to new or backlog!
             if existing.status == "inventory":
                 existing.status = "backlog" if is_backlog else "new"
             updated_count += 1

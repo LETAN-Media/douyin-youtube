@@ -2284,19 +2284,20 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   const needsGlobalAuth = platform === "douyin" && douyinAccount && !douyinAccount.connected;
                   const importStatus = (source.initial_import_status || "pending").toLowerCase();
                   const importBusy = importingSourceId === source.id;
-                  const canResume = (importStatus === "paused_quota" || importStatus === "paused") && !!source.initial_import_cursor;
+                  const canResume = (importStatus === "paused_quota" || importStatus === "paused" || importStatus === "partial") && !!source.initial_import_cursor;
                   const showRefresh = importStatus === "completed";
                   const importLabel =
                     importStatus === "completed" ? "Đã import"
                     : importStatus === "running" ? "Đang import…"
                     : importStatus === "paused_quota" ? "Hết quota — có thể chạy tiếp"
                     : importStatus === "paused" ? "Tạm dừng — có thể chạy tiếp"
+                    : importStatus === "partial" ? "Chưa hết trang — có thể chạy tiếp"
                     : importStatus === "failed" ? "Import lỗi"
                     : "Chưa import";
                   const importTone =
                     importStatus === "completed" ? "green"
                     : importStatus === "failed" ? "red"
-                    : importStatus === "running" || importStatus === "paused_quota" || importStatus === "paused" ? "amber"
+                    : importStatus === "running" || importStatus === "paused_quota" || importStatus === "paused" || importStatus === "partial" ? "amber"
                     : "slate";
                   return (
                     <div key={source.id} className="flex flex-col gap-2 py-3.5 text-xs">
@@ -2311,7 +2312,11 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                             <span>Tìm thấy: <strong className="text-slate-800">{source.total_found ?? source.video_count ?? 0}</strong></span>
                             <span>· Đã lưu: <strong className="text-slate-800">{source.saved_count ?? source.video_count ?? 0}</strong></span>
                             <span>· Mới: <strong className="text-emerald-700">{source.new_count ?? 0}</strong></span>
-                            <span>· Khả dụng: <strong className="text-slate-800">{source.available_count ?? 0}</strong></span>
+                            <span>· Khả dụng: {((source.available_count ?? 0) === 0) ? (
+                              <strong className="rounded bg-rose-50 px-1 py-0.5 font-bold text-rose-700">0 video</strong>
+                            ) : (
+                              <strong className="text-slate-800">{source.available_count}</strong>
+                            )}</span>
                             <span>· Đã đăng: <strong className="text-slate-800">{source.published_count ?? 0}</strong></span>
                             {(source.failed_count ?? 0) > 0 && <span>· Lỗi: <strong className="text-rose-600">{source.failed_count}</strong></span>}
                             <span>· Trạng thái: <Badge tone={source.status === "syncing" || source.status === "running" ? "amber" : source.status === "auth_required" ? "red" : "slate"}>{source.status}</Badge></span>
@@ -2321,7 +2326,12 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                                 {(source.feed_provider || "rapidapi_justone") === "rapidapi_justone" ? "RapidAPI JustOne" : source.feed_provider}
                               </span>
                             )}
-                            {(importStatus === "running" || importStatus === "paused_quota" || importStatus === "paused") && (
+                            {platform === "douyin" && !isPaused && (
+                              <span className="rounded-md bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                                Replenish ON
+                              </span>
+                            )}
+                            {(importStatus === "running" || importStatus === "paused_quota" || importStatus === "paused" || importStatus === "partial") && (
                               <span>· Đã đọc <strong className="text-slate-800">{source.initial_import_pages ?? 0}</strong> trang / <strong className="text-slate-800">{source.initial_import_videos ?? 0}</strong> video</span>
                             )}
                             <span>· Scan cuối: <strong className="text-slate-700">{source.last_scan_at ? new Date(source.last_scan_at).toLocaleString() : "—"}</strong></span>
