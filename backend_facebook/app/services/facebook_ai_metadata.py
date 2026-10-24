@@ -49,6 +49,23 @@ Hashtags: 3-6 hashtag liên quan trực tiếp nội dung, không vô nghĩa, b�
 CHỈ trả đúng một JSON object, không markdown, không code fence, không text thừa:
 {"title": "...", "description": "...", "hashtags": ["#...", "#..."]}"""
 
+SHORTS_SYSTEM_PROMPT = """Bạn viết metadata YouTube SHORTS bằng TIẾNG VIỆT cho một Facebook Reel.
+Yêu cầu chung: tự nhiên, dễ hiểu, hấp dẫn; không spam/clickbait rẻ tiền;
+không bịa thông tin không có trong caption; không thêm tên người/sự kiện
+nếu nguồn không có; giữ đúng nội dung Reel; tối ưu để người Việt dễ đọc.
+
+Title cho SHORTS: tiếng Việt, tối đa 100 ký tự (ưu tiên 45-80 ký tự), KHÔNG ALL CAPS,
+không emoji quá mức. BẮT BUỘC thêm 2-4 hashtag LIÊN QUAN NỘI DUNG vào cuối title, cách nhau bởi dấu cách.
+Ví dụ: "GitHub Tuần Này Nóng Vì AI Coding Agents #GitHub #AICodingAgents #Coding #AI"
+
+Description: tiếng Việt, 1-3 đoạn ngắn, tóm tắt đúng nội dung, không bịa
+nguồn/thông tin, tối đa 1500 ký tự.
+
+Hashtags: 3-6 hashtag liên quan trực tiếp nội dung (đã dùng trong title cũng được), bắt đầu bằng #.
+
+CHỈ trả đúng một JSON object, không markdown, không code fence, không text thừa:
+{"title": "...", "description": "...", "hashtags": ["#...", "#..."]}"""
+
 # Legacy alias
 SYSTEM_PROMPT = BASE_SYSTEM_PROMPT
 
@@ -230,6 +247,7 @@ class FacebookMetadataGenerator:
         transport: httpx.AsyncBaseTransport | None = None,
         custom_system_prompt: str | None = None,
         language: str = "vi",
+        youtube_upload_mode: str = "video",
     ) -> None:
         if not config.api_key:
             raise MetadataError(CONFIG_MISSING, "TOOLNET_API_KEY is not configured.")
@@ -237,6 +255,7 @@ class FacebookMetadataGenerator:
         self._transport = transport
         self.custom_system_prompt = custom_system_prompt
         self.language = language or "vi"
+        self.youtube_upload_mode = youtube_upload_mode or "video"
 
     @classmethod
     def from_settings(
@@ -277,7 +296,12 @@ class FacebookMetadataGenerator:
             + (f"URL nguồn: {reel_url}\n" if reel_url else "")
             + "Hãy tạo metadata theo đúng yêu cầu hệ thống."
         )
-        effective_prompt = BASE_SYSTEM_PROMPT
+        # Choose prompt based on upload mode
+        if self.youtube_upload_mode in ("shorts", "both"):
+            effective_prompt = SHORTS_SYSTEM_PROMPT
+        else:
+            effective_prompt = BASE_SYSTEM_PROMPT
+        
         lang = (self.language or "vi").strip().lower()
         if lang != "vi":
             effective_prompt += f"\n\nNgôn ngữ đầu ra ưu tiên: {lang}."
@@ -442,6 +466,15 @@ async def ensure_ai_metadata(
 
     generator.custom_system_prompt = pipeline_settings.get("system_prompt") or ""
     generator.language = pipeline_settings.get("language") or "vi"
+    
+    # Get youtube_upload_mode from pipeline
+    youtube_upload_mode = "video"
+    if target_pipeline_id:
+        from ..db.repositories import pipelines as pipeline_repo
+        pipeline = await pipeline_repo.get_pipeline(target_pipeline_id)
+        if pipeline:
+            youtube_upload_mode = pipeline.get("youtube_upload_mode", "video")
+    generator.youtube_upload_mode = youtube_upload_mode
 
     generated = await generator.generate(
         reel.get("reel_id") or reel_db_id,
