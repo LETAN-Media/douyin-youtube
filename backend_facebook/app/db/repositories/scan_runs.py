@@ -70,13 +70,18 @@ async def get_scan_run(scan_run_id: str) -> dict[str, Any] | None:
     return _row_to_dict(rows.rows[0])
 
 
-async def list_scan_runs(source_id: str) -> list[dict[str, Any]]:
+async def list_scan_runs(source_id: str, limit: int = 20, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
     client = get_client()
     rows = await client.execute(
-        f"SELECT {_COLUMNS} FROM scan_runs WHERE source_id = :source_id ORDER BY started_at DESC",
+        f"SELECT {_COLUMNS} FROM scan_runs WHERE source_id = :source_id ORDER BY started_at DESC LIMIT :limit OFFSET :offset",
+        {"source_id": source_id, "limit": limit, "offset": offset},
+    )
+    count_rows = await client.execute(
+        "SELECT COUNT(*) FROM scan_runs WHERE source_id = :source_id",
         {"source_id": source_id},
     )
-    return [_row_to_dict(r) for r in rows.rows]
+    total = count_rows.rows[0][0] if count_rows.rows else 0
+    return [_row_to_dict(r) for r in rows.rows], total
 
 
 async def latest_scan_run(source_id: str) -> dict[str, Any] | None:

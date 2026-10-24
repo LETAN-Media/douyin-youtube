@@ -547,9 +547,9 @@ def test_scan_mode_auto_and_explicit(db, monkeypatch, no_sleep) -> None:
     assert r.status_code == 409  # already queued from previous line
     r = client.post(f"/api/facebook/sources/{fresh_src['id']}/scan?mode=bogus", headers=AUTH_HEADERS)
     assert r.status_code == 400
-    runs = asyncio.run(scan_runs.list_scan_runs(done_src["id"]))
+    runs, _ = asyncio.run(scan_runs.list_scan_runs(done_src["id"]))
     assert runs and runs[0]["scan_mode"] == "incremental"
-    runs = asyncio.run(scan_runs.list_scan_runs(fresh_src["id"]))
+    runs, _ = asyncio.run(scan_runs.list_scan_runs(fresh_src["id"]))
     assert runs and runs[0]["scan_mode"] == "initial"
 
 

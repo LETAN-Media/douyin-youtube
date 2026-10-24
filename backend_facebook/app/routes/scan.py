@@ -326,9 +326,13 @@ async def get_scan_status(scan_run_id: str) -> dict:
 
 
 @router.get("/sources/{source_id}/scan-runs")
-async def list_source_scans(source_id: str) -> list[dict]:
+async def list_source_scans(
+    source_id: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
     source = await sources.get_source(source_id)
     if source is None:
         raise _err(404, "SOURCE_NOT_FOUND", "Source not found")
-    rows = await scan_runs.list_scan_runs(source_id)
-    return [_scan_response(r) for r in rows]
+    items, total = await scan_runs.list_scan_runs(source_id, limit=limit, offset=offset)
+    return {"items": [_scan_response(r) for r in items], "total": total}
