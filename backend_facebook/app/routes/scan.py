@@ -160,8 +160,10 @@ async def run_initial_scan(
 
     try:
         client = _client_from_settings()
-        # Use page_id directly instead of resolving reels_page_id (saves 1 API call per scan)
-        reels_page_id = source["page_id"]
+        reels_page_id = await client.resolve_reels_page_id(
+            _page_url_for(source), transport=transport
+        )
+        pages += 1  # resolve request counts toward safety budget
 
         cursor: str | None = None
         seen_cursors: set[str] = set()
