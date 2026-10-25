@@ -3348,23 +3348,16 @@ def start_initial_import(
     """Start the one-off full backlog import (pages until has_more=false).
 
     Runs in the background; dashboard polls GET /api/sources/{id} and can read
-    progress from initial_import_status/initial_import_pages. No RapidAPI
-    request is spent if quota is already at the safety floor.
+    progress from initial_import_status/initial_import_pages.
+    Self-hosted API is used for all Douyin discovery - no RapidAPI quota needed.
     """
     from app import douyin_import
 
     source = require_source(db, source_id)
 
-    quota = douyin_import.quota_status()
-    if not douyin_quota_can_start():
-        raise HTTPException(
-            status_code=429,
-            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
-        )
-
     queue_initial_import(db, source)
     return SourceImportResponse(
-        source_id=source_id, status="queued", quota=DouyinQuotaOut(**quota)
+        source_id=source_id, status="queued"
     )
 
 
@@ -3390,18 +3383,10 @@ def resume_initial_import(
             detail="Không có cursor để chạy tiếp — chạy import từ đầu",
         )
 
-    quota = douyin_import.quota_status()
-    if not douyin_quota_can_start():
-        raise HTTPException(
-            status_code=429,
-            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
-        )
-
     cursor = source.initial_import_cursor
     queue_initial_import(db, source, resume=True)
     return SourceImportResponse(
-        source_id=source_id, status="queued", cursor=cursor,
-        quota=DouyinQuotaOut(**quota),
+        source_id=source_id, status="queued", cursor=cursor
     )
 
 
@@ -3422,13 +3407,6 @@ def refresh_source_now(
 
     source = require_source(db, source_id)
 
-    quota = douyin_import.quota_status()
-    if not douyin_quota_can_start():
-        raise HTTPException(
-            status_code=429,
-            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
-        )
-
     source.inventory_sync_status = "queued"
     source.inventory_sync_error = None
     db.commit()
@@ -3439,7 +3417,7 @@ def refresh_source_now(
         target=trigger_inventory_sync_job, args=(source_id, "latest"), daemon=True
     ).start()
     return SourceImportResponse(
-        source_id=source_id, status="queued", quota=DouyinQuotaOut(**quota)
+        source_id=source_id, status="queued"
     )
 
 
@@ -3539,13 +3517,6 @@ def queue_source_scan(
     if payload and isinstance(payload, dict):
         scan_mode = str(payload.get("mode") or "replenish").strip()
         resume = bool(payload.get("resume", False))
-
-    # Quota gate only applies to RapidAPI-based providers
-    if scan_mode == "initial" and not douyin_import.can_start_import():
-        raise HTTPException(
-            status_code=429,
-            detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
-        )
 
     job = douyin_import.queue_scan_job(
         db, source.id, scan_mode=scan_mode, resume=resume
@@ -5527,15 +5498,6 @@ def queue_initial_import(
 ) -> bool:
     """Mark an initial import running and start it outside the request."""
     from app import douyin_import
-
-    if not douyin_import.can_start_import():
-        source.initial_import_status = "paused_quota"
-        source.inventory_sync_status = "paused_quota"
-        source.initial_import_last_error = (
-            "RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này"
-        )
-        db.commit()
-        return False
 
     source.initial_import_status = "running"
     source.initial_import_last_error = None
