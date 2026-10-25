@@ -3530,6 +3530,38 @@ def queue_source_scan(
     }
 
 
+@app.post(
+    "/api/sources/{source_id}/scan-self-hosted",
+    dependencies=[Depends(authenticate_request)],
+)
+def trigger_self_hosted_scan(
+    source_id: str,
+    payload: dict | None = None,
+    db: Session = Depends(get_db),
+):
+    """Trigger an immediate scan using the self-hosted Douyin video URL extractor API."""
+    source = require_source(db, source_id)
+    from app import douyin_import
+
+    max_count = None
+    if payload and isinstance(payload, dict):
+        try:
+            max_count = int(payload.get("max_count") or 0) or None
+        except (ValueError, TypeError):
+            max_count = None
+
+    summary = douyin_import.scan_source_self_hosted(source.id, max_count=max_count)
+    return {
+        "ok": summary.get("status") in ("completed", "ok"),
+        "status": summary.get("status", "unknown"),
+        "source_id": source.id,
+        "new_videos": summary.get("new", 0),
+        "total_videos": summary.get("videos", 0),
+        "provider": summary.get("provider", "douyin_self_hosted"),
+        "error": summary.get("error"),
+    }
+
+
 @app.get(
     "/api/douyin/quota",
     response_model=DouyinQuotaOut,

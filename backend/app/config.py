@@ -224,6 +224,14 @@ class Settings(BaseSettings):
     douyin_periodic_refresh_days: int = 7
     douyin_known_pages_stop: int = 1
 
+    # Self-hosted Douyin fallback API (unlimited URL discovery when RapidAPI fails/exhausted)
+    douyin_self_hosted_enabled: bool = True
+    douyin_self_hosted_api_base_url: str = "http://162.4.177.109:8088"
+    douyin_self_hosted_api_fallback_url: str = "https://douyin-api-8xzt.onrender.com"
+    douyin_self_hosted_api_key: str = "api_key_0905132580"
+    douyin_self_hosted_timeout_seconds: float = 120.0
+    douyin_self_hosted_max_count: int = 200
+
     # Douyin creator discovery NEVER runs on a schedule. The scheduler only
     # reads Inventory. Set true only for a deliberate one-off backfill.
     douyin_auto_scan_enabled: bool = False

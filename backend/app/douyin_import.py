@@ -440,6 +440,171 @@ def claim_and_run_scan_job(
     return execute_scan_job(claimed_id, worker_id=worker_id)
 
 
+def _execute_self_hosted_fallback(
+    *,
+    job_id: str | None,
+    source_id: str,
+    pipeline_id: str,
+    profile_url: str,
+    original_profile_url: str | None,
+    sec_uid: str,
+    scan_mode: str,
+    is_backlog: bool,
+    existing_error: str | None = None,
+) -> dict[str, Any] | None:
+    """Fallback scanner using self-hosted Douyin API when RapidAPI pool fails."""
+    if not getattr(settings, "douyin_self_hosted_enabled", True):
+        return None
+
+    target_url = (
+        (original_profile_url or "").strip()
+        or (profile_url or "").strip()
+        or (f"https://www.douyin.com/user/{sec_uid}" if sec_uid else "")
+    )
+    if not target_url:
+        return None
+
+    logger.info(
+        "RapidAPI failed (%s); attempting Douyin self-hosted fallback for source=%s url=%s",
+        (existing_error or "")[:120],
+        source_id,
+        target_url,
+    )
+
+    try:
+        from app.douyin_self_hosted import DouyinSelfHostedClient
+        client = DouyinSelfHostedClient()
+        items = client.fetch_video_items(
+            target_url,
+            max_count=int(getattr(settings, "douyin_self_hosted_max_count", 200) or 200),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Douyin self-hosted fallback failed for source=%s: %s",
+            source_id,
+            exc,
+        )
+        return None
+
+    new_count, updated_count = _persist_page(
+        source_id=source_id,
+        items=items,
+        backfill=is_backlog,
+        cursor=None,
+        provider_id="douyin_self_hosted",
+    )
+
+    status = STATUS_COMPLETED
+    stop_reason = STOP_REASON_END_OF_RESULTS
+    duplicate_count = max(0, len(items) - new_count)
+
+    scan_stats = {
+        "job_id": job_id,
+        "scan_mode": scan_mode,
+        "provider": "douyin_self_hosted",
+        "pages": 1,
+        "found": len(items),
+        "new": new_count,
+        "duplicates": duplicate_count,
+        "status": status,
+        "stop_reason": stop_reason,
+    }
+
+    if job_id:
+        with SessionLocal.begin() as db:
+            j = db.get(DouyinScanJob, job_id)
+            if j:
+                j.status = status
+                j.stop_reason = stop_reason
+                j.provider_id = "douyin_self_hosted"
+                j.pages_scanned = 1
+                j.videos_discovered = len(items)
+                j.videos_new = new_count
+                j.videos_duplicate = duplicate_count
+                j.error = None
+                j.completed_at = utcnow()
+                j.locked_at = None
+                j.locked_by = None
+
+    if is_backlog:
+        _finish(
+            source_id,
+            status,
+            provider_status=PROVIDER_OK,
+            detail=f"Discovered {len(items)} videos ({new_count} new) via self-hosted fallback",
+            completed=True,
+            provider_id="douyin_self_hosted",
+            scan_stats=scan_stats,
+        )
+    else:
+        with SessionLocal.begin() as db:
+            source = db.get(DouyinSource, source_id)
+            if source is not None:
+                source.last_refresh_at = utcnow()
+                source.last_scan_at = utcnow()
+                source.provider_status = PROVIDER_OK
+                source.provider_status_detail = f"Discovered {len(items)} videos ({new_count} new) via self-hosted fallback"
+                source.feed_provider = "douyin_self_hosted"
+                source.last_scan_stats = json.dumps(scan_stats, ensure_ascii=False)
+                source.inventory_sync_status = "completed"
+                source.inventory_sync_error = None
+                source.inventory_synced_at = utcnow()
+                source.last_checked_at = utcnow()
+
+    logger.info(
+        "Self-hosted fallback completed for source=%s: found=%d new=%d duplicates=%d",
+        source_id,
+        len(items),
+        new_count,
+        duplicate_count,
+    )
+
+    return _summary(
+        source_id,
+        status,
+        new=new_count,
+        updated=updated_count,
+        pages=1,
+        videos=len(items),
+        provider="douyin_self_hosted",
+    )
+
+
+def scan_source_self_hosted(source_id: str, max_count: int | None = None) -> dict[str, Any]:
+    """Explicitly scan a Douyin source using the self-hosted API."""
+    with SessionLocal() as db:
+        source = db.get(DouyinSource, source_id)
+        if source is None:
+            return _summary(source_id, STATUS_FAILED, error="Source not found")
+        pipeline_id = source.pipeline_id
+        profile_url = source.profile_url or ""
+        original_profile_url = source.original_profile_url
+        sec_uid = source.douyin_sec_uid or ""
+
+    if not _claim(source_id):
+        return _summary(source_id, "already_running")
+
+    try:
+        job = queue_scan_job(source_id, mode="manual_refresh")
+        job_id = job.id if job else None
+
+        res = _execute_self_hosted_fallback(
+            job_id=job_id,
+            source_id=source_id,
+            pipeline_id=pipeline_id,
+            profile_url=profile_url,
+            original_profile_url=original_profile_url,
+            sec_uid=sec_uid,
+            scan_mode="manual_refresh",
+            is_backlog=False,
+        )
+        if res is not None:
+            return res
+        return _summary(source_id, STATUS_FAILED, error="Self-hosted scan failed to execute")
+    finally:
+        _release(source_id)
+
+
 def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
     """Execute a claimed DouyinScanJob, handling initial or incremental scan."""
     with SessionLocal() as db:
@@ -495,6 +660,7 @@ def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
                 return _summary(source_id, STATUS_FAILED, error=err_msg)
 
             profile_url = source.profile_url or ""
+            original_profile_url = source.original_profile_url
             pipeline_id = source.pipeline_id
             stored_cursor = source.initial_import_cursor
             preferred_provider_id = (
@@ -526,6 +692,19 @@ def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
                 preferred_provider_id=preferred_provider_id,
             )
         except RapidApiPoolError as exc:
+            fallback_res = _execute_self_hosted_fallback(
+                job_id=job_id,
+                source_id=source_id,
+                pipeline_id=pipeline_id,
+                profile_url=profile_url,
+                original_profile_url=original_profile_url,
+                sec_uid=sec_uid,
+                scan_mode=scan_mode,
+                is_backlog=is_backlog,
+                existing_error=exc.summary(),
+            )
+            if fallback_res is not None:
+                return fallback_res
             error = exc.summary()
             status = STATUS_PAUSED_QUOTA if exc.quota_exhausted else STATUS_FAILED
             provider_status = PROVIDER_QUOTA if exc.quota_exhausted else PROVIDER_ERROR
@@ -624,6 +803,20 @@ def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
             try:
                 page = page_source.fetch_page(cursor)
             except RapidApiPoolError as exc:
+                if pages == 0:
+                    fallback_res = _execute_self_hosted_fallback(
+                        job_id=job_id,
+                        source_id=source_id,
+                        pipeline_id=pipeline_id,
+                        profile_url=profile_url,
+                        original_profile_url=original_profile_url,
+                        sec_uid=sec_uid,
+                        scan_mode=scan_mode,
+                        is_backlog=is_backlog,
+                        existing_error=exc.summary(),
+                    )
+                    if fallback_res is not None:
+                        return fallback_res
                 status = (
                     STATUS_PAUSED_QUOTA
                     if exc.quota_exhausted
@@ -640,6 +833,20 @@ def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
                 error = exc.summary()[:2000]
                 break
             except douyin_quota.QuotaExhausted as exc:
+                if pages == 0:
+                    fallback_res = _execute_self_hosted_fallback(
+                        job_id=job_id,
+                        source_id=source_id,
+                        pipeline_id=pipeline_id,
+                        profile_url=profile_url,
+                        original_profile_url=original_profile_url,
+                        sec_uid=sec_uid,
+                        scan_mode=scan_mode,
+                        is_backlog=is_backlog,
+                        existing_error=str(exc),
+                    )
+                    if fallback_res is not None:
+                        return fallback_res
                 status = STATUS_PAUSED_QUOTA
                 stop_reason = STOP_REASON_QUOTA_EXHAUSTED
                 provider_status = PROVIDER_QUOTA
@@ -930,4 +1137,5 @@ __all__ = [
     "quota_status",
     "recover_incomplete_scan_jobs",
     "refresh_source",
+    "scan_source_self_hosted",
 ]
