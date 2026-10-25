@@ -1683,10 +1683,30 @@ def create_pipeline_source(
     original_profile_url = profile_url
 
     if profile_url and not douyin_sec_uid:
-        parsed = parse_douyin_profile_url(profile_url)
+        try:
+            parsed = parse_douyin_profile_url(profile_url)
+        except Exception:
+            parsed = None
         if parsed:
             douyin_sec_uid = parsed.sec_uid
             profile_url = parsed.canonical
+
+    # Duplicate prevention: same sec_uid within the same pipeline
+    if douyin_sec_uid:
+        existing = db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == pipeline_id)
+            .where(DouyinSource.douyin_sec_uid == douyin_sec_uid)
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Nguồn trùng lặp: creator này (secUid) đã tồn tại trong pipeline. "
+                    f"ID: {existing.id}"
+                ),
+            )
 
     source = DouyinSource(
         pipeline_id=pipeline_id,
@@ -3282,27 +3302,34 @@ def sync_source_now(
         get_db
     ),
 ) -> SourceSyncResponse:
-    """Queue a source sync and return <500ms. Worker runs in background.
+    """Queue a source sync via the durable DouyinScanJob queue and return <500ms.
 
     Flow: queued -> running -> completed/failed/auth_required.
     Dashboard must poll GET /api/sources/{id} every 2-5s.
     """
     source = require_source(db, source_id)
 
+    from app import douyin_import
+
     source.inventory_sync_status = "queued"
     source.inventory_sync_error = None
     db.commit()
 
+    job = douyin_import.queue_scan_job(db, source.id, scan_mode="replenish")
+
     import threading as _threading
 
     _threading.Thread(
-        target=trigger_inventory_sync_job, args=(source_id, "full"), daemon=True
+        target=douyin_import.claim_and_run_scan_job,
+        args=(job.id,),
+        daemon=True,
     ).start()
     return SourceSyncResponse(
         source_id=source.id,
         status="queued",
         new=0,
         updated=0,
+        job_id=job.id,
     )
 
 
@@ -3493,25 +3520,39 @@ def queue_source_scan(
     payload: dict | None = None,
     db: Session = Depends(get_db),
 ):
-    """Trigger a scan job with explicit mode ('initial', 'replenish', 'manual_refresh')."""
+    """Trigger a scan job with explicit mode ('initial', 'replenish', 'manual_refresh').
+
+    Consolidated route — handles both manual-inventory and AUTO-mode sources.
+    Uses the durable DouyinScanJob queue so progress survives restarts.
+    """
     source = require_source(db, source_id)
     from app import douyin_import
 
-    if not douyin_import.can_start_import():
+    if source.needs_reauth:
+        raise HTTPException(
+            status_code=409,
+            detail="DOUYIN_COOKIE_EXPIRED: cập nhật cookie trước khi scan",
+        )
+
+    scan_mode = "replenish"
+    resume = False
+    if payload and isinstance(payload, dict):
+        scan_mode = str(payload.get("mode") or "replenish").strip()
+        resume = bool(payload.get("resume", False))
+
+    # Quota gate only applies to RapidAPI-based providers
+    if scan_mode == "initial" and not douyin_import.can_start_import():
         raise HTTPException(
             status_code=429,
             detail="RAPIDAPI_QUOTA_EXHAUSTED: hết quota RapidAPI tháng này",
         )
 
-    scan_mode = "initial"
-    resume = False
-    if payload and isinstance(payload, dict):
-        scan_mode = str(payload.get("mode") or "initial").strip()
-        resume = bool(payload.get("resume", False))
-
     job = douyin_import.queue_scan_job(
         db, source.id, scan_mode=scan_mode, resume=resume
     )
+
+    source.next_scan_at = _utcnow()
+    db.commit()
 
     import threading as _threading
 
@@ -4166,7 +4207,11 @@ def resolve_douyin_input(raw_input: str) -> dict[str, Any]:
         source_url = url_match.group(0)
 
     # 1. Direct profile check
-    prof = parse_douyin_profile_url(source_url)
+    prof = None
+    try:
+        prof = parse_douyin_profile_url(source_url)
+    except Exception:
+        prof = None
     if prof is not None:
         return {
             "type": "profile",
@@ -4196,7 +4241,11 @@ def resolve_douyin_input(raw_input: str) -> dict[str, Any]:
         logger.warning("Failed to follow redirect for %s: %s", source_url, exc)
 
     # 3. Check redirected URL for profile
-    prof_redirect = parse_douyin_profile_url(final_url)
+    prof_redirect = None
+    try:
+        prof_redirect = parse_douyin_profile_url(final_url)
+    except Exception:
+        prof_redirect = None
     if prof_redirect is not None or "/user/" in final_url or "/share/user/" in final_url:
         sec_uid = prof_redirect.sec_uid if prof_redirect else None
         if not sec_uid:
@@ -5576,10 +5625,32 @@ def add_channel_source_endpoint(
             "platform": "facebook",
         }
 
-    from app.douyin import parse_profile_url
-    parsed = parse_profile_url(url)
-    sec_uid = parsed.get("sec_uid")
-    clean_url = parsed.get("clean_url") or url
+    from app.douyin_url import parse_douyin_profile_url as _parse_profile_url, DouyinUrlError
+    try:
+        parsed = _parse_profile_url(url)
+    except DouyinUrlError:
+        raise HTTPException(
+            status_code=400,
+            detail="URL video không hợp lệ — vui lòng dùng link profile/trang chủ tác giả",
+        )
+    sec_uid = parsed.sec_uid if parsed else None
+    clean_url = (parsed.canonical if parsed else None) or url
+
+    if sec_uid:
+        existing = db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == d.pipeline_id)
+            .where(DouyinSource.douyin_sec_uid == sec_uid)
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Nguồn trùng lặp: creator này (secUid {sec_uid}) đã tồn tại trong pipeline. "
+                    f"ID: {existing.id}"
+                ),
+            )
 
     source = DouyinSource(
         pipeline_id=d.pipeline_id,
@@ -5905,27 +5976,6 @@ def test_source_cookie_endpoint(
         msg = str(exc)
         code = 410 if msg.startswith("COOKIE_EXPIRED") else 502
         raise HTTPException(status_code=code, detail=msg)
-
-
-@app.post(
-    "/api/sources/{source_id}/scan",
-    dependencies=[Depends(authenticate_request)],
-)
-def scan_source_now_endpoint(
-    source_id: str,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    s = require_source(db, source_id)
-    if s.needs_reauth:
-        raise HTTPException(
-            status_code=409,
-            detail="DOUYIN_COOKIE_EXPIRED: cập nhật cookie trước khi scan",
-        )
-    s.next_scan_at = _utcnow()
-    db.commit()
-    background_tasks.add_task(trigger_inventory_sync_job, s.id, "latest")
-    return {"ok": True, "source_id": s.id}
 
 
 @app.post(

@@ -4,6 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+from app.douyin_url import parse_douyin_profile_url
 from app.models import PlatformAccount
 
 logger = logging.getLogger("douyin-youtube-providers")
@@ -37,14 +38,19 @@ class DouyinProvider(SourceProvider):
             return test_platform_account(db, "douyin")
 
     def resolve_source(self, url: str) -> dict[str, Any]:
-        from app.douyin import parse_profile_url
-        parsed = parse_profile_url(url)
-        sec_uid = parsed.get("sec_uid") if parsed else None
-        clean = parsed.get("clean_url") if parsed else url
+        parsed = parse_douyin_profile_url(url)
+        if parsed is None:
+            return {
+                "platform": "douyin",
+                "source_external_id": None,
+                "source_url": url,
+                "source_name": None,
+            }
+        result = parsed.as_dict()
         return {
             "platform": "douyin",
-            "source_external_id": sec_uid,
-            "source_url": clean or url,
+            "source_external_id": result["sec_uid"],
+            "source_url": result["clean_url"] or url,
             "source_name": None,
         }
 

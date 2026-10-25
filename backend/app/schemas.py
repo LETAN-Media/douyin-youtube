@@ -786,6 +786,7 @@ class SourceSyncResponse(BaseModel):
     status: str
     new: int = 0
     updated: int = 0
+    job_id: str | None = None
 
 
 class DouyinQuotaOut(BaseModel):

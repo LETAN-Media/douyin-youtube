@@ -236,6 +236,7 @@ export async function syncSource(id: string): Promise<{
   status: string;
   new: number;
   updated: number;
+  job_id?: string | null;
 }> {
   return apiFetch(`/api/sources/${encodeURIComponent(id)}/sync`, {
     method: "POST",

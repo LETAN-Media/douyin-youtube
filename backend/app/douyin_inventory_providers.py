@@ -385,6 +385,181 @@ class YtDlpDouyinInventoryProvider(DouyinInventoryProvider):
         return legacy_fetch(profile_url, source_id)
 
 
+
+class SelfHostedDouyinProvider(DouyinInventoryProvider):
+    """PRIMARY creator feed via self-hosted Douyin API.
+
+    Live-verified 2026-10-25: Direct API calls to http://162.4.177.109:8088
+    and fallback to https://douyin-api-8xzt.onrender.com.
+
+    No cookies required, no RapidAPI quota consumed.
+    Uses configured API key from environment (DOUYIN_SELF_HOSTED_API_KEY).
+    """
+
+    name = "self_hosted"
+    uses_rapidapi_quota = False
+
+    def fetch_all(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._fetch(sec_uid or profile_url, full=True)
+
+    def fetch_latest(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        limit: int = 30,
+        cookie_jar: list[dict[str, Any]] | None = None,
+        only_cookies: bool = False,
+    ) -> list[dict[str, Any]]:
+        videos = self._fetch(sec_uid or profile_url, full=False)
+        return videos[:limit]
+
+    def fetch_page(
+        self,
+        sec_uid_or_url: str,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch exactly ONE page, normalized.
+
+        Returns {"items": [...], "has_more": bool, "next_cursor": str}.
+        The caller owns pagination so it can enforce limits and resume
+        from a stored cursor.
+        """
+        return self._fetch_page(sec_uid_or_url, cursor)
+
+    def fetch_all_with_provider(
+        self,
+        profile_url: str,
+        sec_uid: str,
+        source_id: str,
+        cookie_jar: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Fetch all pages and return provider name for logging."""
+        videos = self.fetch_all(profile_url, sec_uid, source_id, cookie_jar)
+        return videos, self.name
+
+    def _fetch(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
+        """Fetch all or latest videos from self-hosted API."""
+        sec_uid = self._resolve_sec_uid(sec_uid_or_url)
+        if not sec_uid:
+            raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
+
+        from app.douyin_self_hosted import DouyinSelfHostedClient
+
+        client = DouyinSelfHostedClient()
+        try:
+            items = client.fetch_video_items(sec_uid)
+        except Exception as exc:
+            if "DOUYIN_SELF_HOSTED_ENABLED" in str(exc):
+                raise DouyinInventoryError("PROVIDER_DISABLED: self-hosted API disabled")
+            if "NO_KEY" in str(exc):
+                raise DouyinInventoryError("PROVIDER_DISABLED: self-hosted API key not configured")
+            raise DouyinInventoryError(f"PROVIDER_ERROR: {exc}")
+
+        normalized = [self._normalize_item(item) for item in items]
+
+        if full:
+            return normalized
+
+        # Return only newest 30 for quick scans (e.g., 'latest')
+        return normalized[:30]
+
+    def _fetch_page(self, sec_uid_or_url: str, cursor: str | None) -> dict[str, Any]:
+        """Fetch ONE page from self-hosted API.
+
+        Note: self-hosted API does not support cursor-based pagination,
+        so we always fetch all items and return them as a single page.
+        For compatibility with the provider interface, we set has_more to False.
+        """
+        try:
+            items = self._fetch(sec_uid_or_url, full=True)
+        except DouyinInventoryError as exc:
+            raise exc
+
+        return {
+            "items": items,
+            "has_more": False,
+            "next_cursor": "",
+        }
+
+    @staticmethod
+    def _resolve_sec_uid(value: str) -> str | None:
+        """Extract sec_uid from profile URL or raw sec_uid."""
+        if not value:
+            return None
+
+        text = value.strip().rstrip("/")
+        # Check if it's already a numeric sec_uid
+        if text.isalnum():
+            return text
+
+        # Extract from profile URL
+        import re
+        # Try /user/ pattern first (most common)
+        m = re.search(r"/user/([A-Za-z0-9_-]+)", text)
+        if m:
+            return m.group(1)
+
+        # Try /share/user/ pattern
+        m = re.search(r"/share/user/([A-Za-z0-9_-]+)", text)
+        if m:
+            return m.group(1)
+
+        # Fallback: last path component
+        return text.split("/")[-1].split("?")[0]
+
+    @staticmethod
+    def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
+        """Convert raw API response item to normalized video dict."""
+        aweme_id = str(item.get("video_id") or item.get("aweme_id") or "").strip()
+        if not aweme_id:
+            return {}
+
+        share_url = str(item.get("share_url") or item.get("url") or "").strip()
+        if not share_url:
+            share_url = f"https://www.douyin.com/video/{aweme_id}"
+
+        caption = str(item.get("caption") or item.get("title") or "").strip()
+        try:
+            ts = int(item.get("created_at") or item.get("douyin_created_at") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+
+        douyin_created_at = None
+        if ts > 0:
+            from datetime import datetime, timezone
+            douyin_created_at = datetime.fromtimestamp(ts, tz=timezone.utc)
+
+        return {
+            "video_id": aweme_id,
+            "aweme_id": aweme_id,
+            "title": caption[:200] if caption else aweme_id,
+            "description": caption[:1000],
+            "url": share_url,
+            "douyin_created_at": douyin_created_at,
+            "author": "",
+            "cover": str(item.get("thumbnail_url") or item.get("cover") or ""),
+            "duration": _coerce_duration(item),
+            "share_url": share_url,
+        }
+
+
+def _coerce_duration(item: dict[str, Any]) -> int:
+    """Coerce duration from various possible fields."""
+    for key in ("duration", "video_duration", "length"):
+        val = item.get(key)
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str) and val.isdigit():
+            return int(val)
+    return 0
+
 class HttpDouyinFeedProvider(DouyinInventoryProvider):
     """Primary creator feed via direct Douyin web API (no browser).
 
@@ -1384,21 +1559,20 @@ class RapidApiPoolProvider(DouyinInventoryProvider):
 
 
 def get_primary_provider() -> DouyinInventoryProvider:
-    """Primary creator feed: ordered RapidAPI provider pool.
+    """Primary creator feed: self-hosted Douyin API (no RapidAPI quota).
 
-    Discovery is admin-driven and every page costs one billed request. Each
-    provider has its own quota record; the pool skips exhausted/cooling
-    providers and falls through to the next one.
+    Discovery is admin-driven, unlimited by RapidAPI quota.
+    Falls back to HTTP feed provider if self-hosted fails.
     """
-    return RapidApiPoolProvider()
+    return SelfHostedDouyinProvider()
 
 
 def get_default_provider_id() -> str:
     """Provider id recorded on a new source before its first page is fetched."""
     try:
-        return RapidApiPoolProvider().default_provider_id()
+        return SelfHostedDouyinProvider.name
     except Exception:
-        return "rapidapi_justone"
+        return "self_hosted"
 
 
 def get_secondary_provider() -> DouyinInventoryProvider | None:
@@ -1425,8 +1599,8 @@ def discover_profile_videos(
 ) -> tuple[list[dict[str, Any]], str]:
     """Run the primary provider, then optional failovers if enabled.
 
-    The RapidAPI pool is tried first, including its own ordered fallbacks.
-    Non-RapidAPI providers run only when DOUYIN_CREATOR_FALLBACKS_ENABLED=true.
+    The self-hosted Douyin API is tried first, including its own fallback.
+    Non-self-hosted providers run only when DOUYIN_CREATOR_FALLBACKS_ENABLED=true.
 
     Returns (videos, provider_name). Auth-required is never silently
     converted to an empty completed result by the caller.
@@ -1434,7 +1608,7 @@ def discover_profile_videos(
     last_auth_exc: Exception | None = None
     primary = get_primary_provider()
 
-    if isinstance(primary, RapidApiPoolProvider):
+    if isinstance(primary, (RapidApiPoolProvider, SelfHostedDouyinProvider)):
         try:
             videos, provider_name = primary.fetch_all_with_provider(
                 profile_url, sec_uid, source_id, cookie_jar
@@ -1445,10 +1619,11 @@ def discover_profile_videos(
         except Exception as exc:
             if not getattr(settings, "douyin_creator_fallbacks_enabled", False):
                 raise
-            logger.warning("RapidAPI pool failed, trying legacy fallbacks: %s", exc)
+            # Log which provider failed
+            provider_name = getattr(primary, 'name', type(primary).__name__)
             if isinstance(exc, DouyinAuthRequiredError):
                 last_auth_exc = exc
-            primary = None
+            # Continue to failovers
 
     chain = [
         provider
@@ -1488,7 +1663,7 @@ def discover_profile_videos(
         except Exception as exc:
             # RevidError (RuntimeError) also lands here
             if "REVID" in str(exc):
-                logger.warning("%s provider failed: %s", provider.name, exc)
+                logger.warning("%别 provider failed: %s", provider.name, exc)
                 continue
             logger.exception("%s provider crashed", provider.name)
             continue
