@@ -105,12 +105,29 @@ def call_rcuts_parser(
             "utf-8",
             errors="replace",
         )
-
-        raise RuntimeError(
-            f"Rcuts API HTTP {exc.code}: {body[:500]}"
-        ) from exc
+        
+        if exc.code == 404:
+            raise RuntimeError(
+                f"Rcuts API endpoint không tồn tại (404): {api_url}"
+            ) from exc
+        elif exc.code == 403:
+            raise RuntimeError(
+                "Rcuts API từ chối truy cập (403). Kiểm tra token hoặc IP whitelist."
+            ) from exc
+        elif exc.code >= 500:
+            raise RuntimeError(
+                f"Rcuts API server error ({exc.code}). Vui lòng thử lại sau."
+            ) from exc
+        else:
+            raise RuntimeError(
+                f"Rcuts API HTTP {exc.code}: {body[:500]}"
+            ) from exc
 
     except URLError as exc:
+        if "timed out" in str(exc).lower():
+            raise RuntimeError(
+                f"Rcuts API timeout sau 30s. Vui lòng thử lại sau."
+            ) from exc
         raise RuntimeError(
             f"Không kết nối được Rcuts API: {exc}"
         ) from exc
@@ -143,9 +160,31 @@ def extract_video_url(data: dict) -> str:
     )
 
     if not video_url:
+        # Check for error messages in response
+        error_msg = extract_first_string(
+            data,
+            ("error", "err", "message", "msg", "errmsg")
+        )
+        
+        if error_msg:
+            raise RuntimeError(
+                f"Rcuts parser báo lỗi: {error_msg}\n"
+                f"Gợi ý: Video có thể đã bị xóa, private, hoặc URL không hợp lệ."
+            )
+        
+        # Check response code
+        code = data.get("code")
+        if code and str(code) != "0":
+            raise RuntimeError(
+                f"Rcuts parser thất bại với code={code}. "
+                f"Response keys: {list(data.keys())}\n"
+                f"Gợi ý: URL có thể không đúng format hoặc video không tồn tại."
+            )
+        
         raise RuntimeError(
             f"Rcuts parser không trả video_url. "
-            f"Keys={list(data.keys())}"
+            f"Keys={list(data.keys())}\n"
+            f"Gợi ý: URL có thể không được hỗ trợ hoặc video đã hết hạn."
         )
 
     return validate_http_url(video_url)
@@ -446,8 +485,46 @@ def download_with_ytdlp(
                 download=True,
             )
     except Exception as exc:
+        error_msg = str(exc)
+        
+        # Detect specific error patterns for better user guidance
+        if "Unsupported URL" in error_msg:
+            # Check if it's an iesdouyin URL
+            if "iesdouyin.com" in source_url.lower() or "share/note" in source_url.lower():
+                raise RuntimeError(
+                    f"yt-dlp không hỗ trợ URL này: {error_msg}\n"
+                    "Gợi ý: URL Douyin share có thể đã hết hạn. "
+                    "Vui lòng lấy URL mới từ Douyin app (mở video → Share → Copy Link). "
+                    "Lưu ý: Rcuts API thường xử lý tốt hơn yt-dlp cho Douyin URLs."
+                ) from exc
+            else:
+                raise RuntimeError(
+                    f"yt-dlp không hỗ trợ URL này: {error_msg}\n"
+                    "Gợi ý: Kiểm tra URL có đúng format và video vẫn còn public."
+                ) from exc
+        
+        elif "HTTP Error 403" in error_msg or "Forbidden" in error_msg:
+            raise RuntimeError(
+                f"yt-dlp bị chặn truy cập: {error_msg}\n"
+                "Gợi ý: Video có thể bị bảo vệ hoặc yêu cầu đăng nhập. "
+                "Vui lòng kiểm tra video có public và thử lại."
+            ) from exc
+        
+        elif "HTTP Error 404" in error_msg or "Not Found" in error_msg:
+            raise RuntimeError(
+                f"yt-dlp không tìm thấy video: {error_msg}\n"
+                "Gợi ý: Video có thể đã bị xóa hoặc URL không chính xác."
+            ) from exc
+        
+        elif "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+            raise RuntimeError(
+                f"yt-dlp timeout: {error_msg}\n"
+                "Gợi ý: Lỗi kết nối mạng. Vui lòng thử lại sau ít phút."
+            ) from exc
+        
+        # Generic error
         raise RuntimeError(
-            f"yt-dlp fallback thất bại: {exc}"
+            f"yt-dlp thất bại: {error_msg}"
         ) from exc
 
     file_path = find_downloaded_file(
@@ -506,6 +583,22 @@ def download_video(
     source_url = validate_http_url(
         url
     )
+    
+    # Detect common invalid URLs early
+    parsed = urlparse(source_url.lower())
+    hostname = parsed.hostname or ""
+    path = parsed.path or "/"
+    
+    # Block homepage-only URLs
+    if hostname in ("www.douyin.com", "douyin.com") and path in ("/", ""):
+        raise RuntimeError(
+            "URL không hợp lệ: chỉ là trang chủ Douyin. "
+            "Vui lòng cung cấp URL video cụ thể (ví dụ: https://www.douyin.com/video/123456 "
+            "hoặc https://v.douyin.com/abc123/)"
+        )
+    
+    # Track errors from all parsers for better diagnostics
+    errors: list[tuple[str, str]] = []
 
     primary_api = settings.rcuts_primary_api_url or settings.rcuts_api_url
     fallback_api = settings.rcuts_fallback_api_url or settings.rcuts_api_url
@@ -522,10 +615,12 @@ def download_video(
             if result:
                 return result
         except Exception as exc:
+            error_msg = str(exc)
+            errors.append(("rcuts_primary", error_msg))
             logger.warning(
                 "Rcuts primary failed for job=%s: %s",
                 job_id,
-                exc,
+                error_msg,
             )
 
     if fallback_api:
@@ -540,10 +635,12 @@ def download_video(
             if result:
                 return result
         except Exception as exc:
+            error_msg = str(exc)
+            errors.append(("rcuts_fallback", error_msg))
             logger.warning(
                 "Rcuts fallback failed for job=%s: %s",
                 job_id,
-                exc,
+                error_msg,
             )
 
     logger.info(
@@ -551,10 +648,38 @@ def download_video(
         job_id,
     )
 
-    return download_with_ytdlp(
-        source_url,
-        job_id,
-    )
+    try:
+        return download_with_ytdlp(
+            source_url,
+            job_id,
+        )
+    except Exception as exc:
+        ytdlp_error = str(exc)
+        errors.append(("yt-dlp", ytdlp_error))
+        
+        # Build comprehensive error message
+        error_parts = [f"Tất cả parser đều thất bại cho URL: {source_url[:100]}"]
+        
+        for parser, err in errors:
+            error_parts.append(f"  - {parser}: {err[:200]}")
+        
+        # Add helpful suggestions based on error patterns
+        if "Unsupported URL" in ytdlp_error or "iesdouyin.com" in source_url.lower():
+            error_parts.append(
+                "\nGợi ý: URL có thể đã hết hạn. Vui lòng lấy URL mới từ Douyin app "
+                "(mở video → Share → Copy Link)."
+            )
+        elif any("timeout" in err.lower() for _, err in errors):
+            error_parts.append(
+                "\nGợi ý: Lỗi kết nối mạng. Vui lòng thử lại sau ít phút."
+            )
+        elif any("404" in err or "not found" in err.lower() for _, err in errors):
+            error_parts.append(
+                "\nGợi ý: Video có thể đã bị xóa hoặc set private. "
+                "Vui lòng kiểm tra video vẫn còn public trên Douyin."
+            )
+        
+        raise RuntimeError("\n".join(error_parts)) from exc
 
 
 def cleanup_job_files(
