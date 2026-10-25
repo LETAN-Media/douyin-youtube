@@ -140,6 +140,25 @@ async def update_one_pipeline(pipeline_id: str, body: PipelineUpdate, _: None = 
     return updated
 
 
+@router.delete("/pipelines/{pipeline_id}")
+async def delete_one_pipeline(pipeline_id: str, _: None = Depends(require_admin)) -> dict:
+    """Permanently delete a pipeline and its dependent data.
+
+    Refuses while an upload/manual job or a source scan is still processing,
+    so an in-flight upload is never orphaned mid-flight.
+    """
+    outcome = await pipelines.delete_pipeline(pipeline_id)
+    if outcome == "not_found":
+        raise _err(404, "PIPELINE_NOT_FOUND", "Pipeline not found")
+    if outcome == "busy":
+        raise _err(
+            409,
+            "PIPELINE_BUSY",
+            "Pipeline đang upload hoặc scan. Vui lòng đợi job hiện tại xong rồi xoá.",
+        )
+    return {"ok": True, "id": pipeline_id, "deleted": True}
+
+
 # ---------- Sources ----------
 
 

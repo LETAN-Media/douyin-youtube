@@ -251,6 +251,21 @@ export async function updateFacebookPipeline(
   );
 }
 
+export interface DeleteFacebookPipelineResult {
+  ok: boolean;
+  id: string;
+  deleted: boolean;
+}
+
+export async function deleteFacebookPipeline(
+  pipelineId: string,
+): Promise<DeleteFacebookPipelineResult> {
+  return fbFetch<DeleteFacebookPipelineResult>(
+    `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}`,
+    { method: "DELETE" },
+  );
+}
+
 export async function getFacebookSummary(pipelineId: string): Promise<FacebookSummaryDto> {
   return fbFetch<FacebookSummaryDto>(
     `/api/facebook/pipelines/${encodeURIComponent(pipelineId)}/summary`,

@@ -156,3 +156,89 @@ async def list_pipelines() -> list[dict[str, Any]]:
         }
         for r in rows.rows
     ]
+
+
+async def delete_pipeline(pipeline_id: str) -> str:
+    """Delete a pipeline and every row that belongs to it.
+
+    Returns 'deleted' | 'not_found' | 'busy'. Active uploads/manual jobs and
+    running scans are protected: deleting their rows underneath a worker
+    could leave an upload running without DB state, so the caller must retry
+    after those finish. The dependent DELETEs run as one libsql batch
+    (transactional on both local SQLite and remote HTTP).
+    """
+    existing = await get_pipeline(pipeline_id)
+    if existing is None:
+        return "not_found"
+
+    client = get_client()
+    busy_rows = await client.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM facebook_publish_queue
+             WHERE pipeline_id = :id AND status = 'processing')
+          + (SELECT COUNT(*) FROM facebook_manual_publications
+             WHERE pipeline_id = :id AND status = 'processing')
+          + (SELECT COUNT(*) FROM scan_runs
+             WHERE status = 'running'
+               AND source_id IN (SELECT id FROM facebook_sources WHERE pipeline_id = :id))
+        """,
+        {"id": pipeline_id},
+    )
+    busy = int(busy_rows.rows[0][0] or 0) if busy_rows.rows else 0
+    if busy > 0:
+        return "busy"
+
+    params = {"id": pipeline_id}
+    reel_scope = (
+        "SELECT r.id FROM facebook_reels r "
+        "JOIN facebook_sources s ON s.id = r.source_id "
+        "WHERE s.pipeline_id = :id"
+    )
+    source_scope = "SELECT id FROM facebook_sources WHERE pipeline_id = :id"
+    destination_scope = "SELECT id FROM youtube_destinations WHERE pipeline_id = :id"
+    schedule_scope = "SELECT id FROM facebook_publish_schedules WHERE pipeline_id = :id"
+
+    await client.batch(
+        [
+            (
+                f"DELETE FROM facebook_ai_metadata "
+                f"WHERE reel_db_id IN ({reel_scope})",
+                params,
+            ),
+            (
+                f"DELETE FROM publications "
+                f"WHERE destination_id IN ({destination_scope}) "
+                f"OR reel_db_id IN ({reel_scope})",
+                params,
+            ),
+            ("DELETE FROM facebook_publish_queue WHERE pipeline_id = :id", params),
+            ("DELETE FROM facebook_manual_publications WHERE pipeline_id = :id", params),
+            ("DELETE FROM facebook_scheduler_runs WHERE pipeline_id = :id", params),
+            ("DELETE FROM facebook_scheduler_batches WHERE pipeline_id = :id", params),
+            (
+                f"DELETE FROM facebook_publish_schedule_slots "
+                f"WHERE schedule_id IN ({schedule_scope})",
+                params,
+            ),
+            ("DELETE FROM facebook_publish_schedules WHERE pipeline_id = :id", params),
+            ("DELETE FROM facebook_ai_settings WHERE pipeline_id = :id", params),
+            ("DELETE FROM facebook_quota_pauses WHERE pipeline_id = :id", params),
+            (
+                f"DELETE FROM youtube_oauth_states WHERE pipeline_id = :id "
+                f"OR destination_id IN ({destination_scope})",
+                params,
+            ),
+            (
+                f"DELETE FROM youtube_credentials "
+                f"WHERE destination_id IN ({destination_scope})",
+                params,
+            ),
+            (f"DELETE FROM scan_runs WHERE source_id IN ({source_scope})", params),
+            (f"DELETE FROM facebook_reels WHERE source_id IN ({source_scope})", params),
+            ("DELETE FROM facebook_sources WHERE pipeline_id = :id", params),
+            ("DELETE FROM youtube_destinations WHERE pipeline_id = :id", params),
+            ("DELETE FROM facebook_pipelines WHERE id = :id", params),
+        ]
+    )
+    return "deleted"

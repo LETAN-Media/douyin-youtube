@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   FacebookApiError,
+  deleteFacebookPipeline,
   getFacebookPipelineDetail,
   updateFacebookPipeline,
 } from "@/lib/facebook-api";
@@ -68,6 +69,27 @@ export async function PATCH(
     const status = err instanceof FacebookApiError ? err.status : 500;
     const message =
       err instanceof Error ? err.message : "Không thể cập nhật pipeline.";
+    return NextResponse.json({ error: message, message }, { status });
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  { params }: { params: Promise<{ pipelineId: string }> },
+) {
+  try {
+    const { pipelineId } = await params;
+    if (!pipelineId) {
+      return NextResponse.json(
+        { error: "Thiếu pipelineId.", message: "Thiếu pipelineId." },
+        { status: 400 },
+      );
+    }
+    return NextResponse.json(await deleteFacebookPipeline(pipelineId));
+  } catch (err: unknown) {
+    const status = err instanceof FacebookApiError ? err.status : 500;
+    const message =
+      err instanceof Error ? err.message : "Không thể xoá pipeline.";
     return NextResponse.json({ error: message, message }, { status });
   }
 }

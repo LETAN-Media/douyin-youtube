@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { PageHeader, btnPrimary, btnSecondary, inputCls, labelCls } from "@/components/ui";
 import { IconChevronRight, IconPlay } from "@/components/icons";
 import { FacebookPipelineAutoToggle } from "@/components/facebook/FacebookPipelineToggles";
+import { FacebookPipelineDeleteButton } from "@/components/facebook/FacebookPipelineDeleteButton";
 import type { FacebookPipelineDto, FacebookSummaryDto } from "@/lib/facebook-api";
 
 function CreatePipelineModal({ onClose }: { onClose: () => void }) {
@@ -153,10 +154,13 @@ export function FacebookPipelineCard({
   pipeline: FacebookPipelineDto;
   summary?: FacebookSummaryDto;
 }) {
+  const [deleted, setDeleted] = useState(false);
   const total = summary?.inventory ?? 0;
   const published = summary?.published ?? 0;
   const done = total > 0 ? Math.round((published / total) * 100) : 0;
   const failed = summary?.failed ?? 0;
+
+  if (deleted) return null;
 
   return (
     <div className="lift group relative flex flex-col rounded-2xl border border-slate-200/90 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition hover:border-indigo-300 hover:shadow-md">
@@ -178,12 +182,18 @@ export function FacebookPipelineCard({
             {pipeline.name}
           </h3>
         </div>
-        <FacebookPipelineAutoToggle
-          pipelineId={pipeline.id}
-          initialAutoPublish={pipeline.auto_publish ?? true}
-          enabled={pipeline.enabled}
-          className="relative z-20"
-        />
+        <div className="relative z-20 flex shrink-0 items-start gap-1.5">
+          <FacebookPipelineAutoToggle
+            pipelineId={pipeline.id}
+            initialAutoPublish={pipeline.auto_publish ?? true}
+            enabled={pipeline.enabled}
+          />
+          <FacebookPipelineDeleteButton
+            pipelineId={pipeline.id}
+            name={pipeline.name}
+            onDeleted={() => setDeleted(true)}
+          />
+        </div>
       </div>
 
       <dl className="pointer-events-none relative mt-4 grid grid-cols-3 gap-2 text-center">
