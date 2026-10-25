@@ -585,7 +585,9 @@ def scan_source_self_hosted(source_id: str, max_count: int | None = None) -> dic
         return _summary(source_id, "already_running")
 
     try:
-        job = queue_scan_job(source_id, mode="manual_refresh")
+        job = None
+        with SessionLocal() as db:
+            job = queue_scan_job(db, source_id, scan_mode="manual_refresh")
         job_id = job.id if job else None
 
         res = _execute_self_hosted_fallback(

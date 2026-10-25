@@ -210,6 +210,30 @@ class TestDouyinSelfHostedIntegration(unittest.TestCase):
         ).scalar_one()
         self.assertIn(nv.status, ["new", "inventory"])
 
+    def test_scan_source_self_hosted_explicit_call(self):
+        mock_self_hosted_items = [
+            {
+                "video_id": "7694573328141519985",
+                "url": "https://www.douyin.com/video/7694573328141519985",
+                "title": "New Dance",
+            },
+        ]
+        with (
+            patch.object(douyin_import, "SessionLocal", self.Session),
+            patch("app.douyin_self_hosted.DouyinSelfHostedClient.fetch_video_items", return_value=mock_self_hosted_items),
+        ):
+            summary = douyin_import.scan_source_self_hosted(self.source.id, max_count=50)
+
+        self.assertEqual(summary["status"], "completed")
+        self.assertEqual(summary["provider"], "douyin_self_hosted")
+        self.assertEqual(summary["new"], 1)
+
+        self.db.expire_all()
+        nv = self.db.execute(
+            select(DouyinVideo).where(DouyinVideo.video_id == "7694573328141519985")
+        ).scalar_one_or_none()
+        self.assertIsNotNone(nv)
+
 
 if __name__ == "__main__":
     unittest.main()
