@@ -56,25 +56,36 @@ def validate_hashtags(
     text: str,
     pipeline: Pipeline | None = None,
     destination: Destination | None = None,
-) -> bool:
+) -> tuple[bool, str | None]:
+    """Validate hashtags in description.
+    
+    Returns (is_valid, error_message).
+    error_message is None when valid, otherwise contains detailed reason.
+    """
     tags = re.findall(r"#\w+", text)
     if len(tags) != 5:
-        return False
+        return False, f"Expected exactly 5 hashtags, found {len(tags)}: {tags}"
     if len(set(tags)) != 5:
-        return False
+        duplicates = [t for t in tags if tags.count(t) > 1]
+        return False, f"Duplicate hashtags found: {set(duplicates)}"
+    
+    banned_tags = []
     for tag in tags:
         tag_lower = tag.lower()
         if "http" in tag_lower:
-            return False
-        if "douyin" in tag_lower:
-            return False
-        if "tiktok" in tag_lower:
-            return False
-        if tag_lower in {"#joybeat", "#danielxu", "#danniu"}:
-            return False
+            banned_tags.append(f"{tag} (contains 'http')")
+        elif "douyin" in tag_lower:
+            banned_tags.append(f"{tag} (contains 'douyin')")
+        elif tag_lower == "#tiktok":
+            banned_tags.append(f"{tag} (standalone #tiktok is banned)")
+        elif tag_lower in {"#joybeat", "#danielxu", "#danniu"}:
+            banned_tags.append(f"{tag} (banned creator name)")
+    
+    if banned_tags:
+        return False, f"Banned hashtags: {', '.join(banned_tags)}"
 
     if destination is None and pipeline is None:
-        return True
+        return True, None
 
     fixed_src = (
         destination.fixed_hashtags
@@ -92,19 +103,21 @@ def validate_hashtags(
     allowed_hashtags = set(fixed_hashtags) | set(adaptive_hashtags)
 
     if not allowed_hashtags:
-        return True
+        return True, None
 
     tags_lower = [tag.lower() for tag in tags]
 
     fixed_required = sum(1 for tag in tags_lower if tag in fixed_hashtags)
     if fixed_required < len(fixed_hashtags):
-        return False
+        missing = [f for f in fixed_hashtags if f not in tags_lower]
+        return False, f"Missing required fixed hashtags: {missing}"
 
     niche_count = sum(1 for tag in tags_lower if tag in allowed_hashtags)
     if niche_count < 3:
-        return False
+        allowed_in_desc = [t for t in tags_lower if t in allowed_hashtags]
+        return False, f"Only {niche_count}/3 allowed hashtags found. Present: {allowed_in_desc}, Allowed: {list(allowed_hashtags)[:10]}"
 
-    return True
+    return True, None
 
 
 def _find_linked_publication(db, job: VideoJob) -> Publication | None:
@@ -526,10 +539,12 @@ def process_job(
             # For manual mode, allow user-edited hashtags without strict pipeline whitelist check
             target_pipeline_for_tags = None if is_manual else pipeline
             target_dest_for_tags = None if is_manual else destination
-            if not validate_hashtags(description, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags):
+            is_valid, error_msg = validate_hashtags(description, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags)
+            if not is_valid:
                 logger.warning(
-                    "First-pass hashtag validation failed for job %s, retrying AI once",
+                    "First-pass hashtag validation failed for job %s: %s. Retrying AI once.",
                     job_id,
+                    error_msg,
                 )
                 ai_result = generate_youtube_metadata(
                     source_context,
@@ -542,9 +557,11 @@ def process_job(
                     )
 
                 retry_title, retry_desc = ai_result
-                if not validate_hashtags(retry_desc, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags):
+                is_valid_retry, error_msg_retry = validate_hashtags(retry_desc, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags)
+                if not is_valid_retry:
                     raise RuntimeError(
-                        "AI hashtags validation failed after retry; upload blocked"
+                        f"AI hashtags validation failed after retry; upload blocked. "
+                        f"First error: {error_msg}. Retry error: {error_msg_retry}"
                     )
 
                 title = retry_title or title

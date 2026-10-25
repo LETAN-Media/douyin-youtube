@@ -175,15 +175,18 @@ def test_validate_hashtags_for_joybeat_destination():
 
     # Valid: contains 5 tags, includes fixed tags and adaptive
     valid_text = "Amazing choreography in Shanghai\n\n#dance #choreography #dancecover #dancer #urbandance"
-    assert validate_hashtags(valid_text, destination=dest) is True
+    is_valid, error = validate_hashtags(valid_text, destination=dest)
+    assert is_valid is True
 
     # Invalid: includes #joybeat
     has_joybeat = "Amazing moves\n\n#dance #choreography #dancecover #joybeat #urbandance"
-    assert validate_hashtags(has_joybeat, destination=dest) is False
+    is_valid, error = validate_hashtags(has_joybeat, destination=dest)
+    assert is_valid is False
 
     # Invalid: missing fixed hashtag
     missing_fixed = "Amazing moves\n\n#dance #dancevideo #dancecover #dancer #urbandance"
-    assert validate_hashtags(missing_fixed, destination=dest) is False
+    is_valid, error = validate_hashtags(missing_fixed, destination=dest)
+    assert is_valid is False
 
 
 def test_scheduler_pick_video_guardrail(db_session=None):
@@ -256,7 +259,8 @@ def test_joybeat_authentic_prompt_and_hashtags():
         adaptive_hashtags=["#viraldance", "#dancecover", "#dancer"],
     )
     valid_desc = "Positive energy for today! ☀️\n\n#streetdance #dancetrend #dance #viraldance #dancer"
-    assert validate_hashtags(valid_desc, destination=dest) is True
+    is_valid, error = validate_hashtags(valid_desc, destination=dest)
+    assert is_valid is True
 
 
 def _fluffy_channel():
@@ -319,5 +323,6 @@ def test_description_trailing_hashtags_stripped():
     assert gen is not None
     assert "#" not in gen["description"]
     assert gen["final_description"].count("#") == 5
-    assert validate_hashtags(gen["final_description"]) is True
+    is_valid, error = validate_hashtags(gen["final_description"])
+    assert is_valid is True
 

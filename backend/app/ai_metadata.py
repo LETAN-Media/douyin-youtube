@@ -86,6 +86,15 @@ def clean_hashtag(value: str) -> str:
     disallowed = {"#joybeat", "#danielxu", "#danniu", "#daniel"}
     if tag in disallowed:
         return ""
+    
+    # Block hashtags with banned keywords
+    if "http" in tag:
+        return ""
+    if "douyin" in tag:
+        return ""
+    # Only block standalone #tiktok, allow compound tags like #dogsoftiktok
+    if tag == "#tiktok":
+        return ""
 
     return tag[:60]
 

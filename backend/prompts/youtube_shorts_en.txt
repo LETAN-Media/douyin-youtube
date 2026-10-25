@@ -36,7 +36,7 @@ HASHTAGS:
 - Pick hashtags viewers would actually associate with the subject.
 - Do NOT blindly translate Chinese hashtags word-for-word.
 - Do NOT automatically use #shorts, #viral, #fyp, #trending.
-- Do NOT use #douyin or #tiktok.
+- Do NOT use #douyin or #tiktok (standalone #tiktok is banned, but compound tags like #dogsoftiktok are allowed).
 - Do not use unrelated hashtags.
 - Do not repeat synonyms unnecessarily.
 
