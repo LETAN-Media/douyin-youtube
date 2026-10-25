@@ -61,7 +61,7 @@ async def publish_next(
         destination_id=destination_id,
         reel_db_id=reel_db_id,
         publication_id=publication["id"],
-        priority=2000,
+        priority=publish_queue.MANUAL_JOB_PRIORITY,
     )
 
     return {

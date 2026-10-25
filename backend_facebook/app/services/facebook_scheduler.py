@@ -49,6 +49,7 @@ REASON_MESSAGES: dict[str, str] = {
     "SCHEDULE_NOT_FOUND": "Chưa cấu hình lịch cho pipeline này.",
     "ENQUEUE_ERROR": "Lỗi khi đưa video vào hàng đợi.",
     "QUOTA_PAUSED": "YouTube đang tạm dừng do quota/rate limit. Scheduler sẽ tự thử lại.",
+    "AUTO_PUBLISH_DISABLED": "Auto Publish đang tắt cho pipeline này. Bật AUTO ON để tiếp tục lịch đăng.",
 }
 
 
@@ -625,6 +626,14 @@ async def refill_slot_after_failure(
     schedule = await schedules.get_schedule(pipeline_id)
     if schedule is None:
         return {"refilled": False, "reason": "SCHEDULE_NOT_FOUND"}
+
+    # A failure finishing after Auto was turned off must not enqueue a
+    # replacement video. The failed slot simply stays empty until Auto is on.
+    from ..db.repositories import pipelines as pipelines_repo
+
+    pipeline = await pipelines_repo.get_pipeline(pipeline_id)
+    if pipeline is not None and not pipeline.get("auto_publish", True):
+        return {"refilled": False, "reason": "AUTO_PUBLISH_DISABLED"}
 
     if await quota_repo.get_active_pause(pipeline_id, now=utc_now) is not None:
         return {"refilled": False, "reason": "QUOTA_PAUSED"}

@@ -8,6 +8,10 @@ from typing import Any
 
 from ..client import get_client
 
+# Manual ("publish next") jobs use a priority above every auto job, so the
+# auto-publish pause below can let explicit manual publishing keep working.
+MANUAL_JOB_PRIORITY = 2000
+
 
 async def enqueue_publish_job(
     *,
@@ -121,6 +125,10 @@ async def claim_next_job(
     We select the oldest queued job from each pipeline, then pick the one
     with the earliest queued_at.
 
+    Queued auto jobs from pipelines with auto_publish=0 stay durable in the
+    queue (and keep their reel/publication state) so turning Auto back on
+    resumes them without duplicates. Quota-paused pipelines are skipped too.
+
     Returns the job dict or None if no queued jobs.
     """
     client = get_client()
@@ -142,6 +150,13 @@ async def claim_next_job(
                 SELECT 1 FROM facebook_quota_pauses qp
                 WHERE qp.pipeline_id = q.pipeline_id AND qp.paused_until > :now
             )
+            AND (
+                q.priority >= :manual_priority
+                OR NOT EXISTS (
+                    SELECT 1 FROM facebook_pipelines p
+                    WHERE p.id = q.pipeline_id AND p.auto_publish = 0
+                )
+            )
         )
         SELECT
             id, pipeline_id, destination_id, reel_db_id, publication_id,
@@ -152,7 +167,7 @@ async def claim_next_job(
         ORDER BY queued_at ASC
         LIMIT 1
         """,
-        {"now": now_iso},
+        {"now": now_iso, "manual_priority": MANUAL_JOB_PRIORITY},
     )
     if not rows.rows:
         return None

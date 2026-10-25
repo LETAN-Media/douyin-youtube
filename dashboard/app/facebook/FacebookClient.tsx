@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { PageHeader, btnPrimary, btnSecondary, inputCls, labelCls } from "@/components/ui";
 import { IconChevronRight, IconPlay } from "@/components/icons";
+import { FacebookPipelineAutoToggle } from "@/components/facebook/FacebookPipelineToggles";
 import type { FacebookPipelineDto, FacebookSummaryDto } from "@/lib/facebook-api";
 
 function CreatePipelineModal({ onClose }: { onClose: () => void }) {
@@ -158,11 +159,17 @@ export function FacebookPipelineCard({
   const failed = summary?.failed ?? 0;
 
   return (
-    <Link
-      href={`/facebook/${pipeline.id}`}
-      className="lift group flex flex-col rounded-2xl border border-slate-200/90 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition hover:border-indigo-300 hover:shadow-md"
-    >
-      <div className="flex items-start justify-between gap-2">
+    <div className="lift group relative flex flex-col rounded-2xl border border-slate-200/90 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition hover:border-indigo-300 hover:shadow-md">
+      {/* Full-card link sits above the non-interactive content; the AUTO
+          toggle is a sibling raised above the link, so the two interaction
+          areas stay independent and the HTML stays valid. */}
+      <Link
+        href={`/facebook/${pipeline.id}`}
+        aria-label={`Mở pipeline ${pipeline.name}`}
+        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400"
+      />
+
+      <div className="pointer-events-none relative flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2.5">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 text-sm font-black text-white">
             F
@@ -171,19 +178,15 @@ export function FacebookPipelineCard({
             {pipeline.name}
           </h3>
         </div>
-        {pipeline.enabled ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700 ring-1 ring-inset ring-emerald-200">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-            AUTO ON
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-600 ring-1 ring-inset ring-slate-200">
-            AUTO OFF
-          </span>
-        )}
+        <FacebookPipelineAutoToggle
+          pipelineId={pipeline.id}
+          initialAutoPublish={pipeline.auto_publish ?? true}
+          enabled={pipeline.enabled}
+          className="relative z-20"
+        />
       </div>
 
-      <dl className="mt-4 grid grid-cols-3 gap-2 text-center">
+      <dl className="pointer-events-none relative mt-4 grid grid-cols-3 gap-2 text-center">
         {[
           { l: "Sources", v: summary?.sources ?? "—" },
           { l: "Inventory", v: summary?.inventory ?? "—" },
@@ -196,7 +199,7 @@ export function FacebookPipelineCard({
         ))}
       </dl>
 
-      <div className="mt-3">
+      <div className="pointer-events-none relative mt-3">
         <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500">
           <span>Published {published}/{total}</span>
           <span className="tnum">{done}%</span>
@@ -209,7 +212,7 @@ export function FacebookPipelineCard({
         </div>
       </div>
 
-      <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs">
+      <div className="pointer-events-none relative mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs">
         <span className="flex items-center gap-1.5 text-slate-500">
           <span className="font-mono">/{pipeline.slug}</span>
         </span>
@@ -227,7 +230,7 @@ export function FacebookPipelineCard({
           <IconChevronRight size={14} />
         </span>
       </div>
-    </Link>
+    </div>
   );
 }
 

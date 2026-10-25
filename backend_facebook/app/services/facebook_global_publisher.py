@@ -235,6 +235,31 @@ async def _process_one_job(
             reel_db_id=reel_db_id,
         )
 
+    # Auto may have been turned off after this job was claimed (claim_next_job
+    # already skips disabled pipelines). Put it back durably BEFORE any reel
+    # claim/download/upload: queued jobs pause, an upload already in flight is
+    # never interrupted, and enabling Auto later resumes the same job.
+    try:
+        job_priority = int(queue_job.get("priority") or 0)
+    except (TypeError, ValueError):
+        job_priority = 0
+    is_manual_job = job_priority >= publish_queue.MANUAL_JOB_PRIORITY
+    if not is_manual_job and not pipeline.get("auto_publish", True):
+        await publish_queue.requeue_job(
+            queue_id,
+            stage="auto_paused",
+            error_code="AUTO_PUBLISH_DISABLED",
+            error="Auto Publish is disabled for this pipeline; job paused.",
+        )
+        logger.info("auto publish disabled for %s, paused queue job %s", pipeline_id, queue_id)
+        return {
+            "queue_id": queue_id,
+            "result": "auto_paused",
+            "elapsed_s": time.monotonic() - started,
+            "pipeline_id": pipeline_id,
+            "reel_db_id": reel_db_id,
+        }
+
     destination, dest_error = await _validate_destination(pipeline_id, destination_id)
     if destination is None:
         code = dest_error or "DESTINATION_NOT_FOUND"

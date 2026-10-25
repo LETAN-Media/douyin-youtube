@@ -1,8 +1,10 @@
-"""Pipeline flags update (enabled / auto_publish) and the scheduler auto gate.
+"""Pipeline flags update (enabled / auto_publish) and the auto-publish gates.
 
 - PATCH /api/facebook/pipelines/{id} updates only provided fields.
 - Automatic scheduler ticks never enqueue when auto_publish=false.
-- Manual force_now batches still run (explicit user action).
+- Queued auto jobs pause while auto_publish=false and resume when turned on.
+- Manual force_now batches still enqueue (explicit user action); manual
+  publishing uses its own queue and is unaffected.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
-from app.db.repositories import pipelines, schedules
+from app.db.repositories import pipelines, publications, publish_queue, reels, schedules
 from app.main import create_app
 from app.services.facebook_scheduler import describe_schedule_status, execute_daily_batch
 from tests.test_manual_batch import _at, _enable, _mark_ai_ready  # noqa: F401
@@ -352,3 +354,161 @@ def test_auto_tick_never_tops_up_completed_batch(db) -> None:
     status = asyncio.run(describe_schedule_status(pipe["id"], now=_at(12, 30)))
     assert status["batch_uploaded"] == 1
     assert status["batch_status"] == "completed"
+
+
+# ---------- global publisher: pause/resume queued auto jobs ----------
+
+
+def _queue_auto_job(
+    pipe_id: str,
+    src_id: str,
+    dest_id: str,
+    rid: str,
+    pub_id: str,
+    *,
+    priority: int = 1000,
+) -> tuple[str, str]:
+    """Create a ready reel + queued job (auto priority unless overridden)."""
+    reel_db_id = _ready(pipe_id, src_id, rid)
+
+    async def _run() -> str:
+        assert await reels.advance_status(reel_db_id, "new", "queued")
+        pub, _ = await publications.get_or_create(
+            publication_id=pub_id,
+            reel_db_id=reel_db_id,
+            destination_id=dest_id,
+        )
+        await publications.set_scheduled_publish_at(pub["id"], "2026-10-05T07:30:00Z")
+        return await publish_queue.enqueue_publish_job(
+            pipeline_id=pipe_id,
+            destination_id=dest_id,
+            reel_db_id=reel_db_id,
+            publication_id=pub["id"],
+            priority=priority,
+        )
+
+    return reel_db_id, asyncio.run(_run())
+
+
+def _assert_paused_state(queue_id: str, reel_db_id: str, pub_id: str) -> None:
+    async def _check() -> None:
+        job = await publish_queue.get_job(queue_id)
+        assert job is not None
+        assert job["status"] == "queued"
+        assert job["stage"] == "auto_paused"
+        assert job["error_code"] == "AUTO_PUBLISH_DISABLED"
+        reel = await reels.get_reel(reel_db_id)
+        assert reel is not None and reel["status"] == "queued"
+        pub = await publications.get_publication(pub_id)
+        assert pub is not None and pub["status"] == "queued"
+
+    asyncio.run(_check())
+
+
+def test_claim_skips_queued_auto_jobs_when_auto_publish_off(db) -> None:
+    pipe, src, dest = _enable("aq1")
+    reel_db_id, queue_id = _queue_auto_job(
+        pipe["id"], src["id"], dest["id"], "r1", "pub_aq1"
+    )
+    _set_flags(pipe["id"], auto_publish=False)
+
+    assert asyncio.run(publish_queue.claim_next_job(worker_id="w1")) is None
+
+    async def _still_queued() -> None:
+        job = await publish_queue.get_job(queue_id)
+        assert job is not None and job["status"] == "queued"
+        reel = await reels.get_reel(reel_db_id)
+        assert reel is not None and reel["status"] == "queued"
+        pub = await publications.get_publication("pub_aq1")
+        assert pub is not None and pub["status"] == "queued"
+
+    asyncio.run(_still_queued())
+
+    _set_flags(pipe["id"], auto_publish=True)
+    claimed = asyncio.run(publish_queue.claim_next_job(worker_id="w1"))
+    assert claimed is not None and claimed["id"] == queue_id
+
+
+def test_claim_allows_manual_priority_job_when_auto_publish_off(db) -> None:
+    """Explicit manual publishing must keep working while Auto is off."""
+    pipe, src, dest = _enable("aqm")
+    _, queue_id = _queue_auto_job(
+        pipe["id"],
+        src["id"],
+        dest["id"],
+        "r1",
+        "pub_aqm",
+        priority=publish_queue.MANUAL_JOB_PRIORITY,
+    )
+    _set_flags(pipe["id"], auto_publish=False)
+
+    claimed = asyncio.run(publish_queue.claim_next_job(worker_id="w1"))
+    assert claimed is not None and claimed["id"] == queue_id
+
+
+def test_publisher_run_once_leaves_auto_jobs_queued_when_off(db) -> None:
+    from app.services.facebook_global_publisher import run_publisher_once
+
+    pipe, src, dest = _enable("aq2")
+    reel_db_id, queue_id = _queue_auto_job(
+        pipe["id"], src["id"], dest["id"], "r1", "pub_aq2"
+    )
+    _set_flags(pipe["id"], auto_publish=False)
+
+    result = asyncio.run(run_publisher_once())
+
+    assert result == {"status": "no_work"}, result
+
+    async def _check() -> None:
+        job = await publish_queue.get_job(queue_id)
+        assert job is not None and job["status"] == "queued"
+        reel = await reels.get_reel(reel_db_id)
+        assert reel is not None and reel["status"] == "queued"
+
+    asyncio.run(_check())
+
+
+def test_claimed_job_requeues_when_auto_turned_off_midflight(db) -> None:
+    """Toggle-off race: a job claimed just before the flag flips must go back
+    to the queue untouched, never start media work."""
+    from app.services.facebook_global_publisher import _process_one_job
+
+    pipe, src, dest = _enable("aq3")
+    reel_db_id, queue_id = _queue_auto_job(
+        pipe["id"], src["id"], dest["id"], "r1", "pub_aq3"
+    )
+    job = asyncio.run(publish_queue.get_job(queue_id))
+    assert job is not None
+    _set_flags(pipe["id"], auto_publish=False)
+
+    result = asyncio.run(_process_one_job(job))
+
+    assert result["result"] == "auto_paused", result
+    _assert_paused_state(queue_id, reel_db_id, "pub_aq3")
+
+    # Turning Auto back on resumes the same durable job.
+    _set_flags(pipe["id"], auto_publish=True)
+    claimed = asyncio.run(publish_queue.claim_next_job(worker_id="w1"))
+    assert claimed is not None and claimed["id"] == queue_id
+
+
+def test_refill_does_not_enqueue_when_auto_publish_off(db) -> None:
+    from app.services.facebook_scheduler import refill_slot_after_failure
+
+    pipe, src, dest = _enable("aq4")
+    reel_db_id = _ready(pipe["id"], src["id"], "r1")
+    _set_flags(pipe["id"], auto_publish=False)
+
+    result = asyncio.run(
+        refill_slot_after_failure(
+            pipeline_id=pipe["id"],
+            destination_id=dest["id"],
+            scheduled_publish_at="2026-10-05T07:30:00Z",
+            failed_reel_db_id=reel_db_id,
+            now=_at(12, 0),
+        )
+    )
+
+    assert result["refilled"] is False, result
+    assert result["reason"] == "AUTO_PUBLISH_DISABLED", result
+    assert asyncio.run(publish_queue.get_queue_stats())["total"] == 0
