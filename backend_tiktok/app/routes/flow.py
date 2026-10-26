@@ -27,17 +27,83 @@ async def pipeline_flow(pipeline_id: str):
         src_rows = await sources_repo.list_sources(pipeline_id)
         dest_rows = await destinations.list_destinations(pipeline_id)
 
+        # 1. Pipeline-level active inventory (not excluded)
+        inv_res = await execute(
+            """
+            SELECT COUNT(DISTINCT r.id)
+            FROM tiktok_reels r
+            JOIN tiktok_sources s ON s.id = r.source_id
+            WHERE s.pipeline_id = :pid AND r.status != 'excluded'
+            """,
+            {"pid": pipeline_id},
+        )
+        active_inventory = inv_res.rows[0][0] if inv_res.rows else 0
+
+        # 2. Pipeline-level excluded count
+        excl_res = await execute(
+            """
+            SELECT COUNT(DISTINCT r.id)
+            FROM tiktok_reels r
+            JOIN tiktok_sources s ON s.id = r.source_id
+            WHERE s.pipeline_id = :pid AND r.status = 'excluded'
+            """,
+            {"pid": pipeline_id},
+        )
+        excluded_count = excl_res.rows[0][0] if excl_res.rows else 0
+
+        # 3. Pipeline-level published video count (distinct videos successfully published with valid YouTube video ID)
+        pub_video_res = await execute(
+            """
+            SELECT COUNT(DISTINCT r.id)
+            FROM tiktok_reels r
+            JOIN tiktok_sources s ON s.id = r.source_id
+            WHERE s.pipeline_id = :pid
+              AND (
+                (r.status = 'published' AND r.youtube_video_id IS NOT NULL AND length(trim(r.youtube_video_id)) > 0)
+                OR EXISTS (
+                  SELECT 1 FROM tiktok_publications pub
+                  WHERE pub.reel_db_id = r.id
+                    AND pub.status = 'published'
+                    AND pub.youtube_video_id IS NOT NULL
+                    AND length(trim(pub.youtube_video_id)) > 0
+                )
+              )
+            """,
+            {"pid": pipeline_id},
+        )
+        published_video_count = pub_video_res.rows[0][0] if pub_video_res.rows else 0
+
+        # 4. Pipeline-level unpublished active video count
+        unpublished_count = max(0, active_inventory - published_video_count)
+
+        # 5. Pipeline-level queue jobs breakdown:
+        # - queued: waiting or scheduled to run
+        # - processing: currently running
+        # - failed: failed publishing jobs
+        q_breakdown_res = await execute(
+            """
+            SELECT
+                SUM(CASE WHEN status IN ('queued', 'scheduled') THEN 1 ELSE 0 END) AS queued_cnt,
+                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS proc_cnt,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS fail_cnt
+            FROM tiktok_publish_queue
+            WHERE pipeline_id = :pid
+            """,
+            {"pid": pipeline_id},
+        )
+        q_row = q_breakdown_res.rows[0] if q_breakdown_res.rows else (0, 0, 0)
+        queued_jobs = (q_row[0] or 0)
+        processing_jobs = (q_row[1] or 0)
+        failed_jobs = (q_row[2] or 0)
+        # Total waiting or active queue jobs (excludes failed, cancelled, done)
+        active_queued_count = queued_jobs + processing_jobs
+
         sources_data = []
-        total_reels = 0
-        total_unpublished = 0
-        total_published = 0
         for src in src_rows:
             total = await reels_repo.count_reels(src["id"])
             unpublished = await reels_repo.count_unpublished(src["id"])
             published = await reels_repo.count_published(src["id"])
-            total_reels += total
-            total_unpublished += unpublished
-            total_published += published
+            excluded = await reels_repo.count_excluded(src["id"])
 
             # last scan run
             res = await execute(
@@ -66,6 +132,8 @@ async def pipeline_flow(pipeline_id: str):
                 "discovered_total": src["discovered_total"],
                 "last_scan": last_scan,
                 "total_reels": total,
+                "active_reels": max(0, total - excluded),
+                "excluded_reels": excluded,
                 "unpublished": unpublished,
                 "published": published,
                 "pending_pubs": pending_pubs,
@@ -129,26 +197,26 @@ async def pipeline_flow(pipeline_id: str):
             source_detail = "Quét gần nhất thất bại"
         else:
             source_status = "ready"
-            source_detail = f"{len(src_rows)} nguồn · {total_reels} video"
+            source_detail = f"{len(src_rows)} nguồn · {active_inventory} video trong kho"
 
         # Step 2: Inventory status
-        if total_reels == 0:
+        if active_inventory == 0:
             inventory_status = "idle"
             inventory_detail = "Chưa có video trong kho"
-        elif total_unpublished > 0:
+        elif unpublished_count > 0:
             inventory_status = "ready"
-            inventory_detail = f"{total_unpublished} video chưa đăng"
+            inventory_detail = f"{unpublished_count} video chưa đăng"
         else:
             inventory_status = "done"
-            inventory_detail = f"{total_published} video đã đăng"
+            inventory_detail = f"{published_video_count} video đã đăng"
 
         # Step 3: AI Metadata status
         if ai_prepared_count > 0:
             ai_status = "ready"
             ai_detail = f"{ai_prepared_count} video đã có AI metadata"
-        elif total_unpublished > 0:
+        elif unpublished_count > 0:
             ai_status = "ready"
-            ai_detail = f"{total_unpublished} video sẵn sàng tạo SEO"
+            ai_detail = f"{unpublished_count} video sẵn sàng tạo SEO"
         else:
             ai_status = "idle"
             ai_detail = "Đang chờ video mới"
@@ -200,18 +268,21 @@ async def pipeline_flow(pipeline_id: str):
             scheduler_detail = "Auto ON · Sẵn sàng lên lịch"
 
         # Step 5: Publisher status
-        if processing_count > 0:
+        if processing_jobs > 0:
             publisher_status = "running"
-            publisher_detail = f"Đang đăng {processing_count} video lên YouTube..."
+            publisher_detail = f"Đang đăng {processing_jobs} video lên YouTube..."
         elif not pub_online:
             publisher_status = "offline"
             publisher_detail = "Publisher worker offline"
-        elif queue_count > 0:
+        elif active_queued_count > 0:
             publisher_status = "waiting"
-            publisher_detail = f"{queue_count} video trong hàng đợi"
-        elif total_published > 0:
+            publisher_detail = f"{active_queued_count} video trong hàng đợi"
+        elif published_video_count > 0:
             publisher_status = "done"
-            publisher_detail = f"{total_published} video đã đăng"
+            publisher_detail = f"{published_video_count} video đã đăng"
+        elif failed_jobs > 0:
+            publisher_status = "idle"
+            publisher_detail = f"Publisher idle · {failed_jobs} job thất bại"
         else:
             publisher_status = "idle"
             publisher_detail = "Publisher đang chờ việc (Idle)"
@@ -231,11 +302,11 @@ async def pipeline_flow(pipeline_id: str):
         active_edges = []
         if source_status == "running":
             active_edges.append("source->inventory")
-        if total_unpublished > 0 and (ai_status == "ready" or scheduler_status == "ready"):
+        if unpublished_count > 0 and (ai_status == "ready" or scheduler_status == "ready"):
             active_edges.append("inventory->ai_metadata")
-        if sched_enabled and (queue_count > 0 or scheduled_count > 0):
+        if sched_enabled and (active_queued_count > 0 or scheduled_count > 0):
             active_edges.append("ai_metadata->scheduler")
-        if queue_count > 0:
+        if active_queued_count > 0:
             active_edges.append("scheduler->publisher")
         if publisher_status == "running":
             active_edges.append("publisher->youtube_destination")
@@ -248,10 +319,20 @@ async def pipeline_flow(pipeline_id: str):
             "auto_publish": is_auto,
             "destinations": dest_rows,
             "sources": sources_data,
+            # Standard metric fields expected by DTO & PipelineCard
+            "inventory": active_inventory,
+            "published": published_video_count,
+            "queued": active_queued_count,
+            "failed": failed_jobs,
+            "processing": processing_jobs,
             "sources_count": len(src_rows),
-            "inventory_count": total_reels,
-            "published_count": total_published,
-            "queued_count": queue_count,
+            "destinations_count": len(dest_rows),
+            # Legacy alias fields for backwards compatibility
+            "inventory_count": active_inventory,
+            "published_count": published_video_count,
+            "queued_count": active_queued_count,
+            "failed_count": failed_jobs,
+            "processing_count": processing_jobs,
             "steps": {
                 "source": source_status,
                 "inventory": inventory_status,
@@ -273,11 +354,17 @@ async def pipeline_flow(pipeline_id: str):
                 "total_sources": len(src_rows),
                 "total_destinations": len(dest_rows),
                 "connected_destinations": connected_dest_count,
-                "total_reels": total_reels,
-                "unpublished": total_unpublished,
-                "published": total_published,
-                "queue_count": queue_count,
-                "processing_count": processing_count,
+                "inventory": active_inventory,
+                "published": published_video_count,
+                "queued": active_queued_count,
+                "failed": failed_jobs,
+                "processing": processing_jobs,
+                "total_reels": active_inventory + excluded_count,
+                "unpublished": unpublished_count,
+                "excluded_count": excluded_count,
+                "queue_count": active_queued_count,
+                "processing_count": processing_jobs,
+                "failed_count": failed_jobs,
                 "scheduled_count": scheduled_count,
                 "ai_prepared_count": ai_prepared_count,
             },
@@ -288,5 +375,6 @@ async def pipeline_flow(pipeline_id: str):
 
 @router.get("/invalidate/{pipeline_id}", dependencies=[Depends(require_admin)])
 async def invalidate_cache(pipeline_id: str):
-    invalidate(f"pipeline:{pipeline_id}:flow")
-    return {"status": "cache invalidated"}
+    from ..services.dashboard_cache import invalidate_pipeline
+    invalidate_pipeline(pipeline_id)
+    return {"status": "cache invalidated", "pipeline_id": pipeline_id}

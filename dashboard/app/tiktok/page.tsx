@@ -11,7 +11,8 @@ import { TikTokPipelineList } from "./TikTokClient";
 
 export default async function TikTokPage() {
   let pipelines: TikTokPipelineDto[] = [];
-  let summaries: Record<string, TikTokSummaryDto> = {};
+  const summaries: Record<string, TikTokSummaryDto> = {};
+  const summaryErrors: Record<string, string> = {};
   let error: string | null = null;
 
   try {
@@ -19,14 +20,20 @@ export default async function TikTokPage() {
     const rows = await Promise.all(
       pipelines.map(async (p) => {
         try {
-          return [p.id, await getTikTokSummary(p.id)] as const;
-        } catch {
-          return null;
+          const sum = await getTikTokSummary(p.id);
+          return { id: p.id, summary: sum, error: null };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Không tải được thống kê.";
+          return { id: p.id, summary: null, error: msg };
         }
       }),
     );
     for (const row of rows) {
-      if (row) summaries[row[0]] = row[1];
+      if (row.summary) {
+        summaries[row.id] = row.summary;
+      } else if (row.error) {
+        summaryErrors[row.id] = row.error;
+      }
     }
   } catch (err) {
     error = err instanceof TikTokApiError ? err.message : "Không tải được pipelines.";
@@ -34,7 +41,12 @@ export default async function TikTokPage() {
 
   return (
     <Shell>
-      <TikTokPipelineList pipelines={pipelines} summaries={summaries} error={error} />
+      <TikTokPipelineList
+        pipelines={pipelines}
+        summaries={summaries}
+        summaryErrors={summaryErrors}
+        error={error}
+      />
     </Shell>
   );
 }

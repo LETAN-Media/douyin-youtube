@@ -323,6 +323,7 @@ async def exclude_reel(reel_db_id: str, pipeline_id: str | None = None) -> dict[
     return {
         "ok": True,
         "reel_id": reel_db_id,
+        "pipeline_id": info.get("pipeline_id"),
         "status": "excluded",
         "previous_status": curr_status,
         "reel": updated,
@@ -365,6 +366,7 @@ async def restore_reel(reel_db_id: str, pipeline_id: str | None = None) -> dict[
     return {
         "ok": True,
         "reel_id": reel_db_id,
+        "pipeline_id": info.get("pipeline_id"),
         "status": target_status,
         "reel": updated,
     }

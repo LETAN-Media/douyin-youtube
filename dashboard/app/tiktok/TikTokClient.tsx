@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { TikTokPipelineAutoToggle } from "@/components/tiktok/TikTokPipelineToggles";
 import type { TikTokPipelineDto, TikTokSummaryDto } from "@/lib/tiktok-api";
@@ -139,10 +139,12 @@ function CreatePipelineModal({ onClose }: { onClose: () => void }) {
 export function TikTokPipelineList({
   pipelines,
   summaries,
+  summaryErrors = {},
   error,
 }: {
   pipelines: TikTokPipelineDto[];
   summaries: Record<string, TikTokSummaryDto>;
+  summaryErrors?: Record<string, string>;
   error: string | null;
 }) {
   const [showCreate, setShowCreate] = useState(false);
@@ -209,7 +211,8 @@ export function TikTokPipelineList({
           <PipelineCard
             key={p.id}
             pipeline={p}
-            summary={summaries[p.id]}
+            initialSummary={summaries[p.id]}
+            initialError={summaryErrors[p.id]}
             onSelect={() => router.push(`/tiktok/${p.id}`)}
           />
         ))}
@@ -220,25 +223,79 @@ export function TikTokPipelineList({
 
 function PipelineCard({
   pipeline,
-  summary,
+  initialSummary,
+  initialError,
   onSelect,
 }: {
   pipeline: TikTokPipelineDto;
-  summary?: TikTokSummaryDto;
+  initialSummary?: TikTokSummaryDto;
+  initialError?: string;
   onSelect: () => void;
 }) {
-  const hasSummary = !!summary;
-  const inventoryCount = summary?.inventory ?? 0;
-  const publishedCount = summary?.published ?? 0;
-  const queuedCount = summary?.queued ?? 0;
-  const failedCount = summary?.failed ?? 0;
+  const [summary, setSummary] = useState<TikTokSummaryDto | undefined>(initialSummary);
+  const [error, setError] = useState<string | null>(initialError || null);
+  const [retrying, setRetrying] = useState(false);
+
+  useEffect(() => {
+    if (initialSummary) {
+      setSummary(initialSummary);
+      setError(null);
+    } else if (initialError) {
+      setError(initialError);
+    }
+  }, [initialSummary, initialError]);
+
+  const handleRetry = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRetrying(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tiktok/flow/${encodeURIComponent(pipeline.id)}`, { cache: "no-store" });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+      const raw = await res.json();
+      const s = raw.summary || {};
+      const sourcesCount = raw.sources !== undefined && typeof raw.sources === "number"
+        ? raw.sources
+        : (raw.sources_count ?? s.total_sources ?? 0);
+      const destinationsCount = raw.destinations !== undefined && typeof raw.destinations === "number"
+        ? raw.destinations
+        : (s.total_destinations ?? 0);
+      const inventory = raw.inventory ?? raw.inventory_count ?? s.inventory ?? s.unpublished ?? 0;
+      const published = raw.published ?? raw.published_count ?? s.published ?? 0;
+      const queued = raw.queued ?? raw.queued_count ?? s.queued ?? s.queue_count ?? 0;
+      const failed = raw.failed ?? raw.failed_count ?? s.failed ?? 0;
+      const processing = raw.processing ?? raw.processing_count ?? s.processing ?? 0;
+
+      const sum: TikTokSummaryDto = {
+        pipeline_id: pipeline.id,
+        pipeline,
+        sources: Number(sourcesCount) || 0,
+        inventory: Number(inventory) || 0,
+        destinations: Number(destinationsCount) || 0,
+        published: Number(published) || 0,
+        failed: Number(failed) || 0,
+        queued: Number(queued) || 0,
+        processing: Number(processing) || 0,
+        auto_publish: Boolean(pipeline.auto_publish),
+      };
+      setSummary(sum);
+      setError(null);
+    } catch (err: any) {
+      setError(err instanceof Error ? err.message : "Không thể tải lại thống kê.");
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   return (
     <div
-      className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md"
+      className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md cursor-pointer"
       onClick={onSelect}
     >
-      <div className="absolute top-3 right-3">
+      <div className="absolute top-3 right-3" onClick={(e) => e.stopPropagation()}>
         <TikTokPipelineAutoToggle
           pipelineId={pipeline.id}
           initialAutoPublish={pipeline.auto_publish}
@@ -246,34 +303,69 @@ function PipelineCard({
         />
       </div>
 
-      <div className="cursor-pointer">
+      <div>
         <h3 className="text-xl font-bold text-slate-900">{pipeline.name}</h3>
         <p className="text-sm text-slate-500">@{pipeline.slug}</p>
       </div>
 
-      {hasSummary && (
+      {summary && (
         <div className="mt-4 grid grid-cols-4 gap-2 text-center">
-          <div>
-            <span className="text-2xl font-bold text-slate-900">{inventoryCount}</span>
-            <p className="text-xs text-slate-500">Inventory</p>
+          <div className="rounded-xl bg-slate-50/80 p-2.5 border border-slate-100">
+            <span className="text-2xl font-bold text-slate-900">
+              {typeof summary.inventory === "number" ? summary.inventory : "—"}
+            </span>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Inventory</p>
           </div>
-          <div>
-            <span className="text-2xl font-bold text-indigo-600">{publishedCount}</span>
-            <p className="text-xs text-slate-500">Published</p>
+          <div className="rounded-xl bg-indigo-50/50 p-2.5 border border-indigo-100/60">
+            <span className="text-2xl font-bold text-indigo-600">
+              {typeof summary.published === "number" ? summary.published : "—"}
+            </span>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Published</p>
           </div>
-          <div>
-            <span className="text-2xl font-bold text-amber-600">{queuedCount}</span>
-            <p className="text-xs text-slate-500">Queued</p>
+          <div className="rounded-xl bg-amber-50/50 p-2.5 border border-amber-100/60">
+            <span className="text-2xl font-bold text-amber-600">
+              {typeof summary.queued === "number" ? summary.queued : "—"}
+            </span>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Queued</p>
           </div>
-          <div>
-            <span className="text-2xl font-bold text-rose-600">{failedCount}</span>
-            <p className="text-xs text-slate-500">Failed</p>
+          <div className="rounded-xl bg-rose-50/50 p-2.5 border border-rose-100/60">
+            <span className={`text-2xl font-bold ${summary.failed > 0 ? "text-rose-600" : "text-slate-400"}`}>
+              {typeof summary.failed === "number" ? summary.failed : "—"}
+            </span>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Failed</p>
           </div>
         </div>
       )}
 
-      {!hasSummary && (
-        <div className="mt-3 text-xs text-slate-400">Đang tải…</div>
+      {error && !summary && (
+        <div
+          className="mt-4 flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50/90 px-3.5 py-2.5 text-xs text-rose-700 shadow-sm"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center gap-2 truncate">
+            <span>⚠️</span>
+            <span className="truncate">{error}</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleRetry}
+            disabled={retrying}
+            className="ml-2 inline-flex shrink-0 items-center rounded-lg bg-rose-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm hover:bg-rose-700 disabled:opacity-50 transition"
+          >
+            {retrying ? "Đang tải…" : "Thử lại"}
+          </button>
+        </div>
+      )}
+
+      {!summary && !error && (
+        <div className="mt-4 grid grid-cols-4 gap-2 text-center animate-pulse">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="rounded-xl bg-slate-100 p-2.5 h-16 flex flex-col items-center justify-center">
+              <div className="h-6 w-10 bg-slate-200 rounded mb-1" />
+              <div className="h-3 w-12 bg-slate-200 rounded" />
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

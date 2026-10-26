@@ -31,6 +31,9 @@ async def run_scan_sync(source_id: str):
     scan_run_id = f"scan_{_secrets.token_hex(8)}"
     await scan_runs.create_scan_run(scan_run_id, source_id, scan_mode="manual")
     stats = await scan_source(source_id, scan_run_id, scan_mode="manual")
+    if source.get("pipeline_id"):
+        from ..services.dashboard_cache import invalidate_pipeline
+        invalidate_pipeline(source["pipeline_id"])
     return {"scan_run_id": scan_run_id, "stats": stats}
 
 
@@ -58,6 +61,10 @@ async def list_scan_runs(source_id: str, limit: int = 20):
 async def _do_scan(source_id: str, scan_run_id: str):
     try:
         await scan_source(source_id, scan_run_id, scan_mode="manual")
+        source = await sources.get_source(source_id)
+        if source and source.get("pipeline_id"):
+            from ..services.dashboard_cache import invalidate_pipeline
+            invalidate_pipeline(source["pipeline_id"])
     except Exception as exc:
         import logging
 

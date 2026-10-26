@@ -56,6 +56,8 @@ async def delete_reel(
     pipeline_id: str | None = Query(default=None),
 ):
     """Delete (exclude) a video from inventory."""
+    from ..services.dashboard_cache import invalidate_pipeline
+
     res = await reels_repo.exclude_reel(reel_db_id, pipeline_id=pipeline_id)
     if not res.get("ok"):
         code = res.get("error_code")
@@ -67,6 +69,9 @@ async def delete_reel(
             raise HTTPException(status_code=409, detail=res["message"])
         else:
             raise HTTPException(status_code=400, detail=res["message"])
+    pid = res.get("pipeline_id") or pipeline_id
+    if pid:
+        invalidate_pipeline(pid)
     return res
 
 
@@ -77,6 +82,8 @@ async def exclude_reel(
     pipeline_id: str | None = Query(default=None),
 ):
     """POST alias for deleting/excluding a video from inventory."""
+    from ..services.dashboard_cache import invalidate_pipeline
+
     pid = (body.get("pipeline_id") if body else None) or pipeline_id
     res = await reels_repo.exclude_reel(reel_db_id, pipeline_id=pid)
     if not res.get("ok"):
@@ -89,6 +96,9 @@ async def exclude_reel(
             raise HTTPException(status_code=409, detail=res["message"])
         else:
             raise HTTPException(status_code=400, detail=res["message"])
+    target_pid = res.get("pipeline_id") or pid
+    if target_pid:
+        invalidate_pipeline(target_pid)
     return res
 
 
@@ -99,6 +109,8 @@ async def restore_reel(
     pipeline_id: str | None = Query(default=None),
 ):
     """Restore an excluded video back to active inventory."""
+    from ..services.dashboard_cache import invalidate_pipeline
+
     pid = (body.get("pipeline_id") if body else None) or pipeline_id
     res = await reels_repo.restore_reel(reel_db_id, pipeline_id=pid)
     if not res.get("ok"):
@@ -111,23 +123,34 @@ async def restore_reel(
             raise HTTPException(status_code=409, detail=res["message"])
         else:
             raise HTTPException(status_code=400, detail=res["message"])
+    target_pid = res.get("pipeline_id") or pid
+    if target_pid:
+        invalidate_pipeline(target_pid)
     return res
 
 
 @router.post("/pipelines/{pipeline_id}/exclude", dependencies=[Depends(require_admin)])
 async def bulk_exclude_inventory(pipeline_id: str, body: dict):
+    from ..services.dashboard_cache import invalidate_pipeline
+
     reel_ids = body.get("reel_ids", [])
     if not isinstance(reel_ids, list):
         raise HTTPException(status_code=400, detail="reel_ids must be a list")
-    return await reels_repo.bulk_exclude_reels(pipeline_id, [str(r) for r in reel_ids])
+    res = await reels_repo.bulk_exclude_reels(pipeline_id, [str(r) for r in reel_ids])
+    invalidate_pipeline(pipeline_id)
+    return res
 
 
 @router.post("/pipelines/{pipeline_id}/restore", dependencies=[Depends(require_admin)])
 async def bulk_restore_inventory(pipeline_id: str, body: dict):
+    from ..services.dashboard_cache import invalidate_pipeline
+
     reel_ids = body.get("reel_ids", [])
     if not isinstance(reel_ids, list):
         raise HTTPException(status_code=400, detail="reel_ids must be a list")
-    return await reels_repo.bulk_restore_reels(pipeline_id, [str(r) for r in reel_ids])
+    res = await reels_repo.bulk_restore_reels(pipeline_id, [str(r) for r in reel_ids])
+    invalidate_pipeline(pipeline_id)
+    return res
 
 
 @router.patch("/reel/{reel_db_id}/status", dependencies=[Depends(require_admin)])

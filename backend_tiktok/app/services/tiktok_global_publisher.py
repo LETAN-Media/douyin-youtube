@@ -98,6 +98,12 @@ async def publisher_loop(stop_event: asyncio.Event) -> None:
             await publications.mark_failed(job["publication_id"], err_msg)
             # Release reel so it doesn't get stuck in processing
             await reels.advance_status(job["reel_db_id"], "processing", "failed")
+        finally:
+            try:
+                from .dashboard_cache import invalidate_pipeline
+                invalidate_pipeline(job["pipeline_id"])
+            except Exception:
+                pass
 
     logger.info("TikTok global publisher stopped")
 

@@ -583,6 +583,8 @@ async def calculate_schedule_plan(
         target_date_str,
         resolved_destination_id,
     )
+    from .dashboard_cache import invalidate_pipeline
+    invalidate_pipeline(pipeline_id)
     return result_data
 
 

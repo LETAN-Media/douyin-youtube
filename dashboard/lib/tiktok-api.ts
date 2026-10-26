@@ -36,6 +36,7 @@ export interface TikTokSourceDto {
 }
 
 export interface TikTokSummaryDto {
+  pipeline_id?: string;
   pipeline: TikTokPipelineDto;
   sources: number;
   inventory: number;
@@ -272,7 +273,44 @@ export async function toggleTikTokPipelineEnabled(
 }
 
 export async function getTikTokSummary(pipelineId: string): Promise<TikTokSummaryDto> {
-  return ttFetch<TikTokSummaryDto>(`/api/tiktok/flow/pipeline/${encodeURIComponent(pipelineId)}`);
+  const raw: any = await ttFetch<any>(`/api/tiktok/flow/pipeline/${encodeURIComponent(pipelineId)}`);
+  if (!raw || raw.error) {
+    throw new TikTokApiError(500, raw?.error || "Không thể tải dữ liệu summary của pipeline.");
+  }
+  const pipeline: TikTokPipelineDto = raw.pipeline || {
+    id: raw.pipeline_id || pipelineId,
+    name: raw.pipeline_name || "",
+    slug: "",
+    enabled: Boolean(raw.live ?? true),
+    auto_publish: Boolean(raw.auto_publish),
+    created_at: null,
+    updated_at: null,
+  };
+  const summary = raw.summary || {};
+  const sourcesCount = raw.sources !== undefined && typeof raw.sources === "number"
+    ? raw.sources
+    : (raw.sources_count ?? summary.total_sources ?? (Array.isArray(raw.sources) ? raw.sources.length : 0));
+  const destinationsCount = raw.destinations !== undefined && typeof raw.destinations === "number"
+    ? raw.destinations
+    : (Array.isArray(raw.destinations) ? raw.destinations.length : (summary.total_destinations ?? 0));
+  const inventory = raw.inventory ?? raw.inventory_count ?? summary.inventory ?? summary.unpublished ?? 0;
+  const published = raw.published ?? raw.published_count ?? summary.published ?? 0;
+  const queued = raw.queued ?? raw.queued_count ?? summary.queued ?? summary.queue_count ?? 0;
+  const failed = raw.failed ?? raw.failed_count ?? summary.failed ?? 0;
+  const processing = raw.processing ?? raw.processing_count ?? summary.processing ?? summary.processing_count ?? 0;
+
+  return {
+    pipeline_id: pipeline.id,
+    pipeline,
+    sources: Number(sourcesCount) || 0,
+    inventory: Number(inventory) || 0,
+    destinations: Number(destinationsCount) || 0,
+    published: Number(published) || 0,
+    failed: Number(failed) || 0,
+    queued: Number(queued) || 0,
+    processing: Number(processing) || 0,
+    auto_publish: Boolean(pipeline.auto_publish),
+  };
 }
 
 export async function listTikTokSources(pipelineId: string): Promise<TikTokSourceDto[]> {
@@ -793,11 +831,15 @@ export async function getTikTokFlowState(pipelineId: string): Promise<TikTokFlow
   const sources = raw.sources || [];
   const destinations = raw.destinations || [];
 
-  const totalSources = raw.sources_count ?? summary.total_sources ?? sources.length;
-  const totalReels = raw.inventory_count ?? summary.total_reels ?? 0;
+  const totalSources = raw.sources !== undefined && typeof raw.sources === "number"
+    ? raw.sources
+    : (raw.sources_count ?? summary.total_sources ?? sources.length);
+  const activeInventory = raw.inventory ?? raw.inventory_count ?? summary.inventory ?? summary.total_reels ?? 0;
   const unpublished = summary.unpublished ?? 0;
-  const published = raw.published_count ?? summary.published ?? 0;
-  const queueCount = raw.queued_count ?? summary.queue_count ?? 0;
+  const published = raw.published ?? raw.published_count ?? summary.published ?? 0;
+  const queueCount = raw.queued ?? raw.queued_count ?? summary.queued ?? summary.queue_count ?? 0;
+  const failedCount = raw.failed ?? raw.failed_count ?? summary.failed ?? 0;
+  const processingCount = raw.processing ?? raw.processing_count ?? summary.processing ?? 0;
 
   // Use backend computed steps if present, otherwise fallback
   let steps = raw.steps;
@@ -817,12 +859,12 @@ export async function getTikTokFlowState(pipelineId: string): Promise<TikTokFlow
       sourceDetail = "Quét gần nhất thất bại";
     } else {
       sourceStatus = "ready";
-      sourceDetail = `${sources.length} nguồn · ${totalReels} video`;
+      sourceDetail = `${sources.length} nguồn · ${activeInventory} video`;
     }
 
     let inventoryStatus: TikTokFlowBackendStatus = "idle";
     let inventoryDetail = "Chưa có video trong kho";
-    if (totalReels === 0) {
+    if (activeInventory === 0) {
       inventoryStatus = "idle";
     } else if (unpublished > 0) {
       inventoryStatus = "ready";
@@ -891,12 +933,12 @@ export async function getTikTokFlowState(pipelineId: string): Promise<TikTokFlow
     pipeline_name: pipeline.name || "TikTok Pipeline",
     live: Boolean(pipeline.enabled ?? true),
     auto_publish: Boolean(pipeline.auto_publish),
-    sources: totalSources,
-    inventory: totalReels,
-    published,
-    queued: queueCount,
-    processing: 0,
-    failed: 0,
+    sources: Number(totalSources) || 0,
+    inventory: Number(activeInventory) || 0,
+    published: Number(published) || 0,
+    queued: Number(queueCount) || 0,
+    processing: Number(processingCount) || 0,
+    failed: Number(failedCount) || 0,
     steps,
     details,
     active_edges: activeEdges,
