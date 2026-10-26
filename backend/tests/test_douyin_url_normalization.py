@@ -124,6 +124,30 @@ class TestDouyinUrlNormalization(unittest.TestCase):
         self.assertEqual(result.sec_uid, "MS4wLjABAAAA_test")
         self.assertEqual(result.canonical, "https://www.douyin.com/user/MS4wLjABAAAA_test")
 
+    @patch("httpx.get")
+    def test_16_short_link_v_douyin(self, mock_get):
+        """v.douyin.com short link redirects to iesdouyin.com share profile."""
+        from unittest.mock import MagicMock
+        mock_resp1 = MagicMock()
+        mock_resp1.status_code = 302
+        mock_resp1.headers = {
+            "location": "https://www.iesdouyin.com/share/user/MS4wLjABAAAA_mocked_sec_uid?foo=bar"
+        }
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 200
+        mock_resp2.headers = {}
+        mock_get.side_effect = [mock_resp1, mock_resp2]
+
+        result = parse_douyin_profile_url("https://v.douyin.com/iZKxRoxol8Y/")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.sec_uid, "MS4wLjABAAAA_mocked_sec_uid")
+        self.assertEqual(result.canonical, "https://www.douyin.com/user/MS4wLjABAAAA_mocked_sec_uid")
+        self.assertEqual(mock_get.call_count, 2)
+        call_args, call_kwargs = mock_get.call_args_list[0]
+        self.assertIn("follow_redirects", call_kwargs)
+        self.assertFalse(call_kwargs["follow_redirects"])
+        self.assertIn("iZKxRoxol8Y", call_args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -447,14 +447,15 @@ class SelfHostedDouyinProvider(DouyinInventoryProvider):
     def _fetch(self, sec_uid_or_url: str, full: bool) -> list[dict[str, Any]]:
         """Fetch all or latest videos from self-hosted API."""
         sec_uid = self._resolve_sec_uid(sec_uid_or_url)
-        if not sec_uid:
+        target = sec_uid or (sec_uid_or_url or "").strip()
+        if not target:
             raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
 
         from app.douyin_self_hosted import DouyinSelfHostedClient
 
         client = DouyinSelfHostedClient()
         try:
-            items = client.fetch_video_items(sec_uid)
+            items = client.fetch_video_items(target)
         except Exception as exc:
             if "DOUYIN_SELF_HOSTED_ENABLED" in str(exc):
                 raise DouyinInventoryError("PROVIDER_DISABLED: self-hosted API disabled")
@@ -495,24 +496,45 @@ class SelfHostedDouyinProvider(DouyinInventoryProvider):
             return None
 
         text = value.strip().rstrip("/")
-        # Check if it's already a numeric sec_uid
-        if text.isalnum():
+        if text.startswith("MS4wLjABAAAA"):
             return text
 
-        # Extract from profile URL
+        if text.startswith("http://") or text.startswith("https://"):
+            try:
+                from app.douyin_url import parse_douyin_profile_url
+
+                parsed = parse_douyin_profile_url(text)
+                if parsed is not None and parsed.sec_uid:
+                    return parsed.sec_uid
+            except Exception:
+                pass
+
         import re
-        # Try /user/ pattern first (most common)
-        m = re.search(r"/user/([A-Za-z0-9_-]+)", text)
-        if m:
-            return m.group(1)
 
         # Try /share/user/ pattern
         m = re.search(r"/share/user/([A-Za-z0-9_-]+)", text)
         if m:
             return m.group(1)
 
-        # Fallback: last path component
-        return text.split("/")[-1].split("?")[0]
+        # Try /user/ pattern
+        m = re.search(r"/user/([A-Za-z0-9_-]+)", text)
+        if m:
+            return m.group(1)
+
+        # Try sec_uid query param
+        m = re.search(r"sec_uid=([A-Za-z0-9_-]+)", text)
+        if m:
+            return m.group(1)
+
+        # If it looks like a valid sec_uid (without slashes and length >= 20)
+        if "/" not in text and len(text) >= 20:
+            return text
+
+        # If input was a URL and couldn't parse sec_uid, return the URL so the scraper can resolve it
+        if text.startswith("http://") or text.startswith("https://"):
+            return text
+
+        return None
 
     @staticmethod
     def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:

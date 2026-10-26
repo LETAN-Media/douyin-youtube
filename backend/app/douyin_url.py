@@ -182,7 +182,7 @@ def _resolve_short_link(url: str) -> str | None:
         try:
             resp = httpx.get(
                 current_url,
-                allow_redirects=False,
+                follow_redirects=False,
                 timeout=httpx.Timeout(_TIMEOUT_SECONDS),
                 headers={"User-Agent": _USER_AGENT},
             )
@@ -289,8 +289,46 @@ def parse_douyin_profile_url(raw_url: str) -> DouyinProfileUrl | None:
     if _is_video_url(path):
         raise DouyinUrlError("Video URLs are not valid profile sources")
 
+    # Short link — resolve redirects first
+    if hostname == "v.douyin.com" or (hostname in _SHORT_DOMAINS and not ("/user/" in path or "/share/user/" in path)):
+        value = original.strip()
+        if not value.lower().startswith("http://") and not value.lower().startswith("https://"):
+            value = "https://" + value
+
+        try:
+            final_url = _resolve_short_link(value)
+        except DouyinUrlError:
+            return None
+        if final_url is None:
+            return None
+
+        # Parse the final URL to extract sec_uid
+        parsed_final = urlparse(final_url)
+        final_hostname = (parsed_final.hostname or "").lower()
+        final_path = parsed_final.path or ""
+
+        if _is_allowed_host(final_hostname):
+            sec_uid = _extract_sec_uid_from_path(final_path)
+            if not sec_uid:
+                query = parsed_final.query or ""
+                if "sec_uid=" in query:
+                    m = re.search(r"sec_uid=([A-Za-z0-9_-]+)", query)
+                    if m:
+                        sec_uid = m.group(1)
+
+            if not sec_uid:
+                return None
+
+            canonical = f"https://www.douyin.com/user/{sec_uid}"
+            return DouyinProfileUrl(
+                original=original,
+                sec_uid=sec_uid,
+                canonical=canonical,
+            )
+        return None
+
     # Direct long URLs (douyin.com or iesdouyin.com)
-    if hostname in {"www.douyin.com", "douyin.com", "m.douyin.com", "iesdouyin.com"} or hostname.endswith(".douyin.com"):
+    if _is_allowed_host(hostname):
         # Extract sec_uid from the original case path
         sec_uid = _extract_sec_uid_from_path(path)
         if not sec_uid:
@@ -310,46 +348,6 @@ def parse_douyin_profile_url(raw_url: str) -> DouyinProfileUrl | None:
             sec_uid=sec_uid,
             canonical=canonical,
         )
-
-    # Short link — resolve redirects
-    # For short links, we need to normalize the URL first
-    value = original.lower()
-    if not value.startswith("http://") and not value.startswith("https://"):
-        value = "https://" + value
-
-    parsed = urlparse(value)
-    src_host = (parsed.hostname or "").lower()
-    if src_host in _SHORT_DOMAINS:
-        try:
-            final_url = _resolve_short_link(value)
-        except DouyinUrlError:
-            return None
-        if final_url is None:
-            return None
-
-        # Parse the final URL to extract sec_uid
-        parsed_final = urlparse(final_url)
-        final_hostname = (parsed_final.hostname or "").lower()
-        final_path = parsed_final.path or ""
-
-        if final_hostname in {"www.douyin.com", "douyin.com", "m.douyin.com", "iesdouyin.com"} or final_hostname.endswith(".douyin.com"):
-            sec_uid = _extract_sec_uid_from_path(final_path)
-            if not sec_uid:
-                query = parsed_final.query or ""
-                if "sec_uid=" in query:
-                    m = re.search(r"sec_uid=([A-Za-z0-9_-]+)", query)
-                    if m:
-                        sec_uid = m.group(1)
-
-            if not sec_uid:
-                return None
-
-            canonical = f"https://www.douyin.com/user/{sec_uid}"
-            return DouyinProfileUrl(
-                original=original,
-                sec_uid=sec_uid,
-                canonical=canonical,
-            )
 
     return None
 

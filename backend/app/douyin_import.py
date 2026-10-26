@@ -185,19 +185,29 @@ def _fetch_page(
 
 def _resolve_sec_uid(source: DouyinSource) -> str:
     sec_uid = (source.douyin_sec_uid or source.douyin_user_id or "").strip()
-    if sec_uid:
+    if sec_uid and sec_uid.startswith("MS4wLjABAAAA"):
         return sec_uid
-    profile_url = (source.profile_url or "").strip()
+    profile_url = (source.profile_url or source.original_profile_url or "").strip()
     if not profile_url:
-        return ""
+        return sec_uid
     try:
         from app.douyin_url import parse_douyin_profile_url
 
         parsed = parse_douyin_profile_url(profile_url)
-        if parsed is not None:
+        if parsed is not None and parsed.sec_uid:
+            try:
+                with SessionLocal.begin() as db:
+                    s_db = db.get(DouyinSource, source.id)
+                    if s_db and not s_db.douyin_sec_uid:
+                        s_db.douyin_sec_uid = parsed.sec_uid
+                        s_db.profile_url = parsed.canonical
+            except Exception:
+                pass
             return parsed.sec_uid
     except Exception:
         pass
+    if profile_url.startswith("http://") or profile_url.startswith("https://"):
+        return profile_url
     return profile_url.rstrip("/").split("?")[0].rsplit("/", 1)[-1]
 
 
