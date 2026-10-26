@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge, Card, CardHeader, Spinner, btnPrimary, btnSecondary, btnSmall, inputCls, labelCls } from "@/components/ui";
-import { IconAlert, IconBack, IconCheck, IconClock, IconFilm, IconPlay, IconPlus, IconRefresh, IconTikTok, IconUpload, IconVideo } from "@/components/icons";
+import { IconAlert, IconArrowLeft, IconBack, IconCheck, IconClock, IconFilm, IconPlay, IconPlus, IconRefresh, IconTikTok, IconUpload, IconVideo } from "@/components/icons";
 import { TikTokPipelineToggles } from "@/components/tiktok/TikTokPipelineToggles";
 import { TikTokOverview } from "@/components/tiktok/TikTokOverview";
 import { TikTokAiSettings } from "@/components/tiktok/TikTokAiSettings";
@@ -174,8 +174,8 @@ export function TikTokPipelineDetailClient({
           href="/tiktok"
           className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-bold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 active:scale-95"
         >
-          <IconBack size={15} />
-          <span>← Quay lại chọn Pipeline</span>
+          <IconArrowLeft size={15} />
+          <span>Quay lại chọn Pipeline</span>
         </Link>
       </div>
 

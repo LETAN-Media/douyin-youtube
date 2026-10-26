@@ -134,6 +134,8 @@ export const IconBack = (p: P) => (
   </Svg>
 );
 
+export const IconArrowLeft = IconBack;
+
 export const IconChevronRight = (p: P) => (
   <Svg {...p}>
     <path d="m9 6 6 6-6 6" />
