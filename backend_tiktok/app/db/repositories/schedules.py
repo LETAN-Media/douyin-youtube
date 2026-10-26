@@ -94,7 +94,7 @@ async def update_schedule(
         params["tz"] = timezone
     if max_daily is not None:
         updates.append("max_daily_publish = :max")
-        params["max"] = max_daily
+        params["max"] = max(1, min(10, int(max_daily)))
     if batch_time is not None:
         updates.append("batch_time = :bt")
         params["bt"] = batch_time

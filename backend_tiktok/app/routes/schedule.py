@@ -29,10 +29,23 @@ async def toggle_schedule(pipeline_id: str, body: dict):
 async def update_schedule(pipeline_id: str, body: dict):
     from ..db.repositories import schedules
 
+    max_daily = body.get("max_daily")
+    if max_daily is not None:
+        try:
+            val = int(max_daily)
+            if val < 1 or val > 10:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Số video đăng trong ngày (max_daily) phải từ 1 đến 10.",
+                )
+            max_daily = val
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="max_daily không hợp lệ.")
+
     return await schedules.update_schedule(
         pipeline_id,
         timezone=body.get("timezone"),
-        max_daily=body.get("max_daily"),
+        max_daily=max_daily,
         batch_time=body.get("batch_time"),
         active_days=body.get("active_days"),
         weekend_priority=body.get("weekend_priority"),
@@ -65,7 +78,10 @@ async def list_slots(pipeline_id: str):
 async def generate_slots(pipeline_id: str, body: dict):
     from ..services import schedule_generator
 
-    max_daily = body.get("max_daily", 5)
+    try:
+        max_daily = max(1, min(10, int(body.get("max_daily", 5))))
+    except (ValueError, TypeError):
+        max_daily = 5
     batch_time = body.get("batch_time", "06:00")
     return await schedule_generator.generate_week_schedule(pipeline_id, max_daily, batch_time)
 

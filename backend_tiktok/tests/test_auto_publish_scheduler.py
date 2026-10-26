@@ -457,3 +457,34 @@ async def test_global_publisher_resolves_via_shortcut(tmp_path: Path):
 
     updated_job = await publish_queue.get_job("job_pub_1")
     assert updated_job["stage"] == "done"
+
+
+async def test_schedule_max_daily_clamping_and_validation():
+    """Verify max_daily is clamped between 1 and 10 in repository and API."""
+    from app.routes.schedule import update_schedule
+    from fastapi import HTTPException
+
+    await pipelines.create_pipeline(pipeline_id="pl_clamp", name="Pipe Clamp", slug="pipe-clamp")
+    sched = await schedules.get_or_create_schedule("pl_clamp", max_daily=5)
+    assert sched["max_daily_publish"] == 5
+
+    # 1. Update with > 10 in repo -> Clamped to 10
+    updated_high = await schedules.update_schedule("pl_clamp", max_daily=25)
+    assert updated_high["max_daily_publish"] == 10
+
+    # 2. Update with < 1 in repo -> Clamped to 1
+    updated_low = await schedules.update_schedule("pl_clamp", max_daily=0)
+    assert updated_low["max_daily_publish"] == 1
+
+    # 3. Route endpoint validates boundary (raises 400 for out-of-range)
+    with pytest.raises(HTTPException) as exc_high:
+        await update_schedule("pl_clamp", {"max_daily": 15})
+    assert exc_high.value.status_code == 400
+
+    with pytest.raises(HTTPException) as exc_low:
+        await update_schedule("pl_clamp", {"max_daily": 0})
+    assert exc_low.value.status_code == 400
+
+    # 4. Valid value (e.g. 8) succeeds
+    valid_res = await update_schedule("pl_clamp", {"max_daily": 8})
+    assert valid_res["max_daily_publish"] == 8

@@ -113,6 +113,16 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
   async function handleSaveSettings(e: React.FormEvent) {
     e.preventDefault();
     if (saving) return;
+
+    const numDaily = Number(maxDaily);
+    if (!Number.isFinite(numDaily) || numDaily < 1 || numDaily > 10) {
+      setMessage({
+        type: "error",
+        text: "Số video đăng trong ngày phải nằm trong khoảng từ 1 đến 10.",
+      });
+      return;
+    }
+
     setSaving(true);
     setMessage(null);
     try {
@@ -124,7 +134,7 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
           action: "update_settings",
           settings: {
             timezone,
-            max_daily: Number(maxDaily),
+            max_daily: numDaily,
             batch_time: batchTime,
             active_days: activeDays,
             weekend_priority: weekendPriority,
@@ -316,13 +326,13 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
               <input
                 type="number"
                 min={1}
-                max={20}
+                max={10}
                 value={maxDaily}
                 onChange={(e) => setMaxDaily(Number(e.target.value))}
                 className={`${inputCls} mt-1`}
                 required
               />
-              <p className="mt-1 text-[11px] text-slate-500">Giới hạn tránh vi phạm spam quota của YouTube (1–20)</p>
+              <p className="mt-1 text-[11px] text-slate-500">Giới hạn số lượng video đăng mỗi ngày (tối thiểu 1, tối đa 10 video)</p>
             </div>
 
             {/* Batch execution time */}

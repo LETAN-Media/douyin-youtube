@@ -247,7 +247,7 @@ async def execute_daily_batch(
             }
 
     # Daily limit & counting already published/scheduled today
-    max_daily = max(1, int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY))
+    max_daily = max(1, min(10, int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY)))
 
     start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
     end_local = start_local + timedelta(days=1)
