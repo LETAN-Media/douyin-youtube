@@ -280,3 +280,36 @@ async def test_scheduler_ignores_excluded_reels():
     # Excluded reel remains excluded and untouched
     exc_check = await reels.get_reel(r_exc["id"])
     assert exc_check["status"] == "excluded"
+
+
+@pytest.mark.asyncio
+async def test_inventory_filter_separation():
+    """Verify in-stock, excluded, and all video counting and separation."""
+    await pipelines.create_pipeline(pipeline_id="p1", name="Pipe 1", slug="pipe-1")
+    src = await sources.create_source("s1", "p1", "creator1")
+
+    # Insert 3 reels
+    _, r1, _ = await reels.insert_reel_if_new(source_id=src["id"], reel_id="vid_1")
+    _, r2, _ = await reels.insert_reel_if_new(source_id=src["id"], reel_id="vid_2")
+    _, r3, _ = await reels.insert_reel_if_new(source_id=src["id"], reel_id="vid_3")
+
+    # Exclude 1 reel
+    await reels.exclude_reel(r2["id"], pipeline_id="p1")
+
+    # Counts
+    total = await reels.count_reels(src["id"])
+    excluded_cnt = await reels.count_excluded(src["id"])
+    unpublished_cnt = await reels.count_unpublished(src["id"])
+
+    assert total == 3
+    assert excluded_cnt == 1
+    assert unpublished_cnt == 2
+
+    # Query pipeline inventory with status filter
+    all_reels = await reels.list_reels_for_pipeline("p1")
+    assert len(all_reels) == 3
+
+    excluded_reels = await reels.list_reels_for_pipeline("p1", status="excluded")
+    assert len(excluded_reels) == 1
+    assert excluded_reels[0]["id"] == r2["id"]
+

@@ -19,6 +19,8 @@ function formatDuration(sec: number | null): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+export type InventoryFilterTab = "in_stock" | "excluded" | "all";
+
 export function TikTokInventory({
   pipelineId,
   sources,
@@ -30,7 +32,7 @@ export function TikTokInventory({
   );
   const [inventory, setInventory] = useState<TikTokReelDto[]>([]);
   const [loading, setLoading] = useState(false);
-  const [filterStatus, setFilterStatus] = useState<"all" | "available" | "published" | "excluded">("all");
+  const [filterStatus, setFilterStatus] = useState<InventoryFilterTab>("in_stock");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   // Action states
@@ -84,12 +86,8 @@ export function TikTokInventory({
 
   // Filter inventory
   const filteredInventory = useMemo(() => {
-    if (filterStatus === "all") return inventory;
-    if (filterStatus === "available") {
-      return inventory.filter((r) => r.status === "new" || r.status === "failed" || r.status === "error");
-    }
-    if (filterStatus === "published") {
-      return inventory.filter((r) => r.status === "published");
+    if (filterStatus === "in_stock") {
+      return inventory.filter((r) => r.status !== "excluded");
     }
     if (filterStatus === "excluded") {
       return inventory.filter((r) => r.status === "excluded");
@@ -97,17 +95,18 @@ export function TikTokInventory({
     return inventory;
   }, [inventory, filterStatus]);
 
-  // Count by status
+  // Count by status: Trong kho (active), Đã loại trừ (excluded), Tất cả (all)
   const counts = useMemo(() => {
-    let available = 0;
-    let published = 0;
+    let inStock = 0;
     let excluded = 0;
     for (const r of inventory) {
-      if (r.status === "published") published++;
-      else if (r.status === "excluded") excluded++;
-      else if (r.status === "new" || r.status === "failed" || r.status === "error") available++;
+      if (r.status === "excluded") {
+        excluded++;
+      } else {
+        inStock++;
+      }
     }
-    return { all: inventory.length, available, published, excluded };
+    return { in_stock: inStock, excluded, all: inventory.length };
   }, [inventory]);
 
   // Checkbox handlers
@@ -117,6 +116,17 @@ export function TikTokInventory({
 
   const allSelected = selectableReels.length > 0 && selectableReels.every((r) => selectedIds.includes(r.id));
   const isIndeterminate = selectedIds.length > 0 && !allSelected;
+
+  // Selected breakdown for 'all' tab contextual actions
+  const selectedExcludedIds = useMemo(() => {
+    const excludedSet = new Set(inventory.filter((r) => r.status === "excluded").map((r) => r.id));
+    return selectedIds.filter((id) => excludedSet.has(id));
+  }, [inventory, selectedIds]);
+
+  const selectedActiveIds = useMemo(() => {
+    const activeSet = new Set(inventory.filter((r) => r.status !== "excluded").map((r) => r.id));
+    return selectedIds.filter((id) => activeSet.has(id));
+  }, [inventory, selectedIds]);
 
   function handleToggleSelectAll() {
     if (allSelected) {
@@ -142,9 +152,10 @@ export function TikTokInventory({
   }
 
   // Open bulk delete confirmation
-  function handleRequestBulkDelete() {
-    if (selectedIds.length === 0) return;
-    setConfirmModal({ type: "bulk", ids: selectedIds });
+  function handleRequestBulkDelete(idsToExclude?: string[]) {
+    const targetIds = idsToExclude || (filterStatus === "all" ? selectedActiveIds : selectedIds);
+    if (targetIds.length === 0) return;
+    setConfirmModal({ type: "bulk", ids: targetIds });
   }
 
   // Execute single delete/exclude
@@ -162,9 +173,13 @@ export function TikTokInventory({
       if (!res.ok) {
         throw new Error(data.error || data.detail || "Xóa video thất bại.");
       }
-      setMessage({ type: "success", text: "Đã loại bỏ video khỏi kho thành công." });
-      setConfirmModal(null);
+      // Optimistic update: mark reel as excluded immediately so it vanishes from "Trong kho" view right away
+      setInventory((prev) =>
+        prev.map((r) => (r.id === reelId ? { ...r, status: "excluded" } : r))
+      );
       setSelectedIds((prev) => prev.filter((id) => id !== reelId));
+      setConfirmModal(null);
+      setMessage({ type: "success", text: "Đã loại bỏ video khỏi kho thành công." });
       await loadInventory(selectedSourceId);
       onInventoryChanged?.();
     } catch (err) {
@@ -193,12 +208,17 @@ export function TikTokInventory({
         throw new Error(data.error || data.detail || "Xóa hàng loạt video thất bại.");
       }
       const count = data.excluded ?? reelIds.length;
+      // Optimistic update: mark reels as excluded immediately so they vanish from "Trong kho" view right away
+      const idSet = new Set(reelIds);
+      setInventory((prev) =>
+        prev.map((r) => (idSet.has(r.id) ? { ...r, status: "excluded" } : r))
+      );
+      setSelectedIds((prev) => prev.filter((id) => !idSet.has(id)));
+      setConfirmModal(null);
       setMessage({
         type: "success",
         text: `Đã loại bỏ ${count} video khỏi kho thành công.`,
       });
-      setConfirmModal(null);
-      setSelectedIds([]);
       await loadInventory(selectedSourceId);
       onInventoryChanged?.();
     } catch (err) {
@@ -226,6 +246,20 @@ export function TikTokInventory({
       if (!res.ok) {
         throw new Error(data.error || data.detail || "Khôi phục video thất bại.");
       }
+      // Optimistic update: restore status immediately so it returns to "Trong kho" view and leaves "Đã loại trừ"
+      setInventory((prev) =>
+        prev.map((r) => {
+          if (r.id === reelId) {
+            const restoredStatus =
+              (r as any).previous_status && (r as any).previous_status !== "excluded"
+                ? (r as any).previous_status
+                : "new";
+            return { ...r, status: restoredStatus, previous_status: null };
+          }
+          return r;
+        })
+      );
+      setSelectedIds((prev) => prev.filter((id) => id !== reelId));
       setMessage({ type: "success", text: "Đã khôi phục video về kho thành công." });
       await loadInventory(selectedSourceId);
       onInventoryChanged?.();
@@ -241,23 +275,38 @@ export function TikTokInventory({
   }
 
   // Bulk restore selected reels
-  async function handleBulkRestore() {
-    if (selectedIds.length === 0) return;
+  async function handleBulkRestore(idsToRestore?: string[]) {
+    const targetIds = idsToRestore || (filterStatus === "all" ? selectedExcludedIds : selectedIds);
+    if (targetIds.length === 0) return;
     setActionLoading(true);
     setMessage(null);
     try {
       const res = await fetch("/api/tiktok/inventory", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "restore", reel_ids: selectedIds, pipeline_id: pipelineId }),
+        body: JSON.stringify({ action: "restore", reel_ids: targetIds, pipeline_id: pipelineId }),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || data.detail || "Khôi phục video thất bại.");
       }
-      const count = data.restored ?? selectedIds.length;
+      const count = data.restored ?? targetIds.length;
+      // Optimistic update: restore statuses immediately so they return to "Trong kho" view
+      const idSet = new Set(targetIds);
+      setInventory((prev) =>
+        prev.map((r) => {
+          if (idSet.has(r.id)) {
+            const restoredStatus =
+              (r as any).previous_status && (r as any).previous_status !== "excluded"
+                ? (r as any).previous_status
+                : "new";
+            return { ...r, status: restoredStatus, previous_status: null };
+          }
+          return r;
+        })
+      );
+      setSelectedIds((prev) => prev.filter((id) => !idSet.has(id)));
       setMessage({ type: "success", text: `Đã khôi phục ${count} video về kho thành công.` });
-      setSelectedIds([]);
       await loadInventory(selectedSourceId);
       onInventoryChanged?.();
     } catch (err) {
@@ -338,13 +387,12 @@ export function TikTokInventory({
 
         {/* Filter Pills & Multi-select Actions Bar */}
         <div className="px-4 py-3 bg-slate-50/70 border-b border-slate-100 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
-          {/* Status Filter Tabs */}
+          {/* Status Filter Tabs: Trong kho (mặc định), Đã loại trừ, Tất cả */}
           <div className="flex flex-wrap items-center gap-1.5">
             {[
-              { id: "all", label: "Tất cả", count: counts.all },
-              { id: "available", label: "Trong kho", count: counts.available },
-              { id: "published", label: "Đã đăng", count: counts.published },
-              { id: "excluded", label: "Đã loại trừ", count: counts.excluded },
+              { id: "in_stock" as const, label: "Trong kho", count: counts.in_stock },
+              { id: "excluded" as const, label: "Đã loại trừ", count: counts.excluded },
+              { id: "all" as const, label: "Tất cả", count: counts.all },
             ].map((tab) => {
               const active = filterStatus === tab.id;
               return (
@@ -352,7 +400,7 @@ export function TikTokInventory({
                   key={tab.id}
                   type="button"
                   onClick={() => {
-                    setFilterStatus(tab.id as any);
+                    setFilterStatus(tab.id);
                     setSelectedIds([]);
                   }}
                   className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition ${
@@ -376,7 +424,7 @@ export function TikTokInventory({
 
           {/* Bulk Action Controls */}
           {selectedIds.length > 0 && (
-            <div className="flex items-center gap-2 animate-fadeIn">
+            <div className="flex flex-wrap items-center gap-2 animate-fadeIn">
               <span className="text-xs font-extrabold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl px-2.5 py-1">
                 Đã chọn {selectedIds.length} video
               </span>
@@ -385,22 +433,48 @@ export function TikTokInventory({
                 <button
                   type="button"
                   disabled={actionLoading}
-                  onClick={handleBulkRestore}
+                  onClick={() => void handleBulkRestore()}
                   className="inline-flex min-h-[34px] items-center gap-1 rounded-xl bg-emerald-600 px-3 py-1 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition disabled:opacity-50"
                 >
-                  {actionLoading ? <Spinner size={12} /> : <IconCheck size={14} />}
+                  {actionLoading ? <Spinner size={12} /> : <IconRefresh size={14} />}
                   <span>Khôi phục đã chọn</span>
                 </button>
-              ) : (
+              ) : filterStatus === "in_stock" ? (
                 <button
                   type="button"
                   disabled={actionLoading}
-                  onClick={handleRequestBulkDelete}
+                  onClick={() => handleRequestBulkDelete()}
                   className="inline-flex min-h-[34px] items-center gap-1 rounded-xl bg-rose-600 px-3 py-1 text-xs font-bold text-white shadow-sm hover:bg-rose-700 transition disabled:opacity-50"
                 >
                   <IconTrash size={14} />
                   <span>Xóa đã chọn</span>
                 </button>
+              ) : (
+                /* Tab "all" contextual actions */
+                <>
+                  {selectedActiveIds.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => handleRequestBulkDelete(selectedActiveIds)}
+                      className="inline-flex min-h-[34px] items-center gap-1 rounded-xl bg-rose-600 px-3 py-1 text-xs font-bold text-white shadow-sm hover:bg-rose-700 transition disabled:opacity-50"
+                    >
+                      <IconTrash size={14} />
+                      <span>Xóa ({selectedActiveIds.length})</span>
+                    </button>
+                  )}
+                  {selectedExcludedIds.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => void handleBulkRestore(selectedExcludedIds)}
+                      className="inline-flex min-h-[34px] items-center gap-1 rounded-xl bg-emerald-600 px-3 py-1 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition disabled:opacity-50"
+                    >
+                      {actionLoading ? <Spinner size={12} /> : <IconRefresh size={14} />}
+                      <span>Khôi phục ({selectedExcludedIds.length})</span>
+                    </button>
+                  )}
+                </>
               )}
 
               <button
@@ -425,13 +499,11 @@ export function TikTokInventory({
             <div className="py-16 text-center text-sm text-slate-500">
               {inventory.length === 0
                 ? "Nguồn này chưa có video nào trong kho. Hãy bấm 'Quét' ở tab Nguồn video."
-                : `Không có video nào ở mục "${
-                    filterStatus === "available"
-                      ? "Trong kho"
-                      : filterStatus === "published"
-                      ? "Đã đăng"
-                      : "Đã loại trừ"
-                  }".`}
+                : filterStatus === "in_stock"
+                ? "Không có video nào trong kho đang hoạt động."
+                : filterStatus === "excluded"
+                ? "Chưa có video nào bị loại trừ khỏi kho."
+                : "Không có video nào trong danh sách."}
             </div>
           ) : (
             <table className="w-full text-left text-sm text-slate-700">
@@ -560,11 +632,11 @@ export function TikTokInventory({
                           <button
                             type="button"
                             disabled={actionLoading}
-                            onClick={() => handleRestoreReel(reel.id)}
+                            onClick={() => void handleRestoreReel(reel.id)}
                             className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 hover:bg-emerald-100 transition disabled:opacity-50"
                             title="Khôi phục video trở lại kho"
                           >
-                            {isItemBusy ? <Spinner size={12} /> : <IconCheck size={12} />}
+                            {isItemBusy ? <Spinner size={12} /> : <IconRefresh size={12} />}
                             <span>Khôi phục</span>
                           </button>
                         ) : isProcessing ? (
