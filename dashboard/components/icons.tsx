@@ -232,3 +232,18 @@ export const IconCalendar = (p: P) => (
     <path d="M16 2v4M8 2v4M3 9h18" />
   </Svg>
 );
+
+export const IconTikTok = (p: P) => (
+  <Svg {...p}>
+    <path d="M9 12a4 4 0 1 0 4 4V4a5 5 0 0 0 5 5" />
+  </Svg>
+);
+
+export const IconVideo = (p: P) => (
+  <Svg {...p}>
+    <path d="m22 8-6 4 6 4V8Z" />
+    <rect width="14" height="12" x="2" y="6" rx="2" />
+  </Svg>
+);
+
+

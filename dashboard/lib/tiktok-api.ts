@@ -63,6 +63,56 @@ export interface TikTokReelDto {
   youtube_video_id: string | null;
 }
 
+export interface TikTokDestinationDto {
+  id: string;
+  pipeline_id: string;
+  pipeline_name?: string | null;
+  account_id: string | null;
+  channel_id: string | null;
+  channel_name: string | null;
+  visibility: string;
+  enabled: boolean;
+  connected: boolean;
+  connected_at: string | null;
+}
+
+export interface TikTokManualResolveDto {
+  source_url: string;
+  video_id: string;
+  caption: string | null;
+  thumbnail: string | null;
+  duration: number | null;
+  play_count: number | null;
+  provider: string;
+}
+
+export interface TikTokManualPublicationDto {
+  id: string;
+  destination_id: string;
+  pipeline_id: string;
+  channel_name?: string | null;
+  pipeline_name?: string | null;
+  source_url: string;
+  source_hash?: string;
+  caption: string | null;
+  thumbnail_url: string | null;
+  duration: number | null;
+  youtube_title: string | null;
+  youtube_description: string | null;
+  youtube_hashtags_json: string | null;
+  visibility: string;
+  publish_at: string | null;
+  status: string;
+  stage: string | null;
+  youtube_video_id: string | null;
+  error_code: string | null;
+  error: string | null;
+  retry_count: number;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 function baseUrl(): string {
   return (process.env.TIKTOK_API_URL ?? "").trim().replace(/\/+$/, "");
 }
@@ -87,6 +137,7 @@ async function ttFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
     const res = await fetch(`${base}${path}`, {
       ...init,
       headers: {
+        "Authorization": `Bearer ${token}`,
         "X-Admin-Token": token,
         ...(init.headers ?? {}),
       },
@@ -206,9 +257,91 @@ export async function runTikTokScan(sourceId: string): Promise<{ scan_run_id: st
   );
 }
 
-export async function listTikTokDestinations(pipelineId: string) {
-  return ttFetch(
+export async function listTikTokDestinations(pipelineId: string): Promise<TikTokDestinationDto[]> {
+  return ttFetch<TikTokDestinationDto[]>(
     `/api/tiktok/youtube/destinations/pipeline/${encodeURIComponent(pipelineId)}`,
+  );
+}
+
+export async function createTikTokDestination(body: {
+  pipeline_id: string;
+  channel_id?: string;
+  channel_name?: string;
+  visibility?: string;
+}): Promise<TikTokDestinationDto> {
+  return ttFetch<TikTokDestinationDto>("/api/tiktok/youtube/destinations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listAllTikTokDestinations(): Promise<TikTokDestinationDto[]> {
+  const pipelines = await listTikTokPipelines();
+  const allDestinations: TikTokDestinationDto[] = [];
+  await Promise.all(
+    pipelines.map(async (pipeline) => {
+      try {
+        const dests = await ttFetch<TikTokDestinationDto[]>(
+          `/api/tiktok/youtube/destinations/pipeline/${encodeURIComponent(pipeline.id)}`,
+        );
+        for (const d of dests) {
+          allDestinations.push({
+            ...d,
+            pipeline_name: pipeline.name,
+          });
+        }
+      } catch {
+        // ignore per-pipeline errors
+      }
+    }),
+  );
+  return allDestinations;
+}
+
+export async function resolveTikTokManualVideo(url: string): Promise<TikTokManualResolveDto> {
+  return ttFetch<TikTokManualResolveDto>("/api/tiktok/manual/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, source_url: url }),
+  });
+}
+
+export async function publishTikTokManualVideo(payload: {
+  pipeline_id: string;
+  destination_id: string;
+  source_url: string;
+  caption?: string | null;
+  youtube_title?: string;
+  youtube_description?: string;
+  hashtags?: string[];
+  visibility?: string;
+  publish_at?: string | null;
+}): Promise<{ publication_id: string; status: string; duplicate?: boolean }> {
+  return ttFetch<{ publication_id: string; status: string; duplicate?: boolean }>(
+    `/api/tiktok/manual/${encodeURIComponent(payload.pipeline_id)}/${encodeURIComponent(payload.destination_id)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function listTikTokManualPublications(
+  pipelineId: string,
+  destinationId: string,
+): Promise<TikTokManualPublicationDto[]> {
+  return ttFetch<TikTokManualPublicationDto[]>(
+    `/api/tiktok/manual/${encodeURIComponent(pipelineId)}/${encodeURIComponent(destinationId)}`,
+  );
+}
+
+export async function getTikTokManualPublication(
+  pubId: string,
+): Promise<TikTokManualPublicationDto> {
+  return ttFetch<TikTokManualPublicationDto>(
+    `/api/tiktok/manual/item/${encodeURIComponent(pubId)}`,
   );
 }
 

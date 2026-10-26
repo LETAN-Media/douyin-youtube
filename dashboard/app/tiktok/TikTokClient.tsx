@@ -165,6 +165,18 @@ export function TikTokPipelineList({
         </button>
       </div>
 
+      <div className="mb-6 flex gap-2">
+        <span className="inline-flex min-h-[44px] items-center rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-sm">
+          Auto Pipelines
+        </span>
+        <Link
+          href="/tiktok/manual"
+          className="inline-flex min-h-[44px] items-center rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 shadow-sm transition hover:bg-slate-50"
+        >
+          Manual Publish
+        </Link>
+      </div>
+
       {error && (
         <div className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-600 border border-rose-200">
           {error}
