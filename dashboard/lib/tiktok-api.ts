@@ -17,6 +17,7 @@ export interface TikTokPipelineDto {
   slug: string;
   enabled: boolean;
   auto_publish: boolean;
+  youtube_upload_mode?: "shorts" | "video" | "both";
 }
 
 export interface TikTokSourceDto {
@@ -188,7 +189,12 @@ export async function getTikTokPipeline(pipelineId: string): Promise<TikTokPipel
 
 export async function updateTikTokPipeline(
   pipelineId: string,
-  payload: { enabled?: boolean; auto_publish?: boolean; name?: string },
+  payload: {
+    enabled?: boolean;
+    auto_publish?: boolean;
+    name?: string;
+    youtube_upload_mode?: "shorts" | "video" | "both";
+  },
 ): Promise<TikTokPipelineDto> {
   return ttFetch<TikTokPipelineDto>(`/api/tiktok/pipelines/${encodeURIComponent(pipelineId)}`, {
     method: "PATCH",
@@ -415,14 +421,49 @@ export interface TikTokScheduleDto {
   timezone: string;
   max_daily: number;
   batch_time: string;
+  active_days?: number[];
+  weekend_priority?: boolean | number;
+  video_order?: "newest" | "oldest";
+  min_interval_minutes?: number;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface TikTokQueueJobDto {
+  id: string;
+  pipeline_id: string;
+  destination_id: string;
+  reel_db_id: string;
+  publication_id: string;
+  status: string;
+  priority: number;
+  stage: string | null;
+  error_code: string | null;
+  error: string | null;
+  scheduled_at: string | null;
+  queued_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  reel_caption?: string | null;
+  reel_url?: string | null;
+  thumbnail_url?: string | null;
+  reel_duration?: number | null;
+  source_username?: string | null;
+  destination_channel_name?: string | null;
+  destination_channel_avatar_url?: string | null;
+  youtube_upload_mode?: string | null;
+  youtube_video_id?: string | null;
+  retry_count?: number;
+  shorts_eligible?: number | null;
+  shorts_check_note?: string | null;
 }
 
 export interface TikTokSlotDto {
   id: string;
   schedule_id: string;
   slot_time: string;
+  weekday?: number;
+  enabled?: boolean;
   status: string;
   reel_id?: string | null;
   youtube_video_id?: string | null;
@@ -430,6 +471,82 @@ export interface TikTokSlotDto {
 
 export async function getTikTokSchedule(pipelineId: string): Promise<TikTokScheduleDto> {
   return ttFetch<TikTokScheduleDto>(`/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}`);
+}
+
+export async function updateTikTokScheduleSettings(
+  pipelineId: string,
+  settings: {
+    timezone?: string;
+    max_daily?: number;
+    batch_time?: string;
+    active_days?: number[];
+    weekend_priority?: boolean | number;
+    video_order?: "newest" | "oldest";
+    min_interval_minutes?: number;
+  },
+): Promise<TikTokScheduleDto> {
+  return ttFetch<TikTokScheduleDto>(
+    `/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}/settings`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings),
+    },
+  );
+}
+
+export async function runTikTokScheduleBatchNow(
+  pipelineId: string,
+  destinationId?: string,
+): Promise<{
+  ok: boolean;
+  videos_enqueued: number;
+  message: string;
+  reason?: string;
+  slots?: any[];
+}> {
+  return ttFetch(
+    `/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}/run-now`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destination_id: destinationId }),
+    },
+  );
+}
+
+export async function listTikTokQueue(pipelineId: string): Promise<TikTokQueueJobDto[]> {
+  return ttFetch<TikTokQueueJobDto[]>(
+    `/api/tiktok/publish/queue/pipeline/${encodeURIComponent(pipelineId)}`,
+  );
+}
+
+export async function retryTikTokQueueJob(jobId: string): Promise<{ status: string; job_id: string }> {
+  return ttFetch<{ status: string; job_id: string }>(
+    `/api/tiktok/publish/queue/${encodeURIComponent(jobId)}/retry`,
+    { method: "POST" },
+  );
+}
+
+export async function cancelTikTokQueueJob(jobId: string): Promise<{ status: string; job_id: string }> {
+  return ttFetch<{ status: string; job_id: string }>(
+    `/api/tiktok/publish/queue/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  );
+}
+
+export async function rescheduleTikTokQueueJob(
+  jobId: string,
+  scheduledAt: string,
+): Promise<{ status: string; job_id: string; scheduled_at: string }> {
+  return ttFetch<{ status: string; job_id: string; scheduled_at: string }>(
+    `/api/tiktok/publish/queue/${encodeURIComponent(jobId)}/reschedule`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scheduled_at: scheduledAt }),
+    },
+  );
 }
 
 export async function getTikTokScheduleSlots(pipelineId: string): Promise<TikTokSlotDto[]> {

@@ -1,7 +1,35 @@
+import json
 import secrets
 from typing import Any
 
 from ...db.client import execute, result_to_dict, result_to_dicts
+
+_SCHEDULE_COLS = (
+    "id, pipeline_id, timezone, enabled, max_daily_publish, batch_time, "
+    "active_days, weekend_priority, video_order, min_interval_minutes, "
+    "created_at, updated_at"
+)
+
+
+def _hydrate_schedule(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    # Parse active_days if json string
+    if "active_days" in row and isinstance(row["active_days"], str):
+        try:
+            row["active_days"] = json.loads(row["active_days"])
+        except Exception:
+            row["active_days"] = [0, 1, 2, 3, 4, 5, 6]
+    elif "active_days" not in row or row["active_days"] is None:
+        row["active_days"] = [0, 1, 2, 3, 4, 5, 6]
+
+    if "weekend_priority" not in row or row["weekend_priority"] is None:
+        row["weekend_priority"] = 0
+    if "video_order" not in row or not row["video_order"]:
+        row["video_order"] = "newest"
+    if "min_interval_minutes" not in row or row["min_interval_minutes"] is None:
+        row["min_interval_minutes"] = 60
+    return row
 
 
 async def get_or_create_schedule(
@@ -11,24 +39,33 @@ async def get_or_create_schedule(
     batch_time: str = "06:00",
 ) -> dict[str, Any]:
     res = await execute(
-        "SELECT id, pipeline_id, timezone, enabled, max_daily_publish, batch_time, created_at, updated_at "
-        "FROM tiktok_publish_schedules WHERE pipeline_id = :pid",
+        f"SELECT {_SCHEDULE_COLS} FROM tiktok_publish_schedules WHERE pipeline_id = :pid",
         {"pid": pipeline_id},
     )
     if res.rows:
-        return result_to_dict(res)
+        return _hydrate_schedule(result_to_dict(res))
     schedule_id = f"sch_{secrets.token_hex(8)}"
     await execute(
-        "INSERT INTO tiktok_publish_schedules (id, pipeline_id, timezone, max_daily_publish, batch_time) "
-        "VALUES (:id, :pid, :tz, :max, :bt)",
-        {"id": schedule_id, "pid": pipeline_id, "tz": timezone, "max": max_daily, "bt": batch_time},
+        "INSERT INTO tiktok_publish_schedules (id, pipeline_id, timezone, max_daily_publish, batch_time, "
+        "active_days, weekend_priority, video_order, min_interval_minutes) "
+        "VALUES (:id, :pid, :tz, :max, :bt, :ad, :wp, :vo, :mi)",
+        {
+            "id": schedule_id,
+            "pid": pipeline_id,
+            "tz": timezone,
+            "max": max_daily,
+            "bt": batch_time,
+            "ad": "[0,1,2,3,4,5,6]",
+            "wp": 0,
+            "vo": "newest",
+            "mi": 60,
+        },
     )
     res = await execute(
-        "SELECT id, pipeline_id, timezone, enabled, max_daily_publish, batch_time, created_at, updated_at "
-        "FROM tiktok_publish_schedules WHERE pipeline_id = :pid",
+        f"SELECT {_SCHEDULE_COLS} FROM tiktok_publish_schedules WHERE pipeline_id = :pid",
         {"pid": pipeline_id},
     )
-    return result_to_dict(res)
+    return _hydrate_schedule(result_to_dict(res))
 
 
 async def set_schedule_enabled(pipeline_id: str, enabled: bool) -> dict[str, Any]:
@@ -45,6 +82,10 @@ async def update_schedule(
     timezone: str | None = None,
     max_daily: int | None = None,
     batch_time: str | None = None,
+    active_days: list[int] | str | None = None,
+    weekend_priority: bool | int | None = None,
+    video_order: str | None = None,
+    min_interval_minutes: int | None = None,
 ) -> dict[str, Any]:
     updates: list[str] = ["updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"]
     params: dict[str, Any] = {"pid": pipeline_id}
@@ -57,6 +98,19 @@ async def update_schedule(
     if batch_time is not None:
         updates.append("batch_time = :bt")
         params["bt"] = batch_time
+    if active_days is not None:
+        updates.append("active_days = :ad")
+        params["ad"] = json.dumps(active_days) if isinstance(active_days, list) else str(active_days)
+    if weekend_priority is not None:
+        updates.append("weekend_priority = :wp")
+        params["wp"] = 1 if weekend_priority else 0
+    if video_order is not None:
+        updates.append("video_order = :vo")
+        params["vo"] = "oldest" if video_order.lower() == "oldest" else "newest"
+    if min_interval_minutes is not None:
+        updates.append("min_interval_minutes = :mi")
+        params["mi"] = max(5, int(min_interval_minutes))
+
     await execute(
         f"UPDATE tiktok_publish_schedules SET {', '.join(updates)} WHERE pipeline_id = :pid",
         params,
@@ -66,11 +120,60 @@ async def update_schedule(
 
 async def get_by_pipeline(pipeline_id: str) -> dict[str, Any] | None:
     res = await execute(
-        "SELECT id, pipeline_id, timezone, enabled, max_daily_publish, batch_time, created_at, updated_at "
-        "FROM tiktok_publish_schedules WHERE pipeline_id = :pid",
+        f"SELECT {_SCHEDULE_COLS} FROM tiktok_publish_schedules WHERE pipeline_id = :pid",
         {"pid": pipeline_id},
     )
+    return _hydrate_schedule(result_to_dict(res))
+
+
+async def create_batch(
+    *,
+    batch_id: str,
+    pipeline_id: str,
+    destination_id: str,
+    local_date: str,
+    scheduled_batch_time: str,
+    planned_count: int = 0,
+) -> None:
+    await execute(
+        """
+        INSERT INTO tiktok_scheduler_batches
+        (id, pipeline_id, destination_id, local_date, scheduled_batch_time, planned_count, status)
+        VALUES (:id, :pipeline_id, :destination_id, :local_date, :scheduled_batch_time, :planned_count, 'queued')
+        """,
+        {
+            "id": batch_id,
+            "pipeline_id": pipeline_id,
+            "destination_id": destination_id,
+            "local_date": local_date,
+            "scheduled_batch_time": scheduled_batch_time,
+            "planned_count": planned_count,
+        },
+    )
+
+
+async def get_batch(pipeline_id: str, destination_id: str, local_date: str) -> dict[str, Any] | None:
+    res = await execute(
+        "SELECT id, pipeline_id, destination_id, local_date, scheduled_batch_time, "
+        "started_at, completed_at, status, planned_count, uploaded_count, failed_count, "
+        "last_error, created_at "
+        "FROM tiktok_scheduler_batches "
+        "WHERE pipeline_id = :pipeline_id AND destination_id = :destination_id AND local_date = :local_date",
+        {"pipeline_id": pipeline_id, "destination_id": destination_id, "local_date": local_date},
+    )
     return result_to_dict(res)
+
+
+async def complete_batch(batch_id: str, uploaded_count: int, failed_count: int = 0) -> None:
+    await execute(
+        """
+        UPDATE tiktok_scheduler_batches
+        SET status = 'completed', completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+            uploaded_count = :up, failed_count = :fail
+        WHERE id = :id
+        """,
+        {"id": batch_id, "up": uploaded_count, "fail": failed_count},
+    )
 
 
 async def ensure_slots(schedule_id: str) -> None:

@@ -402,6 +402,30 @@ async def migrate() -> None:
     )
     await _apply_migration(client, applied, "20261026_24", statements_24)
 
+    statements_25: list[str] = []
+    if not await _has_column(client, "tiktok_pipelines", "youtube_upload_mode"):
+        statements_25.append("ALTER TABLE tiktok_pipelines ADD COLUMN youtube_upload_mode TEXT NOT NULL DEFAULT 'shorts'")
+    if not await _has_column(client, "tiktok_publications", "youtube_upload_mode"):
+        statements_25.append("ALTER TABLE tiktok_publications ADD COLUMN youtube_upload_mode TEXT NOT NULL DEFAULT 'shorts'")
+    if not await _has_column(client, "tiktok_publications", "shorts_eligible"):
+        statements_25.append("ALTER TABLE tiktok_publications ADD COLUMN shorts_eligible INTEGER")
+    if not await _has_column(client, "tiktok_publications", "shorts_check_note"):
+        statements_25.append("ALTER TABLE tiktok_publications ADD COLUMN shorts_check_note TEXT")
+    if not await _has_column(client, "tiktok_publish_queue", "scheduled_at"):
+        statements_25.append("ALTER TABLE tiktok_publish_queue ADD COLUMN scheduled_at TEXT")
+    await _apply_migration(client, applied, "20261026_25", statements_25)
+
+    statements_26: list[str] = []
+    if not await _has_column(client, "tiktok_publish_schedules", "active_days"):
+        statements_26.append("ALTER TABLE tiktok_publish_schedules ADD COLUMN active_days TEXT NOT NULL DEFAULT '[0,1,2,3,4,5,6]'")
+    if not await _has_column(client, "tiktok_publish_schedules", "weekend_priority"):
+        statements_26.append("ALTER TABLE tiktok_publish_schedules ADD COLUMN weekend_priority INTEGER NOT NULL DEFAULT 0")
+    if not await _has_column(client, "tiktok_publish_schedules", "video_order"):
+        statements_26.append("ALTER TABLE tiktok_publish_schedules ADD COLUMN video_order TEXT NOT NULL DEFAULT 'newest'")
+    if not await _has_column(client, "tiktok_publish_schedules", "min_interval_minutes"):
+        statements_26.append("ALTER TABLE tiktok_publish_schedules ADD COLUMN min_interval_minutes INTEGER NOT NULL DEFAULT 60")
+    await _apply_migration(client, applied, "20261026_26", statements_26)
+
 
 async def _apply_migration(
     client: Any, applied: set, version: str, statements: list[str]

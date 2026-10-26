@@ -3,7 +3,9 @@ import {
   generateTikTokScheduleSlots,
   getTikTokSchedule,
   getTikTokScheduleSlots,
+  runTikTokScheduleBatchNow,
   toggleTikTokScheduleEnabled,
+  updateTikTokScheduleSettings,
   TikTokApiError,
 } from "@/lib/tiktok-api";
 
@@ -35,6 +37,16 @@ export async function PATCH(request: Request) {
     const { pipeline_id, action, enabled } = body;
     if (!pipeline_id) {
       return NextResponse.json({ error: "Thiếu pipeline_id." }, { status: 400 });
+    }
+
+    if (action === "run_now") {
+      const res = await runTikTokScheduleBatchNow(pipeline_id, body.destination_id);
+      return NextResponse.json(res);
+    }
+
+    if (action === "update_settings") {
+      const updated = await updateTikTokScheduleSettings(pipeline_id, body.settings || {});
+      return NextResponse.json(updated);
     }
 
     if (action === "generate_slots") {

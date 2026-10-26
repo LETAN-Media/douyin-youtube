@@ -28,6 +28,7 @@ async def create_destination(
     visibility: str = "public",
     enabled: bool = True,
     is_default: bool = False,
+    connected: bool = False,
 ) -> dict[str, Any]:
     # If no other destination exists for this pipeline, make this one default
     existing_count_res = await execute(
@@ -47,7 +48,7 @@ async def create_destination(
              visibility, enabled, connected, is_default)
         VALUES
             (:id, :pipeline_id, :account_id, :channel_id, :channel_name, :channel_avatar_url,
-             :visibility, :enabled, 0, :is_default)
+             :visibility, :enabled, :connected, :is_default)
         """,
         {
             "id": destination_id,
@@ -58,6 +59,7 @@ async def create_destination(
             "channel_avatar_url": channel_avatar_url,
             "visibility": visibility,
             "enabled": 1 if enabled else 0,
+            "connected": 1 if connected else 0,
             "is_default": 1 if should_be_default else 0,
         },
     )

@@ -34,7 +34,21 @@ async def update_schedule(pipeline_id: str, body: dict):
         timezone=body.get("timezone"),
         max_daily=body.get("max_daily"),
         batch_time=body.get("batch_time"),
+        active_days=body.get("active_days"),
+        weekend_priority=body.get("weekend_priority"),
+        video_order=body.get("video_order"),
+        min_interval_minutes=body.get("min_interval_minutes"),
     )
+
+
+@router.post("/pipeline/{pipeline_id}/run-now", dependencies=[Depends(require_admin)])
+async def run_schedule_batch_now(pipeline_id: str, body: dict | None = None):
+    """Manually trigger daily batch scheduling for this pipeline immediately."""
+    from ..services.tiktok_scheduler import execute_daily_batch
+
+    dest_id = (body or {}).get("destination_id")
+    result = await execute_daily_batch(pipeline_id, destination_id=dest_id, force_now=True)
+    return result
 
 
 @router.get("/pipeline/{pipeline_id}/slots", dependencies=[Depends(require_admin)])

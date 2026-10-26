@@ -9,6 +9,9 @@ import { TikTokPipelineToggles } from "@/components/tiktok/TikTokPipelineToggles
 import { TikTokOverview } from "@/components/tiktok/TikTokOverview";
 import { TikTokAiSettings } from "@/components/tiktok/TikTokAiSettings";
 import { TikTokDestinations } from "@/components/tiktok/TikTokDestinations";
+import { TikTokPublishSettings } from "@/components/tiktok/TikTokPublishSettings";
+import { TikTokPublishQueue } from "@/components/tiktok/TikTokPublishQueue";
+import { TikTokScheduler } from "@/components/tiktok/TikTokScheduler";
 import type {
   TikTokAiSettingsDto,
   TikTokDestinationDto,
@@ -61,7 +64,7 @@ export function TikTokPipelineDetailClient({
     searchParams.get("youtube_error")
       ? "destinations"
       : "overview";
-  const [tab, setTab] = useState<"overview" | "sources" | "inventory" | "schedule" | "destinations" | "ai-settings">(initialTab);
+  const [tab, setTab] = useState<"overview" | "sources" | "inventory" | "queue" | "schedule" | "destinations" | "ai-settings">(initialTab);
   const [currentDestinations, setCurrentDestinations] = useState<TikTokDestinationDto[]>(destinations);
 
   useEffect(() => {
@@ -89,9 +92,8 @@ export function TikTokPipelineDetailClient({
   const [loadingInventory, setLoadingInventory] = useState(false);
 
   // Schedule
-  const [schedule, setSchedule] = useState<TikTokScheduleDto | null>(initialSchedule);
-  const [slots, setSlots] = useState<TikTokSlotDto[]>(initialSlots);
-  const [generatingSlots, setGeneratingSlots] = useState(false);
+  const [schedule] = useState<TikTokScheduleDto | null>(initialSchedule);
+  const [slots] = useState<TikTokSlotDto[]>(initialSlots);
 
   // Add source handler
   async function handleAddSource(e: React.FormEvent) {
@@ -183,34 +185,6 @@ export function TikTokPipelineDetailClient({
     }
   }
 
-  // Generate Schedule Slots handler
-  async function handleGenerateSlots() {
-    if (generatingSlots) return;
-    setGeneratingSlots(true);
-    try {
-      const res = await fetch("/api/tiktok/schedule", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pipeline_id: pipeline.id,
-          action: "generate_slots",
-        }),
-      });
-      if (res.ok) {
-        // reload slots
-        const reloadRes = await fetch(`/api/tiktok/schedule?pipeline_id=${encodeURIComponent(pipeline.id)}`);
-        if (reloadRes.ok) {
-          const data = await reloadRes.json();
-          setSlots(data.slots || []);
-        }
-      }
-    } catch {
-      // ignore
-    } finally {
-      setGeneratingSlots(false);
-    }
-  }
-
   return (
     <div className="w-full min-w-0 space-y-6">
       {/* Back button to return to pipeline selection */}
@@ -266,6 +240,7 @@ export function TikTokPipelineDetailClient({
           { key: "overview", label: "Tổng quan" },
           { key: "sources", label: `Nguồn video (${sources.length})` },
           { key: "inventory", label: "Kho video (Inventory)" },
+          { key: "queue", label: "Hàng đợi (Queue)" },
           { key: "schedule", label: "Lịch đăng (Schedule)" },
           { key: "destinations", label: `Kênh đích (${currentDestinations.length})` },
           { key: "ai-settings", label: "Cấu hình AI" },
@@ -373,6 +348,11 @@ export function TikTokPipelineDetailClient({
               </div>
             </Card>
           </div>
+
+          <TikTokPublishSettings
+            pipelineId={pipeline.id}
+            initialMode={pipeline.youtube_upload_mode}
+          />
         </div>
       )}
 
@@ -560,89 +540,18 @@ export function TikTokPipelineDetailClient({
         </Card>
       )}
 
+      {/* Tab: Queue */}
+      {tab === "queue" && (
+        <TikTokPublishQueue pipelineId={pipeline.id} />
+      )}
+
       {/* Tab: Schedule */}
       {tab === "schedule" && (
-        <div className="space-y-6">
-          <Card>
-            <CardHeader
-              title="Cấu hình lịch tự động đăng"
-              subtitle="Thời gian batch đăng và số lượng video tối đa mỗi ngày"
-              icon={<IconClock size={18} />}
-            />
-            <div className="p-4 sm:p-5 space-y-4">
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <span className="text-xs text-slate-500">Giờ quét lô (Batch time)</span>
-                  <p className="mt-1 text-lg font-bold text-slate-900">{schedule?.batch_time || "06:00"}</p>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <span className="text-xs text-slate-500">Múi giờ</span>
-                  <p className="mt-1 text-lg font-bold text-slate-900">{schedule?.timezone || "Asia/Ho_Chi_Minh"}</p>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <span className="text-xs text-slate-500">Tối đa mỗi ngày</span>
-                  <p className="mt-1 text-lg font-bold text-slate-900">{schedule?.max_daily || 5} video</p>
-                </div>
-              </div>
-            </div>
-          </Card>
-
-          <Card>
-            <CardHeader
-              title="Khung giờ đăng đã xếp hàng (Schedule Slots)"
-              subtitle={`${slots.length} khung giờ đã lên lịch`}
-              icon={<IconPlay size={18} />}
-              action={
-                <button
-                  type="button"
-                  onClick={handleGenerateSlots}
-                  disabled={generatingSlots}
-                  className={btnPrimary}
-                >
-                  {generatingSlots ? <Spinner size={14} /> : "Tạo khung giờ mới"}
-                </button>
-              }
-            />
-            <div className="overflow-x-auto">
-              {slots.length === 0 ? (
-                <div className="p-8 text-center text-sm text-slate-500">
-                  Chưa có khung giờ đăng nào. Bấm &quot;Tạo khung giờ mới&quot; để xếp lịch.
-                </div>
-              ) : (
-                <table className="w-full text-left text-sm text-slate-700">
-                  <thead className="border-b border-slate-100 bg-slate-50 text-xs uppercase text-slate-500">
-                    <tr>
-                      <th className="px-4 py-3">Thời gian đăng</th>
-                      <th className="px-4 py-3">Trạng thái</th>
-                      <th className="px-4 py-3">Video gắn kèm</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {slots.map((slot) => (
-                      <tr key={slot.id} className="hover:bg-slate-50/50">
-                        <td className="px-4 py-3 font-semibold text-slate-900">
-                          {new Date(slot.slot_time).toLocaleString("vi-VN")}
-                        </td>
-                        <td className="px-4 py-3">
-                          {slot.status === "completed" ? (
-                            <Badge tone="green" dot>Hoàn tất</Badge>
-                          ) : slot.status === "assigned" ? (
-                            <Badge tone="indigo" dot>Đã gán video</Badge>
-                          ) : (
-                            <Badge tone="slate">Khung trống</Badge>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-xs text-slate-500">
-                          {slot.reel_id ? `Reel #${slot.reel_id}` : "Chưa có"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </Card>
-        </div>
+        <TikTokScheduler
+          pipelineId={pipeline.id}
+          initialSchedule={schedule}
+          initialSlots={slots}
+        />
       )}
 
       {/* Tab: Destinations */}

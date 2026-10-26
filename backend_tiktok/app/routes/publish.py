@@ -67,11 +67,52 @@ async def list_queue(status: str | None = None, limit: int = 50):
         params["status"] = status
     res = await execute(
         f"SELECT id, pipeline_id, destination_id, reel_db_id, publication_id, "
-        f"status, priority, stage, error_code, error, queued_at, started_at, finished_at "
+        f"status, priority, stage, error_code, error, scheduled_at, queued_at, started_at, finished_at "
         f"FROM tiktok_publish_queue {where} ORDER BY queued_at DESC LIMIT :limit",
         params,
     )
     return result_to_dicts(res)
+
+
+@router.get("/queue/pipeline/{pipeline_id}", dependencies=[Depends(require_admin)])
+async def list_queue_for_pipeline_endpoint(pipeline_id: str, limit: int = 100):
+    """Retrieve full queue for this pipeline with video, thumbnail, and destination details."""
+    return await publish_queue.list_queue_for_pipeline(pipeline_id, limit=limit)
+
+
+@router.get("/queue/{job_id}", dependencies=[Depends(require_admin)])
+async def get_queue_job(job_id: str):
+    job = await publish_queue.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.post("/queue/{job_id}/retry", dependencies=[Depends(require_admin)])
+async def retry_queue_job(job_id: str):
+    success = await publish_queue.retry_job(job_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Không thể retry job này (job không ở trạng thái lỗi/hủy)")
+    return {"status": "retrying", "job_id": job_id}
+
+
+@router.post("/queue/{job_id}/cancel", dependencies=[Depends(require_admin)])
+async def cancel_queue_job(job_id: str):
+    success = await publish_queue.cancel_job(job_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Không thể hủy job này (job có thể đã bắt đầu hoặc hoàn thành)")
+    return {"status": "cancelled", "job_id": job_id}
+
+
+@router.patch("/queue/{job_id}/reschedule", dependencies=[Depends(require_admin)])
+async def reschedule_queue_job(job_id: str, body: dict):
+    new_time = body.get("scheduled_at")
+    if not new_time:
+        raise HTTPException(status_code=400, detail="scheduled_at required")
+    success = await publish_queue.reschedule_job(job_id, new_time)
+    if not success:
+        raise HTTPException(status_code=400, detail="Không thể đổi lịch job này (job đã xử lý)")
+    return {"status": "rescheduled", "job_id": job_id, "scheduled_at": new_time}
 
 
 @router.get("/publications/{destination_id}", dependencies=[Depends(require_admin)])

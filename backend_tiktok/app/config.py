@@ -131,12 +131,18 @@ class Settings(BaseSettings):
     tiktok_source_scraper_enabled: bool = True
 
     # --- Scheduler ---
-    tiktok_scheduler_enabled: bool = False
+    tiktok_scheduler_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("TIKTOK_SCHEDULER_ENABLED"),
+    )
     tiktok_scheduler_batch_time: str = "06:00"
     tiktok_scheduler_poll_seconds: int = 30
 
     # --- Publisher ---
-    tiktok_publisher_enabled: bool = False
+    tiktok_publisher_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("TIKTOK_PUBLISHER_ENABLED"),
+    )
 
     # --- Caches ---
     tiktok_flow_cache_seconds: int = 10

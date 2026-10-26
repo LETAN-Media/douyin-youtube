@@ -32,6 +32,28 @@ async def get_pipeline(pipeline_id: str):
     return row
 
 
+@router.patch("/{pipeline_id}", dependencies=[Depends(require_admin)])
+async def update_pipeline(pipeline_id: str, body: dict):
+    """Update pipeline settings: name, enabled, auto_publish, youtube_upload_mode."""
+    mode = body.get("youtube_upload_mode")
+    if mode is not None:
+        try:
+            pipelines_repo.normalize_upload_mode(mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    row = await pipelines_repo.update_pipeline(
+        pipeline_id,
+        name=body.get("name"),
+        enabled=body.get("enabled"),
+        auto_publish=body.get("auto_publish"),
+        youtube_upload_mode=mode,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+    return row
+
+
 @router.patch("/{pipeline_id}/enable", dependencies=[Depends(require_admin)])
 async def toggle_pipeline_enable(pipeline_id: str, body: dict):
     row = await pipelines_repo.update_pipeline_enable(pipeline_id, body.get("enabled", True))
