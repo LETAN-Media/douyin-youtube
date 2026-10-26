@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.db import Base
-from app.douyin_url import parse_douyin_profile_url
+from app.douyin_url import parse_douyin_profile_url, DouyinUrlError
 from app.inventory import fetch_all_videos_from_source, sync_source_inventory
 from app.models import Destination, DouyinSource, DouyinVideo, Pipeline
 from app.scheduler import count_inventory_available, pick_video, schedule_for_pipeline
@@ -568,8 +568,8 @@ class TestDouyinUrlParser(unittest.TestCase):
 
     def test_video_url_returns_none(self):
         url = "https://www.douyin.com/video/123456789"
-        result = parse_douyin_profile_url(url)
-        self.assertIsNone(result)
+        with self.assertRaises(DouyinUrlError):
+            parse_douyin_profile_url(url)
 
     def test_non_douyin_url_returns_none(self):
         result = parse_douyin_profile_url("https://www.youtube.com/watch?v=123")

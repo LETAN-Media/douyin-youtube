@@ -1,0 +1,285 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      workflow: ${{ steps.filter.outputs.workflow }}
+      backend: ${{ steps.filter.outputs.backend }}
+      facebook: ${{ steps.filter.outputs.facebook }}
+      tiktok: ${{ steps.filter.outputs.tiktok }}
+      audio: ${{ steps.filter.outputs.audio }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+      docker_backend: ${{ steps.filter.outputs.docker_backend }}
+      docker_facebook: ${{ steps.filter.outputs.docker_facebook }}
+      docker_tiktok: ${{ steps.filter.outputs.docker_tiktok }}
+      docker_audio: ${{ steps.filter.outputs.docker_audio }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Filter Changed Paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            workflow:
+              - '.github/workflows/**'
+            backend:
+              - 'backend/**'
+            facebook:
+              - 'backend_facebook/**'
+            tiktok:
+              - 'backend_tiktok/**'
+            audio:
+              - 'backend_audio/**'
+            dashboard:
+              - 'dashboard/**'
+            docker_backend:
+              - 'backend/Dockerfile'
+              - 'backend/requirements.txt'
+            docker_facebook:
+              - 'backend_facebook/Dockerfile'
+              - 'backend_facebook/requirements.txt'
+            docker_tiktok:
+              - 'backend_tiktok/Dockerfile'
+              - 'backend_tiktok/requirements.txt'
+            docker_audio:
+              - 'backend_audio/Dockerfile'
+              - 'backend_audio/requirements.txt'
+              - 'backend_audio/assets/**'
+
+  douyin-tests:
+    name: Douyin Tests
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pytest
+
+      - name: Check Python syntax
+        run: python -m compileall -q backend/app
+
+      - name: Initialize SQLite test schema
+        env:
+          DATABASE_PROVIDER: sqlite
+          TURSO_URL: ""
+          TURSO_TOKEN: ""
+          DATABASE_URL: sqlite:////tmp/ci_douyin.db
+          PYTHONPATH: backend
+        run: |
+          python -c "import app.models; from app.db import Base, engine; Base.metadata.create_all(engine)"
+
+      - name: Run Douyin tests
+        env:
+          DATABASE_PROVIDER: sqlite
+          TURSO_URL: ""
+          TURSO_TOKEN: ""
+          DATABASE_URL: sqlite:////tmp/ci_douyin.db
+          ADMIN_TOKEN: test-admin-token-xyz
+          WORKER_ENABLED: "false"
+          PYTHONPATH: .
+        working-directory: backend
+        run: pytest tests/
+
+  facebook-tests:
+    name: Facebook Tests
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.facebook == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend_facebook/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend_facebook/requirements.txt pytest
+
+      - name: Check Python syntax
+        run: python -m compileall -q backend_facebook/app
+
+      - name: Run Facebook tests
+        env:
+          DATABASE_URL: file:/tmp/ci_fb.db
+          TURSO_DATABASE_URL: file:/tmp/ci_fb.db
+          ADMIN_TOKEN: test-admin-token-xyz
+          PHIMTAT_TIMEOUT_SECONDS: "60"
+          WORKER_ENABLED: "false"
+          PYTHONPATH: .
+        working-directory: backend_facebook
+        run: pytest tests/
+
+  tiktok-tests:
+    name: TikTok Tests
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.tiktok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend_tiktok/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend_tiktok/requirements.txt pytest
+
+      - name: Check Python syntax
+        run: python -m compileall -q backend_tiktok/app
+
+      - name: Run TikTok tests
+        env:
+          DATABASE_URL: file:/tmp/ci_tiktok.db
+          TURSO_DATABASE_URL: file:/tmp/ci_tiktok.db
+          ADMIN_TOKEN: test-admin-token-xyz
+          WORKER_ENABLED: "false"
+          PYTHONPATH: .
+        working-directory: backend_tiktok
+        run: pytest tests/
+
+  audio-tests:
+    name: Audio Tests
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.audio == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend_audio/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend_audio/requirements.txt pytest
+
+      - name: Check Python syntax
+        run: python -m compileall -q backend_audio/app
+
+      - name: Run Audio tests
+        env:
+          DATABASE_URL: file:/tmp/ci_audio.db
+          TURSO_DATABASE_URL: file:/tmp/ci_audio.db
+          ADMIN_TOKEN: test-admin-token-xyz
+          WORKER_ENABLED: "false"
+          AUDIO_WORKDIR: /tmp/ci_audio_workdir
+          PYTHONPATH: .
+        working-directory: backend_audio
+        run: pytest tests/
+
+  dashboard-ci:
+    name: Dashboard CI
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.dashboard == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: TypeScript & ESLint check
+        working-directory: dashboard
+        run: npm run lint
+
+      - name: Next.js Production Build
+        working-directory: dashboard
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build
+
+  docker-validation:
+    name: Docker Build Validation
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.workflow == 'true' ||
+      needs.changes.outputs.docker_backend == 'true' ||
+      needs.changes.outputs.docker_facebook == 'true' ||
+      needs.changes.outputs.docker_tiktok == 'true' ||
+      needs.changes.outputs.docker_audio == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build Douyin Docker image
+        if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.docker_backend == 'true'
+        run: docker build -t douyin-ci:test -f backend/Dockerfile backend
+
+      - name: Build Facebook Docker image
+        if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.docker_facebook == 'true'
+        run: docker build -t facebook-ci:test -f backend_facebook/Dockerfile backend_facebook
+
+      - name: Build TikTok Docker image
+        if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.docker_tiktok == 'true'
+        run: docker build -t tiktok-ci:test -f backend_tiktok/Dockerfile backend_tiktok
+
+      - name: Build Audio Docker image
+        if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.docker_audio == 'true'
+        run: docker build -t audio-ci:test -f backend_audio/Dockerfile backend_audio

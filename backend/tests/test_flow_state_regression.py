@@ -227,7 +227,7 @@ def test_flow_state_schema_and_counts_with_real_publications():
         assert d0["platform"] == "youtube"
         assert d0["today_published"] == 2, f"Expected 2 today publications, got {d0['today_published']}"
         assert d0["daily_upload_limit"] == 10
-        assert d0["last_published_at"].startswith("2026-10-21T03:00:00")
+        assert d0["last_published_at"].startswith(today_2.strftime("%Y-%m-%dT03:00:00"))
 
         # Assert Routes
         routes = state["active_routes"]

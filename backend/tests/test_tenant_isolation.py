@@ -74,6 +74,14 @@ def _override_get_db():
 
 app.dependency_overrides[get_db] = _override_get_db
 
+
+@pytest.fixture(autouse=True)
+def _ensure_tenant_db_override():
+    app.dependency_overrides[get_db] = _override_get_db
+    yield
+    app.dependency_overrides[get_db] = _override_get_db
+
+
 ADMIN_HEADERS = {"X-Admin-Token": settings.admin_token}
 
 
