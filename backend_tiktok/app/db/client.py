@@ -426,6 +426,11 @@ async def migrate() -> None:
         statements_26.append("ALTER TABLE tiktok_publish_schedules ADD COLUMN min_interval_minutes INTEGER NOT NULL DEFAULT 60")
     await _apply_migration(client, applied, "20261026_26", statements_26)
 
+    statements_27: list[str] = []
+    if not await _has_column(client, "tiktok_reels", "previous_status"):
+        statements_27.append("ALTER TABLE tiktok_reels ADD COLUMN previous_status TEXT")
+    await _apply_migration(client, applied, "20261026_27", statements_27)
+
 
 async def _apply_migration(
     client: Any, applied: set, version: str, statements: list[str]
@@ -502,6 +507,7 @@ def _load_schema() -> list[str]:
             last_error TEXT,
             youtube_video_id TEXT,
             youtube_published_at TEXT,
+            previous_status TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             UNIQUE(source_id, reel_id)

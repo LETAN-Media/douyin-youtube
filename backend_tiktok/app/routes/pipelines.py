@@ -71,3 +71,21 @@ async def toggle_auto_publish(pipeline_id: str, body: dict):
     if row is None:
         raise HTTPException(status_code=404, detail="Pipeline not found")
     return row
+
+
+@router.post("/{pipeline_id}/inventory/exclude", dependencies=[Depends(require_admin)])
+async def bulk_exclude_reels(pipeline_id: str, body: dict):
+    from ..db.repositories import reels as reels_repo
+    reel_ids = body.get("reel_ids", [])
+    if not isinstance(reel_ids, list):
+        raise HTTPException(status_code=400, detail="reel_ids must be a list")
+    return await reels_repo.bulk_exclude_reels(pipeline_id, [str(r) for r in reel_ids])
+
+
+@router.post("/{pipeline_id}/inventory/restore", dependencies=[Depends(require_admin)])
+async def bulk_restore_reels(pipeline_id: str, body: dict):
+    from ..db.repositories import reels as reels_repo
+    reel_ids = body.get("reel_ids", [])
+    if not isinstance(reel_ids, list):
+        raise HTTPException(status_code=400, detail="reel_ids must be a list")
+    return await reels_repo.bulk_restore_reels(pipeline_id, [str(r) for r in reel_ids])

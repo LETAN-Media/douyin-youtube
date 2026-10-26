@@ -12,6 +12,7 @@ import { TikTokDestinations } from "@/components/tiktok/TikTokDestinations";
 import { TikTokPublishSettings } from "@/components/tiktok/TikTokPublishSettings";
 import { TikTokPublishQueue } from "@/components/tiktok/TikTokPublishQueue";
 import { TikTokScheduler } from "@/components/tiktok/TikTokScheduler";
+import { TikTokInventory } from "@/components/tiktok/TikTokInventory";
 import type {
   TikTokAiSettingsDto,
   TikTokDestinationDto,
@@ -88,8 +89,6 @@ export function TikTokPipelineDetailClient({
 
   // Inventory
   const [selectedSourceId, setSelectedSourceId] = useState<string>(initialSources[0]?.id || "");
-  const [inventory, setInventory] = useState<TikTokReelDto[]>([]);
-  const [loadingInventory, setLoadingInventory] = useState(false);
 
   // Schedule
   const [schedule] = useState<TikTokScheduleDto | null>(initialSchedule);
@@ -158,31 +157,13 @@ export function TikTokPipelineDetailClient({
     }
   }
 
-  // Load inventory for selected source
-  async function loadInventory(sourceId: string) {
-    if (!sourceId) return;
-    setLoadingInventory(true);
-    try {
-      const res = await fetch(`/api/tiktok/inventory?source_id=${encodeURIComponent(sourceId)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setInventory(Array.isArray(data) ? data : []);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoadingInventory(false);
-    }
-  }
-
-  // Trigger inventory load when switching to inventory tab
+  // Trigger switching to inventory tab
   function handleSelectInventoryTab(sourceId?: string) {
-    setTab("inventory");
     const target = sourceId || selectedSourceId || sources[0]?.id;
     if (target) {
       setSelectedSourceId(target);
-      void loadInventory(target);
     }
+    setTab("inventory");
   }
 
   return (
@@ -441,103 +422,12 @@ export function TikTokPipelineDetailClient({
 
       {/* Tab: Inventory */}
       {tab === "inventory" && (
-        <Card>
-          <CardHeader
-            title="Kho video TikTok (Inventory)"
-            subtitle="Danh sách các video đã được quét và lưu trữ"
-            icon={<IconFilm size={18} />}
-            action={
-              <div className="flex items-center gap-2">
-                <select
-                  value={selectedSourceId}
-                  onChange={(e) => {
-                    setSelectedSourceId(e.target.value);
-                    void loadInventory(e.target.value);
-                  }}
-                  className={`${inputCls} text-xs py-1.5`}
-                >
-                  {sources.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      @{s.username}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => void loadInventory(selectedSourceId)}
-                  className={btnSmall}
-                  disabled={loadingInventory}
-                >
-                  <IconRefresh size={14} />
-                </button>
-              </div>
-            }
-          />
-          <div className="overflow-x-auto">
-            {loadingInventory ? (
-              <div className="p-8 text-center text-sm text-slate-500">
-                <Spinner /> Đang tải kho video…
-              </div>
-            ) : inventory.length === 0 ? (
-              <div className="p-8 text-center text-sm text-slate-500">
-                Nguồn này chưa có video nào trong kho. Hãy bấm &quot;Quét ngay&quot; ở tab Nguồn video.
-              </div>
-            ) : (
-              <table className="w-full text-left text-sm text-slate-700">
-                <thead className="border-b border-slate-100 bg-slate-50 text-xs uppercase text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3">Video</th>
-                    <th className="px-4 py-3">Tiêu đề / Caption</th>
-                    <th className="px-4 py-3">Thời lượng</th>
-                    <th className="px-4 py-3">Lượt xem</th>
-                    <th className="px-4 py-3">Trạng thái</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {inventory.map((reel) => (
-                    <tr key={reel.id} className="hover:bg-slate-50/50">
-                      <td className="px-4 py-3">
-                        {reel.thumbnail_url ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={reel.thumbnail_url}
-                            alt=""
-                            className="h-12 w-9 rounded object-cover shadow-sm"
-                          />
-                        ) : (
-                          <div className="h-12 w-9 rounded bg-slate-100 flex items-center justify-center text-slate-400">
-                            <IconVideo size={16} />
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 max-w-sm">
-                        <p className="font-semibold text-slate-900 truncate">
-                          {reel.caption || "TikTok Video"}
-                        </p>
-                        <p className="text-[11px] text-slate-400">ID: {reel.reel_id}</p>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-slate-600">
-                        {formatDuration(reel.duration)}
-                      </td>
-                      <td className="px-4 py-3 text-xs text-slate-600">
-                        {reel.play_count ? Number(reel.play_count).toLocaleString() : "—"}
-                      </td>
-                      <td className="px-4 py-3">
-                        {reel.status === "published" ? (
-                          <Badge tone="green" dot>Đã đăng</Badge>
-                        ) : reel.status === "queued" ? (
-                          <Badge tone="amber" dot>Chờ đăng</Badge>
-                        ) : (
-                          <Badge tone="slate">Trong kho</Badge>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </Card>
+        <TikTokInventory
+          pipelineId={pipeline.id}
+          sources={sources}
+          initialSelectedSourceId={selectedSourceId}
+          onInventoryChanged={() => router.refresh()}
+        />
       )}
 
       {/* Tab: Queue */}

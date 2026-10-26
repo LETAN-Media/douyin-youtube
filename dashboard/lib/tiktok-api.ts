@@ -59,6 +59,7 @@ export interface TikTokReelDto {
   play_count: number | null;
   discovered_at: string | null;
   status: string;
+  previous_status?: string | null;
   retry_count: number;
   last_error: string | null;
   youtube_video_id: string | null;
@@ -257,6 +258,63 @@ export async function createTikTokSource(body: {
 export async function listTikTokInventory(sourceId: string): Promise<TikTokReelDto[]> {
   return ttFetch<TikTokReelDto[]>(
     `/api/tiktok/inventory/source/${encodeURIComponent(sourceId)}`,
+  );
+}
+
+export async function deleteTikTokReel(
+  reelDbId: string,
+  pipelineId?: string,
+): Promise<{ ok: boolean; status: string; reel_id: string }> {
+  const qs = pipelineId ? `?pipeline_id=${encodeURIComponent(pipelineId)}` : "";
+  return ttFetch<{ ok: boolean; status: string; reel_id: string }>(
+    `/api/tiktok/inventory/reels/${encodeURIComponent(reelDbId)}${qs}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function excludeTikTokReel(
+  reelDbId: string,
+  pipelineId?: string,
+): Promise<{ ok: boolean; status: string; reel_id: string }> {
+  return deleteTikTokReel(reelDbId, pipelineId);
+}
+
+export async function restoreTikTokReel(
+  reelDbId: string,
+  pipelineId?: string,
+): Promise<{ ok: boolean; status: string; reel_id: string }> {
+  const qs = pipelineId ? `?pipeline_id=${encodeURIComponent(pipelineId)}` : "";
+  return ttFetch<{ ok: boolean; status: string; reel_id: string }>(
+    `/api/tiktok/inventory/reels/${encodeURIComponent(reelDbId)}/restore${qs}`,
+    { method: "POST" },
+  );
+}
+
+export async function bulkExcludeTikTokReels(
+  pipelineId: string,
+  reelIds: string[],
+): Promise<{ ok: boolean; excluded: number; rejected: Array<{ reel_id: string; reason: string }> }> {
+  return ttFetch<{ ok: boolean; excluded: number; rejected: Array<{ reel_id: string; reason: string }> }>(
+    `/api/tiktok/pipelines/${encodeURIComponent(pipelineId)}/inventory/exclude`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reel_ids: reelIds }),
+    },
+  );
+}
+
+export async function bulkRestoreTikTokReels(
+  pipelineId: string,
+  reelIds: string[],
+): Promise<{ ok: boolean; restored: number; rejected: Array<{ reel_id: string; reason: string }> }> {
+  return ttFetch<{ ok: boolean; restored: number; rejected: Array<{ reel_id: string; reason: string }> }>(
+    `/api/tiktok/pipelines/${encodeURIComponent(pipelineId)}/inventory/restore`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reel_ids: reelIds }),
+    },
   );
 }
 
