@@ -12,6 +12,7 @@ import logging
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -165,14 +166,48 @@ async def resolve_shortcut_media(
 
 def _extract_download_url(data: dict) -> str | None:
     medias = data.get("medias") or {}
+    candidates: list[tuple[int, str]] = []
+
+    def _eval_candidate(label: str, item: Any):
+        if not isinstance(item, dict):
+            if isinstance(item, str) and item.startswith("http"):
+                candidates.append((10, item))
+            return
+        url = item.get("url")
+        if not isinstance(url, str) or not url.startswith("http"):
+            return
+        ext = str(item.get("ext") or item.get("format") or "").lower()
+        media_type = str(item.get("type") or "").lower()
+        lbl = str(label or "").lower()
+
+        # Skip audio-only streams
+        if ext == "mp3" or media_type == "audio" or "audio" in lbl or "mp3" in lbl:
+            return
+
+        score = 20
+        if "hd" in lbl or "1080" in lbl or "high" in lbl:
+            score += 30
+        if "nowatermark" in lbl or "no watermark" in lbl or "nwm" in lbl or "watermark" in lbl:
+            score += 20
+        if ext == "mp4" or media_type == "video":
+            score += 10
+        candidates.append((score, url))
+
     if isinstance(medias, dict):
-        for label, value in medias.items():
-            url = value.get("url") if isinstance(value, dict) else value
-            if isinstance(url, str) and url.startswith("http"):
-                return url
+        for label, val in medias.items():
+            _eval_candidate(label, val)
+    elif isinstance(medias, list):
+        for item in medias:
+            if isinstance(item, dict):
+                _eval_candidate(str(item.get("quality") or item.get("label") or ""), item)
+
+    if candidates:
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        return candidates[0][1]
+
     for key in ("download_url", "play", "nwm_url", "url", "playAddr"):
         v = data.get(key)
-        if isinstance(v, str) and v.startswith("http"):
+        if isinstance(v, str) and v.startswith("http") and not v.endswith(".mp3"):
             return v
     return None
 
@@ -230,7 +265,7 @@ async def download_media(
                             DOWNLOAD_FAILED, f"Media download failed ({resp.status_code})."
                         )
                     content_type = (resp.headers.get("Content-Type", "") or "").lower().split(";")[0].strip()
-                    if content_type and not content_type.startswith("video/") and content_type != "application/octet-stream":
+                    if content_type and not content_type.startswith("video/") and content_type not in ("application/octet-stream", "binary/octet-stream"):
                         raise ManualMediaError(
                             DOWNLOAD_FAILED, f"Unexpected Content-Type: {content_type or 'missing'}."
                         )
@@ -267,15 +302,23 @@ def _cleanup(target_dir: Path) -> None:
 
 
 async def resolve_manual_media(url: str) -> ManualResolvedMedia:
-    """Dispatcher honoring TIKTOK_MANUAL_RESOLVER."""
+    """Dispatcher honoring TIKTOK_MANUAL_RESOLVER with automatic fallback."""
     mode = (settings.tiktok_manual_resolver or "shortcut").strip().lower()
     if mode == "shortcut":
-        return await resolve_shortcut_media(url)
-    # Fallback to direct provider for 'direct' mode.
+        try:
+            return await resolve_shortcut_media(url)
+        except Exception as exc:
+            logger.warning("Shortcut resolver failed for %s: %s; trying provider fallback", url, exc)
+
+    # Provider resolution (direct mode or fallback)
     from .tiktok_provider_factory import get_scan_provider
 
     provider = get_scan_provider()
     media = await provider.resolve_media(url)
+    if not media.download_url:
+        # If scan provider returned no direct download_url (e.g. TikTokSourceAPI), delegate to shortcut
+        return await resolve_shortcut_media(url)
+
     return ManualResolvedMedia(
         source_url=media.source_url,
         download_url=media.download_url,

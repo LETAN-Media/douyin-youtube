@@ -18,10 +18,10 @@ from ..config import settings
 from ..db.client import execute
 from ..db.repositories import pipelines, publications, publish_queue, reels
 from .tiktok_ai_metadata import generate_ai_metadata
-from .tiktok_media import ManualMediaError, download_media, resolve_manual_media
+from .tiktok_media import ManualMediaError, ManualResolvedMedia, download_media, resolve_manual_media
 from .tiktok_provider import ProviderError
 from .tiktok_provider_factory import get_scan_provider
-from .tiktok_shorts import ShortsCheckError, classify_upload_format
+from .tiktok_shorts import ShortsCheckError, classify_upload_format, validate_video_file
 from .youtube_publisher import YouTubeQuotaExceededError, publish_video_to_youtube
 
 logger = logging.getLogger("backend-tiktok.services.publisher")
@@ -109,18 +109,43 @@ async def _process_job(job: dict) -> None:
     if reel is None:
         raise RuntimeError(f"reel {reel_db_id} not found")
 
-    await publish_queue.mark_job_stage(job["id"], "resolving_media")
-
-    # Resolve media via provider
-    provider = get_scan_provider()
-    media = await provider.resolve_media(reel["reel_url"])
-    video_path = await download_media(
-        _to_manual_media(media, reel["reel_url"]),
-        job_id=reel_db_id,
-    )
-
+    video_path: Path | None = None
     try:
-        # Step: Shorts & Video format verification via ffprobe
+        # Step 1: Resolve media direct download URL
+        # Note: TikTokSourceAPI only scans creator metadata; direct MP4 downloads
+        # must be resolved via the PHIMTAT shortcut provider.
+        await publish_queue.mark_job_stage(job["id"], "resolving_media")
+        resolved_media: ManualResolvedMedia | None = None
+        try:
+            resolved_media = await resolve_manual_media(reel["reel_url"])
+        except Exception as exc:
+            logger.warning(
+                "resolve_manual_media failed for %s: %s; trying provider fallback",
+                reel["reel_url"],
+                exc,
+            )
+
+        if not resolved_media or not resolved_media.download_url:
+            provider = get_scan_provider()
+            try:
+                media = await provider.resolve_media(reel["reel_url"])
+                if media and media.download_url:
+                    resolved_media = _to_manual_media(media, reel["reel_url"])
+            except Exception as exc:
+                logger.warning("provider.resolve_media fallback failed for %s: %s", reel["reel_url"], exc)
+
+        if not resolved_media or not resolved_media.download_url or not resolved_media.download_url.startswith("http"):
+            raise RuntimeError(f"Could not resolve direct download URL for TikTok reel {reel_db_id}")
+
+        # Step 2: Download media to temporary file
+        await publish_queue.mark_job_stage(job["id"], "downloading_media")
+        video_path = await download_media(resolved_media, job_id=reel_db_id)
+
+        # Step 3: Validate downloaded video file integrity
+        await publish_queue.mark_job_stage(job["id"], "validating_media")
+        validate_video_file(video_path)
+
+        # Step 4: Shorts & Video format verification via ffprobe
         await publish_queue.mark_job_stage(job["id"], "shorts_check")
         pipe = await pipelines.get_pipeline(pipeline_id)
         requested_mode = (
@@ -146,7 +171,7 @@ async def _process_job(job: dict) -> None:
         # Update actual upload mode used (e.g. if 'both' chose 'shorts' or 'video')
         await publications.set_upload_mode(pub_id, target_format)
 
-        # Step: AI metadata enrichment
+        # Step 5: AI metadata enrichment
         await publish_queue.mark_job_stage(job["id"], "ai_metadata")
         title = pub.get("youtube_title")
         description = pub.get("youtube_description")
@@ -156,12 +181,14 @@ async def _process_job(job: dict) -> None:
             ai_result = None
             try:
                 ai_result = await generate_ai_metadata(
-                    pub.get("ai_model"), reel, reel.get("caption")
+                    pub.get("ai_model"),
+                    reel,
+                    reel.get("caption") or resolved_media.caption,
                 )
             except Exception as exc:
                 logger.warning("AI metadata failed for %s: %s", reel_db_id, exc)
 
-            title = (ai_result or {}).get("title") or reel.get("caption") or "TikTok video"
+            title = (ai_result or {}).get("title") or reel.get("caption") or resolved_media.caption or "TikTok video"
             description = (ai_result or {}).get("description") or ""
             hashtags = (ai_result or {}).get("hashtags_json") or "[]"
 
@@ -173,8 +200,8 @@ async def _process_job(job: dict) -> None:
                 ai_model=(ai_result or {}).get("model"),
             )
 
-        # Step: YouTube Upload
-        await publish_queue.mark_job_stage(job["id"], "publishing")
+        # Step 6: YouTube Upload
+        await publish_queue.mark_job_stage(job["id"], "uploading_youtube")
         is_shorts = (target_format == "shorts")
         youtube_video_id = await publish_video_to_youtube(
             destination_id,
@@ -182,11 +209,11 @@ async def _process_job(job: dict) -> None:
             title,
             description,
             hashtags,
-            thumbnail_url=reel.get("thumbnail_url"),
+            thumbnail_url=reel.get("thumbnail_url") or resolved_media.thumbnail_url,
             is_shorts=is_shorts,
         )
 
-        # Step: Finalize statuses
+        # Step 7: Finalize statuses
         await publications.mark_published(pub_id, youtube_video_id)
         await reels.mark_reel_published(reel_db_id, youtube_video_id)
         await publish_queue.mark_job_stage(job["id"], "done")
@@ -194,12 +221,15 @@ async def _process_job(job: dict) -> None:
 
     finally:
         # Clean up temporary media files
-        try:
-            p = Path(video_path)
-            if p.exists():
-                p.unlink()
-        except OSError:
-            pass
+        if video_path is not None:
+            try:
+                p = Path(video_path)
+                if p.exists():
+                    p.unlink()
+                if p.parent.exists() and not any(p.parent.iterdir()):
+                    p.parent.rmdir()
+            except OSError:
+                pass
 
 
 def _to_manual_media(media, source_url: str):

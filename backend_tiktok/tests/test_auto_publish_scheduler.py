@@ -314,3 +314,146 @@ async def test_queue_pipeline_isolation():
     assert len(jobs_B) == 1
     assert jobs_B[0]["id"] == "job_B"
     assert jobs_B[0]["pipeline_id"] == "pl_B"
+
+
+# ============================================================================
+# 6. Video Validation & Publisher Direct Media Resolution Tests
+# ============================================================================
+
+def test_validate_video_file_checks(tmp_path: Path):
+    """Verify validate_video_file checks size, headers, streams and duration."""
+    from app.services.tiktok_shorts import ShortsCheckError, validate_video_file
+
+    # Non-existent file
+    with pytest.raises(ShortsCheckError) as exc_info:
+        validate_video_file(tmp_path / "missing.mp4")
+    assert exc_info.value.code == "FILE_NOT_FOUND"
+
+    # Too small file (< 10 KB)
+    tiny = tmp_path / "tiny.mp4"
+    tiny.write_bytes(b"short bytes")
+    with pytest.raises(ShortsCheckError) as exc_info:
+        validate_video_file(tiny)
+    assert exc_info.value.code == "FILE_TOO_SMALL"
+
+    # HTML error page disguised as mp4
+    html_file = tmp_path / "error.mp4"
+    html_file.write_bytes(b"<!DOCTYPE html><html><body>Error 502" + b" " * 12000 + b"</body></html>")
+    with pytest.raises(ShortsCheckError) as exc_info:
+        validate_video_file(html_file)
+    assert exc_info.value.code == "INVALID_MEDIA_FORMAT"
+
+    # JSON error payload disguised as mp4
+    json_file = tmp_path / "error.json"
+    json_file.write_bytes(b'{"error": "Video not found", "padding": "' + b"A" * 12000 + b'"}')
+    with pytest.raises(ShortsCheckError) as exc_info:
+        validate_video_file(json_file)
+    assert exc_info.value.code == "INVALID_MEDIA_FORMAT"
+
+    # Valid file with mocked probe
+    valid_file = tmp_path / "valid.mp4"
+    valid_file.write_bytes(b"\x00\x00\x00 ftypisom" + b"\x00" * 15000)
+    with patch("app.services.tiktok_shorts.probe_file") as mock_probe:
+        mock_probe.return_value = {
+            "duration": 30.0,
+            "width": 720,
+            "height": 1280,
+            "is_vertical": True,
+            "is_square": False,
+            "is_landscape": False,
+        }
+        res = validate_video_file(valid_file)
+        assert res["duration"] == 30.0
+        assert res["is_vertical"] is True
+
+
+def test_extract_download_url_quality_priority():
+    """Verify _extract_download_url ignores MP3 audio and prefers MP4 HD."""
+    from app.services.tiktok_media import _extract_download_url
+
+    # Case 1: Dict with MP3 audio and MP4 HD
+    payload = {
+        "medias": {
+            "MP3": {"url": "https://cdn.example.com/audio.mp3", "ext": "mp3", "type": "audio"},
+            "MP4": {"url": "https://cdn.example.com/sd.mp4", "ext": "mp4"},
+            "MP4 HD": {"url": "https://cdn.example.com/hd.mp4", "ext": "mp4"},
+        }
+    }
+    assert _extract_download_url(payload) == "https://cdn.example.com/hd.mp4"
+
+    # Case 2: Only MP3 available -> should not pick audio
+    payload_audio_only = {
+        "medias": {
+            "MP3": {"url": "https://cdn.example.com/audio.mp3", "ext": "mp3", "type": "audio"}
+        }
+    }
+    assert _extract_download_url(payload_audio_only) is None
+
+
+async def test_global_publisher_resolves_via_shortcut(tmp_path: Path):
+    """Verify _process_job resolves media via resolve_manual_media and publishes."""
+    from app.services.tiktok_global_publisher import _process_job
+    from app.services.tiktok_media import ManualResolvedMedia
+
+    await pipelines.create_pipeline(pipeline_id="pl_pub_1", name="Pipe Pub", slug="pipe-pub-1", youtube_upload_mode="shorts")
+    await destinations.create_destination(destination_id="dest_pub_1", pipeline_id="pl_pub_1", channel_id="yt_1", channel_name="Chan 1", connected=True)
+    await sources.create_source(source_id="src_pub_1", pipeline_id="pl_pub_1", username="creator_1")
+    await reels.insert_reel_if_new(
+        reel_db_id="reel_pub_1", source_id="src_pub_1", reel_id="vid_1",
+        reel_url="https://www.tiktok.com/@creator_1/video/111", caption="Test reel caption"
+    )
+    pub = await publications.create_publication(
+        publication_id="pub_job_1", reel_db_id="reel_pub_1", destination_id="dest_pub_1", youtube_upload_mode="shorts"
+    )
+    await publish_queue.enqueue_publication_job(
+        job_id="job_pub_1", pipeline_id="pl_pub_1", destination_id="dest_pub_1",
+        reel_db_id="reel_pub_1", publication_id=pub["id"]
+    )
+
+    fake_video = tmp_path / "downloaded_test.mp4"
+    fake_video.write_bytes(b"\x00\x00\x00 ftypisom" + b"\x00" * 15000)
+
+    job = await publish_queue.get_job("job_pub_1")
+
+    mock_resolved = ManualResolvedMedia(
+        source_url="https://www.tiktok.com/@creator_1/video/111",
+        download_url="https://cdn.example.com/test.mp4",
+        content_type="video/mp4",
+        caption="Resolved caption",
+        thumbnail_url="https://cdn.example.com/thumb.jpg",
+        duration=30.0,
+        provider="shortcut",
+    )
+
+    with patch("app.services.tiktok_global_publisher.resolve_manual_media", new_callable=AsyncMock) as mock_res, \
+         patch("app.services.tiktok_global_publisher.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("app.services.tiktok_global_publisher.validate_video_file") as mock_val, \
+         patch("app.services.tiktok_global_publisher.classify_upload_format") as mock_class, \
+         patch("app.services.tiktok_global_publisher.generate_ai_metadata", new_callable=AsyncMock) as mock_ai, \
+         patch("app.services.tiktok_global_publisher.publish_video_to_youtube", new_callable=AsyncMock) as mock_yt:
+
+        mock_res.return_value = mock_resolved
+        mock_dl.return_value = fake_video
+        mock_val.return_value = {"duration": 30.0, "width": 1080, "height": 1920, "is_vertical": True, "is_square": False, "is_landscape": False}
+        mock_class.return_value = ("shorts", True, "Đủ điều kiện Shorts", {"is_vertical": True, "is_square": False})
+        mock_ai.return_value = {"title": "AI Title #Shorts", "description": "AI Desc", "hashtags_json": "[\"#Shorts\"]", "model": "gemini"}
+        mock_yt.return_value = "YT_VID_SUCCESS_123"
+
+        await _process_job(job)
+
+        assert mock_res.called
+        assert mock_dl.called
+        assert mock_val.called
+        assert mock_class.called
+        assert mock_yt.called
+
+    updated_pub = await publications.get_publication(pub["id"])
+    assert updated_pub["status"] == "published"
+    assert updated_pub["youtube_video_id"] == "YT_VID_SUCCESS_123"
+
+    updated_reel = await reels.get_reel("reel_pub_1")
+    assert updated_reel["status"] == "published"
+    assert updated_reel["youtube_video_id"] == "YT_VID_SUCCESS_123"
+
+    updated_job = await publish_queue.get_job("job_pub_1")
+    assert updated_job["stage"] == "done"

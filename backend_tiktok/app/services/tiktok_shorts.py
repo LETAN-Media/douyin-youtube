@@ -104,6 +104,63 @@ def probe_file(path: Path | str) -> dict[str, Any]:
     }
 
 
+def validate_video_file(path: Path | str) -> dict[str, Any]:
+    """Inspect and validate downloaded video media before uploading.
+
+    Verifies:
+    1. File exists and is readable.
+    2. File size exceeds minimum threshold (>= 10 KB).
+    3. File header does not contain HTML or JSON error payloads.
+    4. Probed with ffprobe: contains a valid video stream (width > 0, height > 0)
+       and positive duration (> 0).
+
+    Returns probe_file info dict on success, or raises ShortsCheckError.
+    """
+    target_path = Path(path)
+    if not target_path.exists():
+        raise ShortsCheckError("FILE_NOT_FOUND", f"Video file not found: {target_path}")
+
+    try:
+        size = target_path.stat().st_size
+    except OSError as exc:
+        raise ShortsCheckError("FILE_UNREADABLE", f"Cannot inspect media file: {exc}") from exc
+
+    if size < 10240:
+        raise ShortsCheckError(
+            "FILE_TOO_SMALL",
+            f"Media file size too small ({size} bytes); likely corrupted or error response.",
+        )
+
+    # Check for HTML / JSON error payloads in header
+    try:
+        with target_path.open("rb") as f:
+            header = f.read(512)
+        header_upper = header.upper()
+        if b"<!DOCTYPE" in header_upper or b"<HTML" in header_upper or b"<HEAD" in header_upper:
+            raise ShortsCheckError("INVALID_MEDIA_FORMAT", "Downloaded file is an HTML page, not a video.")
+        trimmed = header.strip()
+        if trimmed.startswith(b"{") and (b'"error"' in trimmed or b'"message"' in trimmed or b'"status"' in trimmed):
+            raise ShortsCheckError("INVALID_MEDIA_FORMAT", "Downloaded file is a JSON error payload, not a video.")
+    except ShortsCheckError:
+        raise
+    except Exception as exc:
+        raise ShortsCheckError("FILE_UNREADABLE", f"Cannot read media header: {exc}") from exc
+
+    info = probe_file(target_path)
+    if info.get("width", 0) <= 0 or info.get("height", 0) <= 0:
+        raise ShortsCheckError(
+            "INVALID_MEDIA_STREAM",
+            f"Video does not have valid stream dimensions ({info.get('width')}x{info.get('height')}).",
+        )
+    if info.get("duration", 0.0) <= 0.0:
+        raise ShortsCheckError(
+            "INVALID_MEDIA_DURATION",
+            "Video duration is zero or undetectable.",
+        )
+
+    return info
+
+
 def check_shorts_eligibility(path: Path | str) -> tuple[bool, str, dict[str, Any]]:
     """Determine whether video file satisfies YouTube Shorts criteria.
 
