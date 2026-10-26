@@ -12,10 +12,27 @@ router = APIRouter(prefix="/api/tiktok/publish", tags=["publish"])
 @router.post("/pipeline/{pipeline_id}", dependencies=[Depends(require_admin)])
 async def publish_pipeline(pipeline_id: str, body: dict):
     """Queue a reel for publishing to YouTube."""
-    destination_id = body.get("destination_id")
     reel_db_id = body.get("reel_db_id")
-    if not destination_id or not reel_db_id:
-        raise HTTPException(status_code=400, detail="destination_id and reel_db_id required")
+    if not reel_db_id:
+        raise HTTPException(status_code=400, detail="reel_db_id required")
+
+    destination_id = body.get("destination_id")
+    if destination_id:
+        dest = await destinations.get_destination(destination_id)
+        if dest is None or dest.get("pipeline_id") != pipeline_id:
+            raise HTTPException(status_code=404, detail="Destination not found for this pipeline")
+        if not dest.get("enabled"):
+            raise HTTPException(status_code=400, detail="Destination is disabled")
+        if not dest.get("connected"):
+            raise HTTPException(status_code=400, detail="Destination is not connected to YouTube")
+    else:
+        dest = await destinations.get_default_destination(pipeline_id)
+        if dest is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Pipeline chưa có kênh YouTube nào được kích hoạt và liên kết.",
+            )
+        destination_id = dest["id"]
 
     import secrets as _secrets
 

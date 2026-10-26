@@ -391,6 +391,17 @@ async def migrate() -> None:
         statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN forbidden_keywords TEXT NOT NULL DEFAULT ''")
     await _apply_migration(client, applied, "20261026_23", statements_23)
 
+    statements_24: list[str] = []
+    if not await _has_column(client, "youtube_destinations", "is_default"):
+        statements_24.append("ALTER TABLE youtube_destinations ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+    if not await _has_column(client, "youtube_destinations", "channel_avatar_url"):
+        statements_24.append("ALTER TABLE youtube_destinations ADD COLUMN channel_avatar_url TEXT")
+    statements_24.append(
+        "CREATE INDEX IF NOT EXISTS idx_youtube_destinations_pipeline_default "
+        "ON youtube_destinations(pipeline_id, is_default, enabled)"
+    )
+    await _apply_migration(client, applied, "20261026_24", statements_24)
+
 
 async def _apply_migration(
     client: Any, applied: set, version: str, statements: list[str]
@@ -479,10 +490,12 @@ def _load_schema() -> list[str]:
             account_id TEXT,
             channel_id TEXT,
             channel_name TEXT,
+            channel_avatar_url TEXT,
             visibility TEXT NOT NULL DEFAULT 'public',
             enabled INTEGER NOT NULL DEFAULT 1,
             connected INTEGER NOT NULL DEFAULT 0,
             connected_at TEXT,
+            is_default INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )

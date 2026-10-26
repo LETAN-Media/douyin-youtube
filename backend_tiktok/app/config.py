@@ -84,7 +84,10 @@ class Settings(BaseSettings):
     )
 
     # --- YouTube OAuth ---
-    tiktok_youtube_callback_url: str = Field(default="")
+    tiktok_youtube_callback_url: str = Field(
+        default="https://tiktok-api.toolnet.tech/api/tiktok/youtube/oauth/callback",
+        validation_alias=AliasChoices("TIKTOK_YOUTUBE_CALLBACK_URL", "tiktok_youtube_callback_url"),
+    )
     google_client_id: str = Field(
         default="",
         validation_alias=AliasChoices("GOOGLE_CLIENT_ID"),
@@ -92,6 +95,10 @@ class Settings(BaseSettings):
     google_client_secret: str = Field(
         default="",
         validation_alias=AliasChoices("GOOGLE_CLIENT_SECRET"),
+    )
+    dashboard_base_url: str = Field(
+        default="https://douyin.toolnet.tech",
+        validation_alias=AliasChoices("DASHBOARD_BASE_URL", "NEXT_PUBLIC_APP_URL", "dashboard_base_url"),
     )
 
     # --- AI / ToolNet ---

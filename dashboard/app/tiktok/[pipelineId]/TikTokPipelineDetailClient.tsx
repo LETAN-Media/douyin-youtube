@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Badge, Card, CardHeader, Spinner, btnPrimary, btnSecondary, btnSmall, inputCls, labelCls } from "@/components/ui";
 import { IconAlert, IconBack, IconCheck, IconClock, IconFilm, IconPlay, IconPlus, IconRefresh, IconTikTok, IconUpload, IconVideo } from "@/components/icons";
 import { TikTokPipelineToggles } from "@/components/tiktok/TikTokPipelineToggles";
 import { TikTokOverview } from "@/components/tiktok/TikTokOverview";
 import { TikTokAiSettings } from "@/components/tiktok/TikTokAiSettings";
+import { TikTokDestinations } from "@/components/tiktok/TikTokDestinations";
 import type {
   TikTokAiSettingsDto,
   TikTokDestinationDto,
@@ -53,7 +54,22 @@ export function TikTokPipelineDetailClient({
   channelName?: string | null;
 }) {
   const router = useRouter();
-  const [tab, setTab] = useState<"overview" | "sources" | "inventory" | "schedule" | "destinations" | "ai-settings">("overview");
+  const searchParams = useSearchParams();
+  const initialTab =
+    searchParams.get("tab") === "destinations" ||
+    searchParams.get("youtube_connected") ||
+    searchParams.get("youtube_error")
+      ? "destinations"
+      : "overview";
+  const [tab, setTab] = useState<"overview" | "sources" | "inventory" | "schedule" | "destinations" | "ai-settings">(initialTab);
+  const [currentDestinations, setCurrentDestinations] = useState<TikTokDestinationDto[]>(destinations);
+
+  useEffect(() => {
+    const qTab = searchParams.get("tab");
+    if (qTab === "destinations" || searchParams.get("youtube_connected") || searchParams.get("youtube_error")) {
+      setTab("destinations");
+    }
+  }, [searchParams]);
 
   // Sources
   const [sources, setSources] = useState<TikTokSourceDto[]>(initialSources);
@@ -251,7 +267,7 @@ export function TikTokPipelineDetailClient({
           { key: "sources", label: `Nguồn video (${sources.length})` },
           { key: "inventory", label: "Kho video (Inventory)" },
           { key: "schedule", label: "Lịch đăng (Schedule)" },
-          { key: "destinations", label: `Kênh đích (${destinations.length})` },
+          { key: "destinations", label: `Kênh đích (${currentDestinations.length})` },
           { key: "ai-settings", label: "Cấu hình AI" },
         ].map((t) => (
           <button
@@ -299,14 +315,17 @@ export function TikTokPipelineDetailClient({
                 icon={<IconUpload size={18} />}
               />
               <div className="p-4 sm:p-5">
-                {destinations.length === 0 ? (
+                {currentDestinations.length === 0 ? (
                   <p className="text-xs text-slate-500">Chưa có kênh YouTube nào được kết nối.</p>
                 ) : (
                   <div className="space-y-2">
-                    {destinations.map((d) => (
+                    {currentDestinations.map((d) => (
                       <div key={d.id} className="flex items-center justify-between rounded-xl bg-slate-50 p-3">
-                        <div>
-                          <p className="font-bold text-slate-900 text-sm">{d.channel_name || "YouTube"}</p>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <p className="font-bold text-slate-900 text-sm truncate">{d.channel_name || "YouTube"}</p>
+                            {d.is_default && <Badge tone="indigo">Mặc định</Badge>}
+                          </div>
                           <p className="text-[11px] text-slate-400">ID: {d.channel_id || d.id}</p>
                         </div>
                         {d.connected ? <Badge tone="green" dot>Đã liên kết</Badge> : <Badge tone="amber">Chưa OAuth</Badge>}
@@ -628,38 +647,11 @@ export function TikTokPipelineDetailClient({
 
       {/* Tab: Destinations */}
       {tab === "destinations" && (
-        <Card>
-          <CardHeader
-            title="Kênh YouTube đích (Destinations)"
-            subtitle="Danh sách các kênh nhận video xuất bản từ pipeline này"
-            icon={<IconUpload size={18} />}
-            action={
-              <Link href="/tiktok/manual" className={btnPrimary}>
-                Quản lý &amp; Thêm kênh
-              </Link>
-            }
-          />
-          <div className="p-4 sm:p-5">
-            {destinations.length === 0 ? (
-              <div className="p-8 text-center text-sm text-slate-500">
-                Chưa có kênh YouTube nào được cấu hình cho pipeline này.
-              </div>
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {destinations.map((d) => (
-                  <div key={d.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="flex items-center justify-between">
-                      <p className="font-bold text-slate-900">{d.channel_name || "YouTube Channel"}</p>
-                      {d.connected ? <Badge tone="green" dot>Đã liên kết</Badge> : <Badge tone="amber">Chưa OAuth</Badge>}
-                    </div>
-                    <p className="mt-1 text-xs text-slate-500">Kênh ID: {d.channel_id || d.id}</p>
-                    <p className="text-[11px] text-slate-400">Chế độ mặc định: {d.visibility}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </Card>
+        <TikTokDestinations
+          pipelineId={pipeline.id}
+          initial={currentDestinations}
+          onUpdate={setCurrentDestinations}
+        />
       )}
 
       {/* Tab: AI Settings */}

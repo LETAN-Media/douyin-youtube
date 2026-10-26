@@ -296,6 +296,14 @@ export function TikTokManualPublish({
       setPublishError("Tiêu đề không được để trống.");
       return;
     }
+    if (!selectedDest.connected) {
+      setPublishError("Kênh đích chưa cấp quyền OAuth. Vui lòng vào tab Kênh đích của Pipeline để cấp quyền trước khi đăng.");
+      return;
+    }
+    if (!selectedDest.enabled) {
+      setPublishError("Kênh đích đang bị tắt (disabled). Vui lòng bật kênh trước khi đăng.");
+      return;
+    }
 
     setPublishing(true);
     setPublishError(null);
@@ -419,11 +427,14 @@ export function TikTokManualPublish({
                       <span className="font-bold text-slate-900 truncate">
                         {d.channel_name || "YouTube Channel"}
                       </span>
-                      {d.connected ? (
-                        <Badge tone="green" dot>Đã liên kết</Badge>
-                      ) : (
-                        <Badge tone="amber">Chưa cấp OAuth</Badge>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {!d.enabled && <Badge tone="red">Tắt</Badge>}
+                        {d.connected ? (
+                          <Badge tone="green" dot>Đã liên kết</Badge>
+                        ) : (
+                          <Badge tone="amber">Chưa cấp OAuth</Badge>
+                        )}
+                      </div>
                     </div>
                     <span className="mt-1 text-xs text-slate-500">
                       Pipeline: {d.pipeline_name || d.pipeline_id}

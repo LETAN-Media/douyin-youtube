@@ -16,6 +16,26 @@ async def create_oauth_state(
     )
 
 
+async def get_oauth_state(state: str) -> dict[str, Any] | None:
+    res = await execute(
+        "SELECT state, destination_id, pipeline_id, expires_at, created_at, return_to "
+        "FROM youtube_oauth_states WHERE state = :state",
+        {"state": state},
+    )
+    return result_to_dict(res)
+
+
+async def delete_oauth_state(state: str) -> None:
+    await execute("DELETE FROM youtube_oauth_states WHERE state = :state", {"state": state})
+
+
+async def delete_oauth_states_for_destination(destination_id: str) -> None:
+    await execute(
+        "DELETE FROM youtube_oauth_states WHERE destination_id = :destination_id",
+        {"destination_id": destination_id},
+    )
+
+
 async def consume_oauth_state(state: str) -> dict[str, Any] | None:
     res = await execute(
         "SELECT state, destination_id, pipeline_id, expires_at, created_at, return_to "

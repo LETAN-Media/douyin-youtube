@@ -84,10 +84,12 @@ export default async function TikTokPipelineDetailPage({
     flow = flowRes;
     aiSettings = aiRes;
 
-    const connectedDest = destinations.find((d) => d.connected);
+    const connectedDest = destinations.find((d) => d.connected && d.is_default) || destinations.find((d) => d.connected);
     if (connectedDest) {
       channelName = connectedDest.channel_name || null;
-      if (connectedDest.channel_id) {
+      if (connectedDest.channel_avatar_url) {
+        channelAvatarUrl = connectedDest.channel_avatar_url;
+      } else if (connectedDest.channel_id) {
         channelAvatarUrl = await getChannelAvatarUrl(connectedDest.channel_id).catch(() => null);
       }
     }

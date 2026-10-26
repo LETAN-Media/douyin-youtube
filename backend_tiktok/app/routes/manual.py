@@ -72,8 +72,12 @@ async def create_manual_publication(
         raise HTTPException(status_code=400, detail="source_url required")
 
     dest = await destinations.get_destination(destination_id)
-    if dest is None:
-        raise HTTPException(status_code=404, detail="Destination not found")
+    if dest is None or dest.get("pipeline_id") != pipeline_id:
+        raise HTTPException(status_code=404, detail="Destination not found for this pipeline")
+    if not dest.get("enabled"):
+        raise HTTPException(status_code=400, detail="Kênh đích YouTube đang bị tắt (disabled).")
+    if not dest.get("connected"):
+        raise HTTPException(status_code=400, detail="Kênh đích YouTube chưa kết nối OAuth (not connected).")
 
     s_hash = source_hash(source_url)
     existing = await manual_publications.find_manual_pub_by_hash(destination_id, s_hash)
@@ -100,6 +104,9 @@ async def create_manual_publication(
 
 @router.get("/{pipeline_id}/{destination_id}", dependencies=[Depends(require_admin)])
 async def list_manual_publications(pipeline_id: str, destination_id: str):
+    dest = await destinations.get_destination(destination_id)
+    if dest is None or dest.get("pipeline_id") != pipeline_id:
+        raise HTTPException(status_code=404, detail="Destination not found for this pipeline")
     return await manual_publications.list_manual_publications(destination_id)
 
 

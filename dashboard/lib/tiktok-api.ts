@@ -70,10 +70,12 @@ export interface TikTokDestinationDto {
   account_id: string | null;
   channel_id: string | null;
   channel_name: string | null;
+  channel_avatar_url: string | null;
   visibility: string;
   enabled: boolean;
   connected: boolean;
   connected_at: string | null;
+  is_default?: boolean;
 }
 
 export interface TikTokManualResolveDto {
@@ -270,12 +272,71 @@ export async function createTikTokDestination(body: {
   channel_id?: string;
   channel_name?: string;
   visibility?: string;
+  enabled?: boolean;
 }): Promise<TikTokDestinationDto> {
   return ttFetch<TikTokDestinationDto>("/api/tiktok/youtube/destinations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export async function startTikTokOAuth(
+  pipelineId: string,
+  destinationId?: string,
+  return_to?: string,
+): Promise<{ authorization_url: string; destination_id: string; state: string }> {
+  return ttFetch<{ authorization_url: string; destination_id: string; state: string }>(
+    "/api/tiktok/youtube/oauth/start",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pipeline_id: pipelineId,
+        destination_id: destinationId,
+        return_to,
+      }),
+    },
+  );
+}
+
+export async function toggleTikTokDestinationEnabled(
+  destinationId: string,
+  enabled: boolean,
+): Promise<TikTokDestinationDto> {
+  return ttFetch<TikTokDestinationDto>(
+    `/api/tiktok/youtube/destinations/${encodeURIComponent(destinationId)}/enable`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+}
+
+export async function setDefaultTikTokDestination(
+  pipelineId: string,
+  destinationId: string,
+): Promise<TikTokDestinationDto> {
+  return ttFetch<TikTokDestinationDto>(
+    `/api/tiktok/youtube/destinations/${encodeURIComponent(destinationId)}/default`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pipeline_id: pipelineId }),
+    },
+  );
+}
+
+export async function disconnectTikTokDestination(
+  destinationId: string,
+): Promise<{ ok: boolean; destination_id: string; connected: boolean }> {
+  return ttFetch<{ ok: boolean; destination_id: string; connected: boolean }>(
+    `/api/tiktok/youtube/destinations/${encodeURIComponent(destinationId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 export async function listAllTikTokDestinations(): Promise<TikTokDestinationDto[]> {
