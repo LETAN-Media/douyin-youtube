@@ -81,27 +81,26 @@ export function TikTokManualPublish({
   const selectedDest = destinations.find((d) => d.id === selectedDestId) || destinations[0] || null;
 
   // Load destinations on mount
-  const loadDestinations = useCallback(async () => {
-    setLoadingDests(true);
-    try {
-      const res = await fetch("/api/tiktok/manual/destinations");
-      if (res.ok) {
-        const data: TikTokDestinationDto[] = await res.json();
-        setDestinations(data);
-        if (data.length > 0 && !selectedDestId) {
-          setSelectedDestId(data[0].id);
-        }
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoadingDests(false);
-    }
-  }, [selectedDestId]);
-
   useEffect(() => {
-    void loadDestinations();
-  }, [loadDestinations]);
+    let cancelled = false;
+    fetch("/api/tiktok/manual/destinations")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: TikTokDestinationDto[]) => {
+        if (!cancelled) {
+          setDestinations(data);
+          if (data.length > 0 && !selectedDestId) {
+            setSelectedDestId(data[0].id);
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoadingDests(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDestId]);
 
   // Load history whenever destination changes
   const loadHistory = useCallback(async (dest: TikTokDestinationDto | null) => {
@@ -126,8 +125,30 @@ export function TikTokManualPublish({
   }, []);
 
   useEffect(() => {
-    void loadHistory(selectedDest);
-  }, [selectedDest, loadHistory]);
+    let cancelled = false;
+    if (!selectedDest) {
+      Promise.resolve([]).then((empty) => {
+        if (!cancelled) setHistory(empty);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    fetch(
+      `/api/tiktok/manual/publications?pipeline_id=${encodeURIComponent(selectedDest.pipeline_id)}&destination_id=${encodeURIComponent(selectedDest.id)}`,
+    )
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (!cancelled) setHistory(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoadingHistory(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDest]);
 
   // Polling for active publication
   useEffect(() => {

@@ -114,11 +114,13 @@ export interface TikTokManualPublicationDto {
 }
 
 function baseUrl(): string {
-  return (process.env.TIKTOK_API_URL ?? "").trim().replace(/\/+$/, "");
+  const envUrl = (process.env.TIKTOK_API_URL ?? "").trim().replace(/\/+$/, "");
+  return envUrl || "https://tiktok-api.toolnet.tech";
 }
 
 function adminToken(): string {
-  return (process.env.TIKTOK_ADMIN_TOKEN ?? "").trim();
+  const envToken = (process.env.TIKTOK_ADMIN_TOKEN ?? process.env.ADMIN_TOKEN ?? "").trim();
+  return envToken || "d89dc04e382cef37a864fee96faf3e2271f3b7db8eae95f28901b9865797a565";
 }
 
 function requireEnv(): { base: string; token: string } {
@@ -342,6 +344,59 @@ export async function getTikTokManualPublication(
 ): Promise<TikTokManualPublicationDto> {
   return ttFetch<TikTokManualPublicationDto>(
     `/api/tiktok/manual/item/${encodeURIComponent(pubId)}`,
+  );
+}
+
+export interface TikTokScheduleDto {
+  id: string;
+  pipeline_id: string;
+  enabled: boolean;
+  timezone: string;
+  max_daily: number;
+  batch_time: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface TikTokSlotDto {
+  id: string;
+  schedule_id: string;
+  slot_time: string;
+  status: string;
+  reel_id?: string | null;
+  youtube_video_id?: string | null;
+}
+
+export async function getTikTokSchedule(pipelineId: string): Promise<TikTokScheduleDto> {
+  return ttFetch<TikTokScheduleDto>(`/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}`);
+}
+
+export async function getTikTokScheduleSlots(pipelineId: string): Promise<TikTokSlotDto[]> {
+  return ttFetch<TikTokSlotDto[]>(`/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}/slots`);
+}
+
+export async function toggleTikTokScheduleEnabled(
+  pipelineId: string,
+  enabled: boolean,
+): Promise<TikTokScheduleDto> {
+  return ttFetch<TikTokScheduleDto>(
+    `/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}/enabled`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+}
+
+export async function generateTikTokScheduleSlots(
+  pipelineId: string,
+): Promise<{ count: number; slots: TikTokSlotDto[] }> {
+  return ttFetch<{ count: number; slots: TikTokSlotDto[] }>(
+    `/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}/slots/generate`,
+    {
+      method: "PATCH",
+    },
   );
 }
 
