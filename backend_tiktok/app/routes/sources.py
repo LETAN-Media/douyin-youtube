@@ -1,7 +1,9 @@
+import uuid
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..dependencies import require_admin
 from ..db.repositories import sources as sources_repo
+from ..services.tiktok_url import resolve_tiktok_input
 
 router = APIRouter(prefix="/api/tiktok/sources", tags=["sources"])
 
@@ -13,16 +15,39 @@ async def list_sources(pipeline_id: str):
 
 @router.post("/", dependencies=[Depends(require_admin)])
 async def create_source(payload: dict):
-    sid = payload.get("id") or payload.get("source_id")
-    username = payload.get("username")
-    if not sid or not username:
-        raise HTTPException(status_code=400, detail="id and username required")
+    pipeline_id = payload.get("pipeline_id")
+    if not pipeline_id:
+        raise HTTPException(status_code=400, detail="pipeline_id is required")
+
+    raw_user = (
+        payload.get("username")
+        or payload.get("source_url")
+        or payload.get("url")
+        or payload.get("handle")
+    )
+    if not raw_user:
+        raise HTTPException(status_code=400, detail="username or profile url is required")
+
+    try:
+        username, canonical_url = await resolve_tiktok_input(raw_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Check if source already exists in pipeline (idempotent, avoids UNIQUE constraint error)
+    existing = await sources_repo.get_source_by_username(pipeline_id, username)
+    if existing:
+        return existing
+
+    sid = payload.get("id") or payload.get("source_id") or f"src_{uuid.uuid4().hex[:12]}"
+    display_name = payload.get("display_name") or f"@{username}"
+    source_url = payload.get("source_url") or canonical_url
+
     return await sources_repo.create_source(
         source_id=sid,
-        pipeline_id=payload["pipeline_id"],
+        pipeline_id=pipeline_id,
         username=username,
-        display_name=payload.get("display_name"),
-        source_url=payload.get("source_url"),
+        display_name=display_name,
+        source_url=source_url,
     )
 
 

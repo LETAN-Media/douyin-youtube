@@ -578,3 +578,68 @@ export async function getProviderHealth() {
     "/health/providers",
   );
 }
+
+export interface TikTokAiSettingsDto {
+  pipeline_id: string;
+  enabled: boolean;
+  provider: string;
+  model: string;
+  system_prompt: string;
+  title_prompt: string;
+  description_prompt: string;
+  hashtag_prompt: string;
+  title_template: string;
+  description_template: string;
+  locked_hashtags: string[];
+  language: string;
+  max_hashtags: number;
+  include_emojis: boolean;
+  tone: string;
+  required_keywords: string;
+  forbidden_keywords: string;
+  updated_at?: string;
+}
+
+export interface TikTokAiModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  is_default?: boolean;
+}
+
+export async function getTikTokAiSettings(pipelineId: string): Promise<TikTokAiSettingsDto> {
+  return ttFetch<TikTokAiSettingsDto>(`/api/tiktok/ai/settings/pipeline/${encodeURIComponent(pipelineId)}`);
+}
+
+export async function updateTikTokAiSettings(
+  pipelineId: string,
+  settings: Partial<TikTokAiSettingsDto>,
+): Promise<TikTokAiSettingsDto> {
+  return ttFetch<TikTokAiSettingsDto>(`/api/tiktok/ai/settings/pipeline/${encodeURIComponent(pipelineId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+}
+
+export async function listTikTokAiModels(): Promise<{ models: TikTokAiModelOption[] }> {
+  return ttFetch<{ models: TikTokAiModelOption[] }>("/api/tiktok/ai/models");
+}
+
+export async function testTikTokAiSettings(body: {
+  pipeline_id: string;
+  sample_caption?: string;
+  settings?: Partial<TikTokAiSettingsDto>;
+}): Promise<{
+  title: string;
+  description: string;
+  hashtags: string[];
+  model: string;
+  provider: string;
+}> {
+  return ttFetch("/api/tiktok/ai/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}

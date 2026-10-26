@@ -1,10 +1,81 @@
 """TikTok URL parsing and normalization."""
 
+import re
 from urllib.parse import urlparse
 
 from ..config import settings
 
 VIDEO_PATH_MARKERS = ("/video/", "/v/", "/embed/", "/@")
+
+
+def clean_tiktok_username(raw: str | None) -> str | None:
+    """Extract and validate clean TikTok username from username string or URL.
+
+    Supports:
+      - @username
+      - username
+      - https://www.tiktok.com/@username
+      - https://www.tiktok.com/@username?param=1
+      - tiktok.com/@username
+      - https://www.tiktok.com/@username/video/12345
+    """
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    # Handle URLs with or without scheme
+    if "tiktok.com" in raw.lower() or raw.startswith("http://") or raw.startswith("https://"):
+        url = raw if (raw.startswith("http://") or raw.startswith("https://")) else f"https://{raw}"
+        try:
+            parsed = urlparse(url)
+            parts = (parsed.path or "").strip("/").split("/")
+            for part in parts:
+                if part.startswith("@"):
+                    u = part[1:].split("?")[0].split("&")[0].strip()
+                    if u and re.match(r"^[a-zA-Z0-9_.-]{2,50}$", u):
+                        return u
+        except Exception:
+            pass
+
+    # Handle @username or plain username
+    u = raw.lstrip("@").strip()
+    if u and re.match(r"^[a-zA-Z0-9_.-]{2,50}$", u):
+        return u
+    return None
+
+
+async def resolve_tiktok_input(raw: str | None) -> tuple[str, str]:
+    """Resolve TikTok username and canonical profile URL from any input format.
+
+    Handles @username, plain username, full profile URL, video URL, or shortened link.
+    Returns (clean_username, canonical_profile_url).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("TikTok username hoặc profile URL không được để trống")
+
+    username = clean_tiktok_username(raw)
+    if username:
+        return username, f"https://www.tiktok.com/@{username}"
+
+    # Handle shortened links (e.g. vt.tiktok.com / vm.tiktok.com)
+    raw_clean = raw.strip()
+    if any(h in raw_clean.lower() for h in ("vt.tiktok.com", "vm.tiktok.com", "t.tiktok.com")):
+        url = raw_clean if raw_clean.startswith("http") else f"https://{raw_clean}"
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                resp = await client.head(url)
+                final_url = str(resp.url)
+                resolved_user = clean_tiktok_username(final_url)
+                if resolved_user:
+                    return resolved_user, f"https://www.tiktok.com/@{resolved_user}"
+        except Exception:
+            pass
+
+    raise ValueError(f"Không thể xác định tài khoản TikTok từ: {raw}")
 
 
 def is_tiktok_url(raw_url: str | None) -> bool:

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Card, CardHeader, Spinner, btnPrimary, btnSecondary, btnSmall, inputCls, labelCls } from "@/components/ui";
-import { IconTikTok, IconUpload, IconVideo, IconCheck, IconAlert } from "@/components/icons";
+import { IconTikTok, IconUpload, IconVideo, IconCheck, IconAlert, IconSparkles } from "@/components/icons";
 import type { TikTokDestinationDto, TikTokManualPublicationDto, TikTokManualResolveDto } from "@/lib/tiktok-api";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -67,6 +67,7 @@ export function TikTokManualPublish({
   const [publishMode, setPublishMode] = useState<"now" | "scheduled">("now");
   const [schedDate, setSchedDate] = useState("");
   const [schedTime, setSchedTime] = useState("");
+  const [generatingAi, setGeneratingAi] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
 
@@ -192,26 +193,62 @@ export function TikTokManualPublish({
       const res = await fetch("/api/tiktok/manual/resolve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: cleanUrl }),
+        body: JSON.stringify({
+          url: cleanUrl,
+          pipeline_id: selectedDest?.pipeline_id,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || data.message || "Không thể lấy thông tin video TikTok.");
       }
       setPreview(data);
-      // Pre-fill form fields
-      const caption = data.caption || "";
-      setTitle(caption.slice(0, 100));
-      setDescription(caption);
-      // Extract hashtags
-      const tags = caption.match(/#[a-zA-Z0-9_\p{L}]+/gu) || [];
-      if (tags.length > 0) {
-        setHashtags(tags.slice(0, 10).join(" "));
+      // Pre-fill form fields (use AI-generated metadata if available, otherwise caption fallback)
+      const initialTitle = data.ai_title || (data.caption || "").slice(0, 100);
+      const initialDesc = data.ai_description || data.caption || "";
+      setTitle(initialTitle);
+      setDescription(initialDesc);
+
+      if (Array.isArray(data.ai_hashtags) && data.ai_hashtags.length > 0) {
+        setHashtags(data.ai_hashtags.join(" "));
+      } else {
+        const caption = data.caption || "";
+        const tags = caption.match(/#[a-zA-Z0-9_\p{L}]+/gu) || [];
+        if (tags.length > 0) {
+          setHashtags(tags.slice(0, 10).join(" "));
+        }
       }
     } catch (err) {
       setResolveError(err instanceof Error ? err.message : "Lỗi khi nhận diện video.");
     } finally {
       setResolving(false);
+    }
+  }
+
+  async function handleRegenerateAi() {
+    if (!preview || generatingAi) return;
+    setGeneratingAi(true);
+    try {
+      const res = await fetch("/api/tiktok/ai/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pipeline_id: selectedDest?.pipeline_id || "default",
+          sample_caption: preview.caption || title,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.title) setTitle(data.title.slice(0, 100));
+        if (data.description) setDescription(data.description);
+        if (Array.isArray(data.hashtags) && data.hashtags.length > 0) {
+          setHashtags(data.hashtags.join(" "));
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      setGeneratingAi(false);
     }
   }
 
@@ -538,6 +575,17 @@ export function TikTokManualPublish({
             title="2. Cấu hình nội dung & Đăng lên YouTube"
             subtitle="Tùy chỉnh tiêu đề, mô tả và chế độ xuất bản"
             icon={<IconUpload size={18} />}
+            action={
+              <button
+                type="button"
+                onClick={handleRegenerateAi}
+                disabled={generatingAi}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 shadow-sm transition hover:bg-indigo-100"
+              >
+                {generatingAi ? <Spinner size={12} /> : <IconSparkles size={13} />}
+                <span>{generatingAi ? "AI đang tạo..." : "Tạo lại bằng AI"}</span>
+              </button>
+            }
           />
           <div className="space-y-4 p-4 sm:p-5">
             <div>

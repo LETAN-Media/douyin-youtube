@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { btnPrimary } from "@/components/ui";
 import {
+  getTikTokAiSettings,
   getTikTokFlowState,
   getTikTokPipeline,
   getTikTokSchedule,
@@ -11,6 +12,7 @@ import {
   listTikTokDestinations,
   listTikTokSources,
   TikTokApiError,
+  type TikTokAiSettingsDto,
   type TikTokDestinationDto,
   type TikTokFlowState,
   type TikTokScheduleDto,
@@ -35,6 +37,7 @@ export default async function TikTokPipelineDetailPage({
   let schedule: TikTokScheduleDto | null = null;
   let slots: TikTokSlotDto[] = [];
   let flow: TikTokFlowState | null = null;
+  let aiSettings: TikTokAiSettingsDto | null = null;
   let channelAvatarUrl: string | null = null;
   let channelName: string | null = null;
 
@@ -60,13 +63,14 @@ export default async function TikTokPipelineDetailPage({
   }
 
   try {
-    const [summaryRes, sourcesRes, destsRes, schedRes, slotsRes, flowRes] = await Promise.all([
+    const [summaryRes, sourcesRes, destsRes, schedRes, slotsRes, flowRes, aiRes] = await Promise.all([
       getTikTokSummary(pipelineId).catch(() => null),
       listTikTokSources(pipelineId).catch(() => []),
       listTikTokDestinations(pipelineId).catch(() => []),
       getTikTokSchedule(pipelineId).catch(() => null),
       getTikTokScheduleSlots(pipelineId).catch(() => []),
       getTikTokFlowState(pipelineId).catch(() => null),
+      getTikTokAiSettings(pipelineId).catch(() => null),
     ]);
     summary = summaryRes;
     sources = sourcesRes;
@@ -74,6 +78,7 @@ export default async function TikTokPipelineDetailPage({
     schedule = schedRes;
     slots = slotsRes;
     flow = flowRes;
+    aiSettings = aiRes;
 
     const connectedDest = destinations.find((d) => d.connected);
     if (connectedDest) {
@@ -96,6 +101,7 @@ export default async function TikTokPipelineDetailPage({
         initialSchedule={schedule}
         initialSlots={slots}
         initialFlow={flow}
+        initialAiSettings={aiSettings}
         channelAvatarUrl={channelAvatarUrl}
         channelName={channelName}
       />

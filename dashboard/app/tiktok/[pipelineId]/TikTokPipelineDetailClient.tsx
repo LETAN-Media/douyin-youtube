@@ -7,7 +7,9 @@ import { Badge, Card, CardHeader, Spinner, btnPrimary, btnSecondary, btnSmall, i
 import { IconAlert, IconCheck, IconClock, IconFilm, IconPlay, IconPlus, IconRefresh, IconTikTok, IconUpload, IconVideo } from "@/components/icons";
 import { TikTokPipelineToggles } from "@/components/tiktok/TikTokPipelineToggles";
 import { TikTokOverview } from "@/components/tiktok/TikTokOverview";
+import { TikTokAiSettings } from "@/components/tiktok/TikTokAiSettings";
 import type {
+  TikTokAiSettingsDto,
   TikTokDestinationDto,
   TikTokFlowState,
   TikTokPipelineDto,
@@ -33,6 +35,7 @@ export function TikTokPipelineDetailClient({
   initialSchedule = null,
   initialSlots = [],
   initialFlow = null,
+  initialAiSettings = null,
   channelAvatarUrl = null,
   channelName = null,
 }: {
@@ -43,11 +46,12 @@ export function TikTokPipelineDetailClient({
   initialSchedule: TikTokScheduleDto | null;
   initialSlots: TikTokSlotDto[];
   initialFlow?: TikTokFlowState | null;
+  initialAiSettings?: TikTokAiSettingsDto | null;
   channelAvatarUrl?: string | null;
   channelName?: string | null;
 }) {
   const router = useRouter();
-  const [tab, setTab] = useState<"overview" | "sources" | "inventory" | "schedule" | "destinations">("overview");
+  const [tab, setTab] = useState<"overview" | "sources" | "inventory" | "schedule" | "destinations" | "ai-settings">("overview");
 
   // Sources
   const [sources, setSources] = useState<TikTokSourceDto[]>(initialSources);
@@ -74,7 +78,7 @@ export function TikTokPipelineDetailClient({
   // Add source handler
   async function handleAddSource(e: React.FormEvent) {
     e.preventDefault();
-    const cleanUser = newUsername.replace(/^@/, "").trim();
+    const cleanUser = newUsername.trim();
     if (!cleanUser || addingSource) return;
 
     setAddingSource(true);
@@ -94,7 +98,10 @@ export function TikTokPipelineDetailClient({
       if (!res.ok) {
         throw new Error(data.error || data.message || "Không thể thêm nguồn TikTok.");
       }
-      setSources((prev) => [data, ...prev]);
+      setSources((prev) => {
+        if (prev.some((s) => s.id === data.id)) return prev;
+        return [data, ...prev];
+      });
       setShowAddSource(false);
       setNewUsername("");
       setNewDisplayName("");
@@ -225,6 +232,7 @@ export function TikTokPipelineDetailClient({
           { key: "inventory", label: "Kho video (Inventory)" },
           { key: "schedule", label: "Lịch đăng (Schedule)" },
           { key: "destinations", label: `Kênh đích (${destinations.length})` },
+          { key: "ai-settings", label: "Cấu hình AI" },
         ].map((t) => (
           <button
             key={t.key}
@@ -365,7 +373,19 @@ export function TikTokPipelineDetailClient({
                         {s.display_name && <p className="text-xs text-slate-500">{s.display_name}</p>}
                       </td>
                       <td className="px-4 py-3">
-                        {s.enabled ? <Badge tone="green" dot>Bật</Badge> : <Badge tone="slate">Tắt</Badge>}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {s.enabled ? <Badge tone="green" dot>Bật</Badge> : <Badge tone="slate">Tắt</Badge>}
+                          {s.last_scan_status === "failed" ? (
+                            <Badge tone="rose">Lỗi quét</Badge>
+                          ) : s.last_scan_status === "running" ? (
+                            <Badge tone="indigo" dot>Đang quét...</Badge>
+                          ) : null}
+                        </div>
+                        {s.last_scan_error && s.last_scan_status === "failed" && (
+                          <p className="mt-1 max-w-[240px] truncate text-[11px] text-rose-600" title={s.last_scan_error}>
+                            {s.last_scan_error}
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-3 font-semibold text-slate-900">
                         {s.discovered_total || 0}
@@ -621,6 +641,14 @@ export function TikTokPipelineDetailClient({
         </Card>
       )}
 
+      {/* Tab: AI Settings */}
+      {tab === "ai-settings" && (
+        <TikTokAiSettings
+          pipelineId={pipeline.id}
+          initialSettings={initialAiSettings ?? null}
+        />
+      )}
+
       {/* Add Source Modal */}
       {showAddSource && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
@@ -633,19 +661,19 @@ export function TikTokPipelineDetailClient({
             )}
             <form onSubmit={handleAddSource} className="mt-4 space-y-4">
               <div>
-                <label className={labelCls}>TikTok Username (Creator)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 text-slate-400 text-sm font-bold">@</span>
-                  <input
-                    type="text"
-                    value={newUsername}
-                    onChange={(e) => setNewUsername(e.target.value)}
-                    className={`${inputCls} pl-7`}
-                    placeholder="khaby.lame"
-                    required
-                    disabled={addingSource}
-                  />
-                </div>
+                <label className={labelCls}>TikTok Username hoặc Link Profile</label>
+                <input
+                  type="text"
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  className={inputCls}
+                  placeholder="@citrachoighelam_19 hoặc link TikTok"
+                  required
+                  disabled={addingSource}
+                />
+                <p className="mt-1.5 text-[11px] text-slate-400">
+                  Hỗ trợ: @username, username, link tiktok.com/@username hoặc link rút gọn vt.tiktok.com
+                </p>
               </div>
               <div>
                 <label className={labelCls}>Tên gợi nhớ (Tùy chọn)</label>
@@ -654,7 +682,7 @@ export function TikTokPipelineDetailClient({
                   value={newDisplayName}
                   onChange={(e) => setNewDisplayName(e.target.value)}
                   className={inputCls}
-                  placeholder="Khaby Lame Official"
+                  placeholder="Citra 🐈"
                   disabled={addingSource}
                 />
               </div>

@@ -218,12 +218,21 @@ async def migrate() -> None:
         CREATE TABLE IF NOT EXISTS tiktok_ai_settings (
             pipeline_id TEXT PRIMARY KEY,
             enabled INTEGER NOT NULL DEFAULT 1,
+            provider TEXT NOT NULL DEFAULT 'toolnet',
+            model TEXT,
             system_prompt TEXT,
+            title_prompt TEXT,
+            description_prompt TEXT,
+            hashtag_prompt TEXT,
             title_template TEXT,
             description_template TEXT,
             locked_hashtags_json TEXT NOT NULL DEFAULT '[]',
             language TEXT NOT NULL DEFAULT 'vi',
-            model TEXT,
+            max_hashtags INTEGER NOT NULL DEFAULT 10,
+            include_emojis INTEGER NOT NULL DEFAULT 1,
+            tone TEXT NOT NULL DEFAULT 'engaging',
+            required_keywords TEXT NOT NULL DEFAULT '',
+            forbidden_keywords TEXT NOT NULL DEFAULT '',
             config_hash TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -360,6 +369,27 @@ async def migrate() -> None:
         "ON tiktok_reels(source_id, status, discovered_at DESC, id)",
     ]
     await _apply_migration(client, applied, "20261024_22", statements_22)
+
+    statements_23: list[str] = []
+    if not await _has_column(client, "tiktok_ai_settings", "provider"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN provider TEXT NOT NULL DEFAULT 'toolnet'")
+    if not await _has_column(client, "tiktok_ai_settings", "title_prompt"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN title_prompt TEXT")
+    if not await _has_column(client, "tiktok_ai_settings", "description_prompt"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN description_prompt TEXT")
+    if not await _has_column(client, "tiktok_ai_settings", "hashtag_prompt"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN hashtag_prompt TEXT")
+    if not await _has_column(client, "tiktok_ai_settings", "max_hashtags"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN max_hashtags INTEGER NOT NULL DEFAULT 10")
+    if not await _has_column(client, "tiktok_ai_settings", "include_emojis"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN include_emojis INTEGER NOT NULL DEFAULT 1")
+    if not await _has_column(client, "tiktok_ai_settings", "tone"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN tone TEXT NOT NULL DEFAULT 'engaging'")
+    if not await _has_column(client, "tiktok_ai_settings", "required_keywords"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN required_keywords TEXT NOT NULL DEFAULT ''")
+    if not await _has_column(client, "tiktok_ai_settings", "forbidden_keywords"):
+        statements_23.append("ALTER TABLE tiktok_ai_settings ADD COLUMN forbidden_keywords TEXT NOT NULL DEFAULT ''")
+    await _apply_migration(client, applied, "20261026_23", statements_23)
 
 
 async def _apply_migration(

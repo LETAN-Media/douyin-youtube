@@ -36,6 +36,19 @@ async def resolve_video_info(body: dict):
 
     video_id = extract_video_id(source_url)
 
+    ai_data = None
+    if body.get("generate_ai", True):
+        from ..services.tiktok_ai_metadata import generate_ai_metadata
+
+        try:
+            ai_data = await generate_ai_metadata(
+                pipeline_id=body.get("pipeline_id"),
+                original_caption=media.caption,
+                reel={"reel_url": source_url, "caption": media.caption},
+            )
+        except Exception:
+            pass
+
     return {
         "source_url": source_url,
         "video_id": video_id,
@@ -44,6 +57,9 @@ async def resolve_video_info(body: dict):
         "duration": media.duration,
         "play_count": media.play_count,
         "provider": provider.name,
+        "ai_title": (ai_data or {}).get("title"),
+        "ai_description": (ai_data or {}).get("description"),
+        "ai_hashtags": (ai_data or {}).get("hashtags", []),
     }
 
 
@@ -118,15 +134,36 @@ async def _do_manual_publish(pub_id: str):
             _to_manual_resolved(media), job_id=f"mpub_{pub_id}"
         )
 
+        # Prioritize user-provided title/description/hashtags from manual form
+        final_title = pub.get("youtube_title")
+        final_description = pub.get("youtube_description")
+        final_hashtags = pub.get("youtube_hashtags_json")
+
+        if not final_title:
+            from ..services.tiktok_ai_metadata import generate_ai_metadata
+
+            try:
+                ai_meta = await generate_ai_metadata(
+                    pipeline_id=pub.get("pipeline_id"),
+                    reel={"caption": metadata.caption or pub.get("caption"), "reel_url": pub["source_url"]},
+                )
+                final_title = ai_meta.get("title") or metadata.caption or "TikTok Video"
+                if not final_description:
+                    final_description = ai_meta.get("description") or ""
+                if not final_hashtags or final_hashtags == "[]":
+                    final_hashtags = ai_meta.get("hashtags_json") or "[]"
+            except Exception:
+                final_title = metadata.caption or "TikTok Video"
+
         await manual_publications.set_manual_pub_status(pub_id, "processing", stage="publishing")
         await manual_publications.set_manual_pub_media(
             pub_id,
             thumbnail_url=metadata.thumbnail_url or media.thumbnail_url,
             duration=metadata.duration or media.duration,
-            youtube_title=metadata.caption or pub.get("youtube_title"),
-            youtube_description=pub.get("youtube_description"),
-            youtube_hashtags_json=pub.get("youtube_hashtags_json"),
-            caption=pub.get("caption"),
+            youtube_title=final_title,
+            youtube_description=final_description,
+            youtube_hashtags_json=final_hashtags,
+            caption=pub.get("caption") or metadata.caption,
         )
 
         # Read back for final metadata
@@ -135,9 +172,9 @@ async def _do_manual_publish(pub_id: str):
         video_id = await publish_video_to_youtube(
             destination_id=pub["destination_id"],
             video_path=video_path,
-            title=updated.get("youtube_title") or metadata.caption or media.caption or "TikTok video",
-            description=updated.get("youtube_description") or "",
-            hashtags_json=updated.get("youtube_hashtags_json") or "[]",
+            title=updated.get("youtube_title") or final_title or "TikTok video",
+            description=updated.get("youtube_description") or final_description or "",
+            hashtags_json=updated.get("youtube_hashtags_json") or final_hashtags or "[]",
             thumbnail_url=updated.get("thumbnail_url"),
         )
 

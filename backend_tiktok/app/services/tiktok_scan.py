@@ -61,6 +61,7 @@ async def scan_source(
     prev_cursor: str | None = None
     max_total = settings.tiktok_source_max_count
 
+    scan_err: str | None = None
     while True:
         try:
             reels_batch, cursor = await provider.list_videos(
@@ -68,7 +69,15 @@ async def scan_source(
             )
         except ProviderError as exc:
             logger.warning("scan_source: list_videos error for @%s: %s", username, exc)
+            scan_err = str(exc)
             await scan_runs.mark_scan_run_error(scan_run_id, f"List error: {exc}")
+            if discovered == 0:
+                await sources.update_scan_state(
+                    source_id,
+                    scan_status="failed",
+                    scan_error=scan_err,
+                )
+                return {"discovered": 0, "inserted": 0, "existing": 0}
             break
 
         if not reels_batch:
@@ -96,20 +105,22 @@ async def scan_source(
         if not cursor:
             break
 
+    final_status = "partial" if scan_err else "completed"
     await scan_runs.complete_scan_run(
         scan_run_id,
         discovered_count=discovered,
         inserted_count=inserted,
         existing_count=existing,
-        crawl_complete=(cursor is None),
-        status="completed",
+        crawl_complete=(cursor is None and not scan_err),
+        status=final_status,
     )
     await sources.update_scan_state(
         source_id,
-        scan_status="completed",
+        scan_status=final_status,
+        scan_error=scan_err,
         discovered_total=discovered,
         initial_scan_completed=(scan_mode == "initial"),
-        crawl_complete=(cursor is None),
+        crawl_complete=(cursor is None and not scan_err),
     )
 
     logger.info(

@@ -39,6 +39,17 @@ async def get_source(source_id: str) -> dict[str, Any] | None:
     return result_to_dict(res)
 
 
+async def get_source_by_username(pipeline_id: str, username: str) -> dict[str, Any] | None:
+    res = await execute(
+        "SELECT id, pipeline_id, username, display_name, source_url, enabled, "
+        "initial_scan_completed, crawl_complete, discovered_total, "
+        "last_scan_at, last_scan_status, last_scan_error, created_at, updated_at "
+        "FROM tiktok_sources WHERE pipeline_id = :pipeline_id AND username = :username",
+        {"pipeline_id": pipeline_id, "username": username},
+    )
+    return result_to_dict(res)
+
+
 async def list_sources(pipeline_id: str) -> list[dict[str, Any]]:
     res = await execute(
         "SELECT id, pipeline_id, username, display_name, source_url, enabled, "
