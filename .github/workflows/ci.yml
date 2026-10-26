@@ -111,6 +111,10 @@ jobs:
           DATABASE_URL: sqlite:////tmp/ci_douyin.db
           ADMIN_TOKEN: test-admin-token-xyz
           WORKER_ENABLED: "false"
+          AI_API_KEY: test_dummy_ai_key
+          GOOGLE_CLIENT_ID: test_dummy_google_client_id.apps.googleusercontent.com
+          GOOGLE_CLIENT_SECRET: test_dummy_google_client_secret
+          PUBLIC_BASE_URL: https://douyin-api.toolnet.tech
           PYTHONPATH: .
         working-directory: backend
         run: pytest tests/
@@ -142,8 +146,6 @@ jobs:
 
       - name: Run Facebook tests
         env:
-          DATABASE_URL: file:/tmp/ci_fb.db
-          TURSO_DATABASE_URL: file:/tmp/ci_fb.db
           ADMIN_TOKEN: test-admin-token-xyz
           PHIMTAT_TIMEOUT_SECONDS: "60"
           WORKER_ENABLED: "false"
@@ -178,8 +180,6 @@ jobs:
 
       - name: Run TikTok tests
         env:
-          DATABASE_URL: file:/tmp/ci_tiktok.db
-          TURSO_DATABASE_URL: file:/tmp/ci_tiktok.db
           ADMIN_TOKEN: test-admin-token-xyz
           WORKER_ENABLED: "false"
           PYTHONPATH: .
@@ -218,10 +218,13 @@ jobs:
 
       - name: Run Audio tests
         env:
-          DATABASE_URL: file:/tmp/ci_audio.db
-          TURSO_DATABASE_URL: file:/tmp/ci_audio.db
           ADMIN_TOKEN: test-admin-token-xyz
+          AUDIO_ADMIN_TOKEN: test-admin-token-xyz
           WORKER_ENABLED: "false"
+          TOOLNET_AI_ENABLED: "true"
+          TOOLNET_BASE_URL: https://api.toolnet.tech/v1
+          TOOLNET_API_KEY: dummy_test_key
+          TOOLNET_MODEL: groq/qwen/qwen3.8-27b
           AUDIO_WORKDIR: /tmp/ci_audio_workdir
           PYTHONPATH: .
         working-directory: backend_audio

@@ -78,8 +78,10 @@ app.dependency_overrides[get_db] = _override_get_db
 @pytest.fixture(autouse=True)
 def _ensure_tenant_db_override():
     app.dependency_overrides[get_db] = _override_get_db
+    client.cookies.clear()
     yield
     app.dependency_overrides[get_db] = _override_get_db
+    client.cookies.clear()
 
 
 ADMIN_HEADERS = {"X-Admin-Token": settings.admin_token}
@@ -281,7 +283,9 @@ def _login(email, password):
         "/api/auth/login", json={"email": email, "password": password}
     )
     assert res.status_code == 200, res.text
-    return {"X-Session-Token": res.json()["token"]}
+    token = res.json()["token"]
+    client.cookies.clear()
+    return {"X-Session-Token": token}
 
 
 HA = _login("a@test.local", "usera-pass-123")
