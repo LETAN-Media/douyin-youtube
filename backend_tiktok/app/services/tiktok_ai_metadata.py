@@ -233,7 +233,29 @@ def _call_toolnet_sync(prompt: str, system: str, model: str) -> dict[str, Any]:
     if resp.status_code != 200:
         raise RuntimeError(f"ToolNet API error: {resp.status_code} - {resp.text[:200]}")
 
-    data = resp.json()
+    raw_text = resp.text.strip()
+    if "data: [DONE]" in raw_text:
+        raw_text = raw_text.split("data: [DONE]")[0].strip()
+
+    data = None
+    try:
+        data = json.loads(raw_text)
+    except Exception:
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("data:"):
+                continue
+            try:
+                candidate = json.loads(line)
+                if isinstance(candidate, dict):
+                    data = candidate
+                    break
+            except Exception:
+                continue
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"ToolNet API response is not valid JSON: {raw_text[:200]}")
+
     text = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
     text = text.strip()
 
@@ -257,7 +279,3 @@ def _call_toolnet_sync(prompt: str, system: str, model: str) -> dict[str, Any]:
             except Exception:
                 pass
         return {"title": text[:80], "description": text, "hashtags": ["#shorts"]}
-
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {"title": None, "description": text, "hashtags": []}

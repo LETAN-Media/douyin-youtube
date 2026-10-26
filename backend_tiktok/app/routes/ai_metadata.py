@@ -54,6 +54,15 @@ async def run_ai_test(body: dict):
     pipeline_id = body.get("pipeline_id")
     sample_caption = body.get("sample_caption") or body.get("caption") or body.get("sample_title") or "Khám phá video TikTok triệu view"
     settings_override = body.get("settings")
+    if not settings_override:
+        direct_keys = {
+            "provider", "model", "system_prompt", "title_prompt", "description_prompt",
+            "hashtag_prompt", "language", "max_hashtags", "include_emojis", "tone",
+            "required_keywords", "forbidden_keywords", "locked_hashtags"
+        }
+        extracted = {k: body[k] for k in direct_keys if k in body}
+        if extracted:
+            settings_override = extracted
 
     from ..services.tiktok_ai_metadata import generate_ai_metadata
 

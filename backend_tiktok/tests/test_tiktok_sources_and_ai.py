@@ -5,6 +5,17 @@ from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock, patch
 
+TEST_DB_PATH = Path("/tmp/tiktok_test.db")
+
+
+def _reset_db() -> None:
+    from app.db import client as db_client
+
+    db_client._client = None
+    if TEST_DB_PATH.exists():
+        TEST_DB_PATH.unlink()
+
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.db.client import migrate
@@ -29,8 +40,11 @@ from app.services.tiktok_provider import ProviderError, TikTokProfile
 
 @pytest.fixture(autouse=True)
 async def setup_test_db():
+    _reset_db()
     await migrate()
     yield
+    _reset_db()
+
 
 
 def test_clean_tiktok_username():
@@ -195,3 +209,22 @@ async def test_scan_error_marks_failed_not_completed():
         assert updated_src is not None
         assert updated_src["last_scan_status"] == "failed"
         assert "Upstream rate limit 429" in (updated_src["last_scan_error"] or "")
+
+
+def test_call_toolnet_sync_handles_sse_trailer():
+    from app.services.tiktok_ai_metadata import _call_toolnet_sync
+    from unittest.mock import MagicMock
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = (
+        '{"id":"chatcmpl-123","choices":[{"message":{"content":"{\\"title\\": \\"Test Video\\", \\"description\\": \\"Nice video\\", \\"hashtags\\": [\\"#test\\"]}"}}]}\n'
+        'data: [DONE]\n\n'
+    )
+
+    with patch("httpx.post", return_value=mock_resp):
+        res = _call_toolnet_sync("prompt", "system", "model")
+        assert res["title"] == "Test Video"
+        assert res["description"] == "Nice video"
+        assert res["hashtags"] == ["#test"]
+
