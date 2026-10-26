@@ -37,6 +37,7 @@ export default async function TikTokPipelineDetailPage({
   let schedule: TikTokScheduleDto | null = null;
   let slots: TikTokSlotDto[] = [];
   let flow: TikTokFlowState | null = null;
+  let flowError: string | null = null;
   let aiSettings: TikTokAiSettingsDto | null = null;
   let channelAvatarUrl: string | null = null;
   let channelName: string | null = null;
@@ -69,7 +70,10 @@ export default async function TikTokPipelineDetailPage({
       listTikTokDestinations(pipelineId).catch(() => []),
       getTikTokSchedule(pipelineId).catch(() => null),
       getTikTokScheduleSlots(pipelineId).catch(() => []),
-      getTikTokFlowState(pipelineId).catch(() => null),
+      getTikTokFlowState(pipelineId).catch((err) => {
+        flowError = err instanceof Error ? err.message : "Không tải được flow-state TikTok";
+        return null;
+      }),
       getTikTokAiSettings(pipelineId).catch(() => null),
     ]);
     summary = summaryRes;
@@ -101,6 +105,7 @@ export default async function TikTokPipelineDetailPage({
         initialSchedule={schedule}
         initialSlots={slots}
         initialFlow={flow}
+        flowError={flowError}
         initialAiSettings={aiSettings}
         channelAvatarUrl={channelAvatarUrl}
         channelName={channelName}

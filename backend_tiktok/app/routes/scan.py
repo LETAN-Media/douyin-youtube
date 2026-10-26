@@ -44,7 +44,7 @@ async def get_scan_run(scan_run_id: str):
 
 @router.get("/source/{source_id}/runs", dependencies=[Depends(require_admin)])
 async def list_scan_runs(source_id: str, limit: int = 20):
-    from ..db.client import execute
+    from ..db.client import execute, result_to_dicts
 
     res = await execute(
         "SELECT id, source_id, started_at, completed_at, discovered_count, "
@@ -52,7 +52,7 @@ async def list_scan_runs(source_id: str, limit: int = 20):
         "FROM tiktok_scan_runs WHERE source_id = :sid ORDER BY started_at DESC LIMIT :limit",
         {"sid": source_id, "limit": limit},
     )
-    return [dict(r) for r in res.rows]
+    return result_to_dicts(res)
 
 
 async def _do_scan(source_id: str, scan_run_id: str):

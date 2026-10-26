@@ -228,3 +228,53 @@ def test_call_toolnet_sync_handles_sse_trailer():
         assert res["description"] == "Nice video"
         assert res["hashtags"] == ["#test"]
 
+
+@pytest.mark.asyncio
+async def test_pipeline_flow_with_scan_runs_returns_all_6_steps():
+    from app.routes.flow import pipeline_flow
+    from app.db.repositories import reels as reels_repo
+    from app.db.repositories import scan_runs as scan_runs_repo
+
+    pid = "pipe_flow_test"
+    await pipelines_repo.create_pipeline(pid, "Flow Pipe", "pipe-flow")
+    src = await sources_repo.create_source("src_flow_1", pid, "citrachoighelam_19")
+
+    # Insert a scan run
+    await scan_runs_repo.create_scan_run("scan_flow_1", src["id"], "manual")
+    await scan_runs_repo.complete_scan_run(
+        "scan_flow_1",
+        discovered_count=15,
+        inserted_count=15,
+        existing_count=0,
+        status="completed",
+    )
+
+    # Insert a reel
+    await reels_repo.insert_reel_if_new(
+        reel_db_id="reel_flow_1",
+        source_id=src["id"],
+        reel_id="7558026492685323528",
+        reel_url="https://www.tiktok.com/@citra/video/7558026492685323528",
+        caption="Test reel caption",
+        thumbnail_url="https://p16.tiktokcdn.com/thumb.jpg",
+    )
+
+    flow = await pipeline_flow(pid)
+    assert flow["pipeline_id"] == pid
+    assert flow["steps"]["source"] in ("ready", "running", "error")
+    assert flow["steps"]["inventory"] == "ready"
+    assert "ai_metadata" in flow["steps"]
+    assert "scheduler" in flow["steps"]
+    assert "publisher" in flow["steps"]
+    assert "youtube_destination" in flow["steps"]
+    assert len(flow["steps"]) == 6
+
+    # Verify last_scan is properly mapped dict and not raw tuple
+    assert len(flow["sources"]) == 1
+    src_data = flow["sources"][0]
+    assert src_data["last_scan"] is not None
+    assert src_data["last_scan"]["id"] == "scan_flow_1"
+    assert src_data["last_scan"]["status"] == "completed"
+    assert src_data["last_scan"]["discovered_count"] == 15
+
+

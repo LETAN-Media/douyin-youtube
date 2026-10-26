@@ -17,7 +17,7 @@ async def pipeline_flow(pipeline_id: str):
         from ..db.repositories import scan_runs as scan_runs_repo
         from ..db.repositories import publications as publications_repo
         from ..db.repositories import destinations
-        from ..db.client import execute
+        from ..db.client import execute, result_to_dict
 
         pipeline = await pipelines_repo.get_pipeline(pipeline_id)
         if pipeline is None:
@@ -45,7 +45,7 @@ async def pipeline_flow(pipeline_id: str):
                 "WHERE source_id = :sid ORDER BY started_at DESC LIMIT 1",
                 {"sid": src["id"]},
             )
-            last_scan = dict(res.rows[0]) if res.rows else None
+            last_scan = result_to_dict(res)
 
             # pending publications
             pub_res = await execute(

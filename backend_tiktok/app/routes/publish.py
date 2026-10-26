@@ -41,7 +41,7 @@ async def publish_pipeline(pipeline_id: str, body: dict):
 
 @router.get("/jobs", dependencies=[Depends(require_admin)])
 async def list_queue(status: str | None = None, limit: int = 50):
-    from ..db.client import execute
+    from ..db.client import execute, result_to_dicts
 
     where = ""
     params: dict = {"limit": limit}
@@ -54,7 +54,7 @@ async def list_queue(status: str | None = None, limit: int = 50):
         f"FROM tiktok_publish_queue {where} ORDER BY queued_at DESC LIMIT :limit",
         params,
     )
-    return [dict(r) for r in res.rows]
+    return result_to_dicts(res)
 
 
 @router.get("/publications/{destination_id}", dependencies=[Depends(require_admin)])

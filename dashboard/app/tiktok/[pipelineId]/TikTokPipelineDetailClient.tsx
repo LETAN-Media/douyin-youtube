@@ -35,6 +35,7 @@ export function TikTokPipelineDetailClient({
   initialSchedule = null,
   initialSlots = [],
   initialFlow = null,
+  flowError = null,
   initialAiSettings = null,
   channelAvatarUrl = null,
   channelName = null,
@@ -46,6 +47,7 @@ export function TikTokPipelineDetailClient({
   initialSchedule: TikTokScheduleDto | null;
   initialSlots: TikTokSlotDto[];
   initialFlow?: TikTokFlowState | null;
+  flowError?: string | null;
   initialAiSettings?: TikTokAiSettingsDto | null;
   channelAvatarUrl?: string | null;
   channelName?: string | null;
@@ -266,6 +268,7 @@ export function TikTokPipelineDetailClient({
           <TikTokOverview
             pipeline={pipeline}
             initialFlow={initialFlow}
+            flowError={flowError}
             channelAvatarUrl={channelAvatarUrl}
             channelName={channelName}
           />

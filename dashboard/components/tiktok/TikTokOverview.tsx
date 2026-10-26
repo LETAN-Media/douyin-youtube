@@ -18,12 +18,24 @@ const ORBITAL_STEPS: Array<{
   { key: "youtube_destination", title: "YouTube Destination" },
 ];
 
+function buildDefaultOrbitalNodes(pipeline: TikTokPipelineDto): TikTokOrbitalNodeDatum[] {
+  const isAuto = Boolean(pipeline.auto_publish);
+  return [
+    { key: "source", title: "TikTok Source", subtitle: "Đang tải dữ liệu...", status: "waiting" },
+    { key: "inventory", title: "Inventory", subtitle: "Kho video TikTok", status: "idle" },
+    { key: "ai_metadata", title: "AI Metadata", subtitle: "SEO Tiêu đề & Tags", status: "idle" },
+    { key: "scheduler", title: "Scheduler", subtitle: isAuto ? "Auto ON" : "Auto OFF", status: isAuto ? "ready" : "idle" },
+    { key: "publisher", title: "Publisher", subtitle: "Tải PhimTat & Upload", status: "idle" },
+    { key: "youtube_destination", title: "YouTube Destination", subtitle: "Đang kiểm tra...", status: "waiting" },
+  ];
+}
+
 function toOrbitalNodes(state: TikTokFlowState): TikTokOrbitalNodeDatum[] {
   return ORBITAL_STEPS.map((d) => ({
     key: d.key,
     title: d.title,
     subtitle: state.details?.[d.key] || "—",
-    status: state.steps[d.key] || "idle",
+    status: state.steps?.[d.key] || "idle",
   }));
 }
 
@@ -42,21 +54,20 @@ export function TikTokOverview({
 }) {
   const [liveState, setLiveState] = useState<TikTokFlowState | null>(null);
   const flowState = liveState ?? initialFlow;
+  const orbitalNodes = flowState ? toOrbitalNodes(flowState) : buildDefaultOrbitalNodes(pipeline);
 
   return (
     <div className="space-y-4">
-      {/* Orbital Live View */}
-      {flowState ? (
-        <TikTokPipelineOrbitalView
-          pipelineName={pipeline.name}
-          autoPublish={Boolean(pipeline.auto_publish)}
-          live={Boolean(pipeline.enabled)}
-          nodes={toOrbitalNodes(flowState)}
-          activeEdges={flowState.active_edges || []}
-          channelAvatarUrl={channelAvatarUrl}
-          channelName={channelName}
-        />
-      ) : null}
+      {/* Orbital Live View — Always rendered with all 6 nodes */}
+      <TikTokPipelineOrbitalView
+        pipelineName={pipeline.name}
+        autoPublish={Boolean(pipeline.auto_publish)}
+        live={Boolean(pipeline.enabled)}
+        nodes={orbitalNodes}
+        activeEdges={flowState?.active_edges || []}
+        channelAvatarUrl={channelAvatarUrl}
+        channelName={channelName}
+      />
 
       {/* Sequential Flow & Metrics */}
       <TikTokFlowLive
