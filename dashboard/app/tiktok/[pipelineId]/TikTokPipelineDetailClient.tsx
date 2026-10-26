@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Badge, Card, CardHeader, Spinner, btnPrimary, btnSecondary, btnSmall, inputCls, labelCls } from "@/components/ui";
-import { IconAlert, IconCheck, IconClock, IconFilm, IconPlay, IconPlus, IconRefresh, IconTikTok, IconUpload, IconVideo } from "@/components/icons";
+import { IconAlert, IconBack, IconCheck, IconClock, IconFilm, IconPlay, IconPlus, IconRefresh, IconTikTok, IconUpload, IconVideo } from "@/components/icons";
 import { TikTokPipelineToggles } from "@/components/tiktok/TikTokPipelineToggles";
 import { TikTokOverview } from "@/components/tiktok/TikTokOverview";
 import { TikTokAiSettings } from "@/components/tiktok/TikTokAiSettings";
@@ -197,6 +197,17 @@ export function TikTokPipelineDetailClient({
 
   return (
     <div className="w-full min-w-0 space-y-6">
+      {/* Back button to return to pipeline selection */}
+      <div className="flex items-center justify-between">
+        <Link
+          href="/tiktok"
+          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-bold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-900 active:scale-95"
+        >
+          <IconBack size={15} />
+          <span>← Quay lại chọn Pipeline</span>
+        </Link>
+      </div>
+
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -211,10 +222,17 @@ export function TikTokPipelineDetailClient({
           <p className="text-xs text-slate-500">Slug: @{pipeline.slug}</p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Link
+            href="/tiktok"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 shrink-0"
+          >
+            <IconBack size={15} />
+            Đổi Pipeline
+          </Link>
           <Link
             href="/tiktok/manual"
-            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 shrink-0"
           >
             Manual Publish
           </Link>
