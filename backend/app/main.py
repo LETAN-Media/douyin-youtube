@@ -163,7 +163,7 @@ comment_task: asyncio.Task | None = None
 async def lifespan(
     app: FastAPI,
 ):
-    global worker_task, monitor_task
+    global worker_task, monitor_task, scheduler_task, comment_task
 
     if engine.dialect.name not in ("sqlite", "libsql"):
         Base.metadata.create_all(
