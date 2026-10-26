@@ -177,27 +177,18 @@ async def complete_batch(batch_id: str, uploaded_count: int, failed_count: int =
 
 
 async def ensure_slots(schedule_id: str) -> None:
-    """Ensure all 7 weekdays x 24 hours slots exist (default-disabled)."""
+    """Ensure basic slot coverage exists for schedule."""
     existing = await execute(
-        "SELECT DISTINCT weekday, slot_time FROM tiktok_publish_schedule_slots WHERE schedule_id = :sid",
+        "SELECT COUNT(*) FROM tiktok_publish_schedule_slots WHERE schedule_id = :sid AND enabled = 1",
         {"sid": schedule_id},
     )
-    have = {(r[0], r[1]) for r in existing.rows}
-    new_slots: list[tuple[int, str]] = []
-    for weekday in range(7):
-        for hour in range(24):
-            t = f"{hour:02d}:00"
-            if (weekday, t) not in have:
-                new_slots.append((weekday, t))
-    if not new_slots:
+    if existing.rows and existing.rows[0][0] > 0:
         return
-    rows = []
-    for i, (wd, t) in enumerate(new_slots):
-        rows.append(f"('{schedule_id}', {wd}, '{t}', 0)")
-    await execute(
-        f"INSERT INTO tiktok_publish_schedule_slots (schedule_id, weekday, slot_time, enabled) "
-        f"VALUES {', '.join(rows)}"
-    )
+    # Generate default slots across weekdays (06:00, 10:48, 15:36, 20:24, 01:12)
+    default_slots = ["06:00", "10:48", "15:36", "20:24", "01:12"]
+    for wd in range(7):
+        for st in default_slots:
+            await upsert_slot(schedule_id, wd, st, enabled=True)
 
 
 async def list_enabled_slots(schedule_id: str) -> list[tuple[int, str]]:
@@ -209,13 +200,37 @@ async def list_enabled_slots(schedule_id: str) -> list[tuple[int, str]]:
     return [(r[0], r[1]) for r in res.rows]
 
 
-async def set_slot_enabled(schedule_id: str, weekday: int, slot_time: str, enabled: bool) -> None:
+async def upsert_slot(schedule_id: str, weekday: int, slot_time: str, enabled: bool = True) -> None:
+    slot_id = f"slot_{secrets.token_hex(8)}"
     await execute(
-        "UPDATE tiktok_publish_schedule_slots SET enabled = :enabled, "
-        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
-        "WHERE schedule_id = :sid AND weekday = :wd AND slot_time = :st",
-        {"sid": schedule_id, "wd": weekday, "st": slot_time, "enabled": 1 if enabled else 0},
+        """
+        INSERT INTO tiktok_publish_schedule_slots (id, schedule_id, weekday, slot_time, enabled)
+        VALUES (:id, :sid, :wd, :st, :en)
+        ON CONFLICT(schedule_id, weekday, slot_time) DO UPDATE SET
+            enabled = excluded.enabled,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        """,
+        {"id": slot_id, "sid": schedule_id, "wd": weekday, "st": slot_time, "en": 1 if enabled else 0},
     )
+
+
+async def sync_weekday_slots(schedule_id: str, weekday: int, active_slot_times: list[str]) -> None:
+    """Synchronize slots for a specific weekday.
+
+    Any slot in active_slot_times is enabled (upserted if not exists).
+    Any existing enabled slot not in active_slot_times is disabled.
+    """
+    active_set = set(active_slot_times)
+    existing = await list_slots(schedule_id)
+    for s in existing:
+        if s["weekday"] == weekday and s["slot_time"] not in active_set and s.get("enabled"):
+            await set_slot_enabled(schedule_id, weekday, s["slot_time"], False)
+    for st in active_slot_times:
+        await upsert_slot(schedule_id, weekday, st, enabled=True)
+
+
+async def set_slot_enabled(schedule_id: str, weekday: int, slot_time: str, enabled: bool) -> None:
+    await upsert_slot(schedule_id, weekday, slot_time, enabled=enabled)
 
 
 async def list_slots(schedule_id: str) -> list[dict[str, Any]]:

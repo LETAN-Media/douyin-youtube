@@ -3,6 +3,8 @@ import {
   generateTikTokScheduleSlots,
   getTikTokSchedule,
   getTikTokScheduleSlots,
+  getTikTokScheduleStatus,
+  previewTikTokSchedule,
   runTikTokScheduleBatchNow,
   toggleTikTokScheduleEnabled,
   updateTikTokScheduleSettings,
@@ -13,9 +15,21 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const pipelineId = searchParams.get("pipeline_id");
+    const action = searchParams.get("action");
     if (!pipelineId) {
       return NextResponse.json({ error: "Thiếu pipeline_id." }, { status: 400 });
     }
+
+    if (action === "status") {
+      const statusData = await getTikTokScheduleStatus(pipelineId);
+      return NextResponse.json(statusData);
+    }
+
+    if (action === "preview") {
+      const previewData = await previewTikTokSchedule(pipelineId);
+      return NextResponse.json(previewData);
+    }
+
     const schedule = await getTikTokSchedule(pipelineId);
     let slots: any[] = [];
     try {

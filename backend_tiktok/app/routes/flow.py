@@ -17,6 +17,7 @@ async def pipeline_flow(pipeline_id: str):
         from ..db.repositories import scan_runs as scan_runs_repo
         from ..db.repositories import publications as publications_repo
         from ..db.repositories import destinations
+        from ..db.repositories import system_state
         from ..db.client import execute, result_to_dict
 
         pipeline = await pipelines_repo.get_pipeline(pipeline_id)
@@ -152,6 +153,31 @@ async def pipeline_flow(pipeline_id: str):
             ai_status = "idle"
             ai_detail = "Đang chờ video mới"
 
+        # Check background worker health
+        import time
+        from datetime import datetime
+        now_ts = time.time()
+        sched_state = await system_state.get_json("worker:scheduler", {})
+        pub_state = await system_state.get_json("worker:publisher", {})
+
+        sched_online = False
+        if sched_state and sched_state.get("last_heartbeat"):
+            try:
+                hb = datetime.fromisoformat(sched_state["last_heartbeat"].replace("Z", "+00:00"))
+                if abs(now_ts - hb.timestamp()) < 120:
+                    sched_online = True
+            except Exception:
+                pass
+
+        pub_online = False
+        if pub_state and pub_state.get("last_heartbeat"):
+            try:
+                hb = datetime.fromisoformat(pub_state["last_heartbeat"].replace("Z", "+00:00"))
+                if abs(now_ts - hb.timestamp()) < 120:
+                    pub_online = True
+            except Exception:
+                pass
+
         # Step 4: Scheduler status
         is_auto = bool(pipeline.get("auto_publish", False))
         if not is_auto:
@@ -163,14 +189,23 @@ async def pipeline_flow(pipeline_id: str):
         elif connected_dest_count == 0:
             scheduler_status = "waiting"
             scheduler_detail = "Chờ kết nối YouTube Destination"
-        else:
+        elif not sched_online:
+            scheduler_status = "offline"
+            scheduler_detail = "Scheduler worker offline"
+        elif scheduled_count > 0:
             scheduler_status = "ready"
             scheduler_detail = f"Auto ON · {scheduled_count} video đã lên lịch"
+        else:
+            scheduler_status = "ready"
+            scheduler_detail = "Auto ON · Sẵn sàng lên lịch"
 
         # Step 5: Publisher status
         if processing_count > 0:
             publisher_status = "running"
             publisher_detail = f"Đang đăng {processing_count} video lên YouTube..."
+        elif not pub_online:
+            publisher_status = "offline"
+            publisher_detail = "Publisher worker offline"
         elif queue_count > 0:
             publisher_status = "waiting"
             publisher_detail = f"{queue_count} video trong hàng đợi"

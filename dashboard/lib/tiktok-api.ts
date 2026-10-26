@@ -566,8 +566,64 @@ export interface TikTokSlotDto {
   youtube_video_id?: string | null;
 }
 
+export interface TikTokScheduleStatusDto {
+  ok: boolean;
+  pipeline_id: string;
+  schedule_enabled: boolean;
+  auto_publish: boolean;
+  timezone: string;
+  batch_time: string;
+  max_daily: number;
+  next_scheduled_run: string | null;
+  last_scheduler_run: string | null;
+  last_scheduler_result?: {
+    ok: boolean;
+    reason?: string;
+    message?: string;
+    videos_enqueued?: number;
+    target_date?: string;
+  } | null;
+  next_publishing_time: string | null;
+  eligible_inventory: number;
+  scheduled_jobs: number;
+  reason_code: string;
+  reason_message: string;
+  scheduler_worker_online: boolean;
+  publisher_worker_online: boolean;
+  publisher_status: "idle" | "running" | "offline";
+}
+
+export interface TikTokSchedulePreviewDto {
+  ok: boolean;
+  dry_run: boolean;
+  target_date: string;
+  is_lookahead: boolean;
+  planned_count: number;
+  planned_slots: Array<{
+    reel_id: string;
+    caption: string;
+    thumbnail_url?: string | null;
+    duration?: number | null;
+    slot_time: string;
+    scheduled_at: string;
+    scheduled_local: string;
+  }>;
+  daily_limit: number;
+  destination_name: string;
+  message: string;
+  reason?: string;
+}
+
 export async function getTikTokSchedule(pipelineId: string): Promise<TikTokScheduleDto> {
   return ttFetch<TikTokScheduleDto>(`/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}`);
+}
+
+export async function getTikTokScheduleStatus(pipelineId: string): Promise<TikTokScheduleStatusDto> {
+  return ttFetch<TikTokScheduleStatusDto>(`/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}/status`);
+}
+
+export async function previewTikTokSchedule(pipelineId: string): Promise<TikTokSchedulePreviewDto> {
+  return ttFetch<TikTokSchedulePreviewDto>(`/api/tiktok/schedule/pipeline/${encodeURIComponent(pipelineId)}/preview`);
 }
 
 export async function updateTikTokScheduleSettings(

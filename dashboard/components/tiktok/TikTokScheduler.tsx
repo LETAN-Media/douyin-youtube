@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Badge, Card, CardHeader, Spinner, btnPrimary, btnSecondary, btnSmall, inputCls, labelCls } from "@/components/ui";
-import { IconAlert, IconCheck, IconClock, IconFilm, IconPlay, IconRefresh, IconUpload } from "@/components/icons";
-import type { TikTokScheduleDto, TikTokSlotDto } from "@/lib/tiktok-api";
+import { IconAlert, IconCheck, IconClock, IconFilm, IconPlay, IconRefresh, IconUpload, IconX } from "@/components/icons";
+import type { TikTokScheduleDto, TikTokSchedulePreviewDto, TikTokScheduleStatusDto, TikTokSlotDto } from "@/lib/tiktok-api";
 
 interface Props {
   pipelineId: string;
@@ -31,9 +31,28 @@ const TIMEZONES = [
   { id: "Europe/London", label: "Europe/London (GMT/BST)" },
 ];
 
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString("vi-VN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+  } catch {
+    return iso;
+  }
+}
+
 export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: Props) {
   const [schedule, setSchedule] = useState<TikTokScheduleDto | null>(initialSchedule);
   const [slots, setSlots] = useState<TikTokSlotDto[]>(initialSlots);
+  const [status, setStatus] = useState<TikTokScheduleStatusDto | null>(null);
+  const [loadingStatus, setLoadingStatus] = useState(false);
 
   // Form states
   const [enabled, setEnabled] = useState(Boolean(initialSchedule?.enabled));
@@ -49,12 +68,33 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
   );
   const [minInterval, setMinInterval] = useState(initialSchedule?.min_interval_minutes || 60);
 
-  // Status states
+  // Status & modal states
   const [saving, setSaving] = useState(false);
   const [runningBatch, setRunningBatch] = useState(false);
+  const [confirmRunNowOpen, setConfirmRunNowOpen] = useState(false);
   const [generatingSlots, setGeneratingSlots] = useState(false);
   const [togglingEnabled, setTogglingEnabled] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  // Preview modal states
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [previewData, setPreviewData] = useState<TikTokSchedulePreviewDto | null>(null);
+
+  async function loadStatus() {
+    setLoadingStatus(true);
+    try {
+      const res = await fetch(`/api/tiktok/schedule?pipeline_id=${encodeURIComponent(pipelineId)}&action=status`);
+      if (res.ok) {
+        const data = await res.json();
+        setStatus(data);
+      }
+    } catch {
+      // Ignore background fetch error
+    } finally {
+      setLoadingStatus(false);
+    }
+  }
 
   useEffect(() => {
     if (initialSchedule) {
@@ -69,7 +109,9 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
       setVideoOrder(initialSchedule.video_order === "oldest" ? "oldest" : "newest");
       setMinInterval(initialSchedule.min_interval_minutes || 60);
     }
-  }, [initialSchedule]);
+    void loadStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSchedule, pipelineId]);
 
   async function handleToggleEnabled() {
     if (togglingEnabled) return;
@@ -94,6 +136,7 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
           ? "Đã kích hoạt Lịch đăng tự động cho Pipeline."
           : "Đã tạm dừng Lịch đăng tự động cho Pipeline.",
       });
+      void loadStatus();
     } catch (err: unknown) {
       setMessage({
         type: "error",
@@ -149,6 +192,7 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
       }
       setSchedule(data);
       setMessage({ type: "success", text: "Đã lưu cài đặt lịch đăng thành công." });
+      void loadStatus();
     } catch (err: unknown) {
       setMessage({
         type: "error",
@@ -159,9 +203,35 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
     }
   }
 
-  async function handleRunBatchNow() {
+  async function handleOpenPreview() {
+    setLoadingPreview(true);
+    setPreviewModalOpen(true);
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/tiktok/schedule?pipeline_id=${encodeURIComponent(pipelineId)}&action=preview`);
+      const data = await res.json();
+      setPreviewData(data);
+    } catch {
+      setPreviewData({
+        ok: false,
+        dry_run: true,
+        target_date: "",
+        is_lookahead: false,
+        planned_count: 0,
+        planned_slots: [],
+        daily_limit: maxDaily,
+        destination_name: "",
+        message: "Lỗi kết nối khi tải xem trước lịch.",
+      });
+    } finally {
+      setLoadingPreview(false);
+    }
+  }
+
+  async function executeRunBatchNow() {
     if (runningBatch) return;
     setRunningBatch(true);
+    setConfirmRunNowOpen(false);
     setMessage(null);
     try {
       const res = await fetch("/api/tiktok/schedule", {
@@ -187,6 +257,7 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
           text: data.message || `Không thể lên lịch: ${data.reason}`,
         });
       }
+      void loadStatus();
       // Refresh slots
       const sRes = await fetch(`/api/tiktok/schedule?pipeline_id=${encodeURIComponent(pipelineId)}`);
       if (sRes.ok) {
@@ -223,7 +294,14 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
       if (Array.isArray(data.slots)) {
         setSlots(data.slots);
       }
-      setMessage({ type: "success", text: "Đã tái tạo khung giờ đăng cho toàn bộ tuần." });
+      setMessage({ type: "success", text: "Đã tái tạo khung giờ đăng cho toàn bộ tuần (hỗ trợ phút lẻ)." });
+      // Refresh slots from server
+      const sRes = await fetch(`/api/tiktok/schedule?pipeline_id=${encodeURIComponent(pipelineId)}`);
+      if (sRes.ok) {
+        const sData = await sRes.json();
+        if (sData.slots) setSlots(sData.slots);
+      }
+      void loadStatus();
     } catch (err: unknown) {
       setMessage({
         type: "error",
@@ -272,15 +350,144 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
 
           <button
             type="button"
+            disabled={loadingPreview}
+            onClick={handleOpenPreview}
+            className={`${btnSecondary} min-h-[40px] px-4 text-xs font-bold shadow-sm inline-flex items-center gap-1.5`}
+          >
+            {loadingPreview ? <Spinner size={14} /> : <IconFilm size={14} />}
+            Xem trước lịch (Preview)
+          </button>
+
+          <button
+            type="button"
             disabled={runningBatch}
-            onClick={handleRunBatchNow}
+            onClick={() => setConfirmRunNowOpen(true)}
             className={`${btnPrimary} min-h-[40px] px-4 text-xs font-bold shadow-sm inline-flex items-center gap-1.5`}
           >
             {runningBatch ? <Spinner size={14} /> : <IconPlay size={14} />}
-            Chạy lịch ngay (Run Batch Now)
+            Tạo lịch ngay (Run Batch Now)
           </button>
         </div>
       </div>
+
+      {/* Operational Status Card */}
+      <Card className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm sm:p-6">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+          <div>
+            <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+              <IconClock size={16} />
+              Trạng thái vận hành Scheduler & Publisher
+            </h3>
+            <p className="mt-0.5 text-xs text-slate-500">
+              Kiểm tra trực tiếp tiến độ batch, worker heartbeat và hàng đợi xuất bản
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadStatus()}
+            disabled={loadingStatus}
+            className={btnSmall}
+            title="Làm mới trạng thái"
+          >
+            {loadingStatus ? <Spinner size={14} /> : <IconRefresh size={14} />}
+          </button>
+        </div>
+
+        {/* 6 Metric Grid */}
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <span className="text-[11px] font-semibold text-slate-500">Giờ chạy batch tới</span>
+            <p className="mt-1 font-extrabold text-slate-900 text-xs">
+              {status?.next_scheduled_run ? formatDateTime(status.next_scheduled_run) : "—"}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <span className="text-[11px] font-semibold text-slate-500">Lần chạy gần nhất</span>
+            <p className="mt-1 font-extrabold text-slate-900 text-xs">
+              {status?.last_scheduler_run ? formatDateTime(status.last_scheduler_run) : "Chưa có"}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <span className="text-[11px] font-semibold text-slate-500">Kết quả chạy gần nhất</span>
+            <p className="mt-1 font-bold text-slate-800 text-xs truncate" title={status?.last_scheduler_result?.message || ""}>
+              {status?.last_scheduler_result?.ok ? (
+                <span className="text-emerald-700">Thành công ({status.last_scheduler_result.videos_enqueued} video)</span>
+              ) : status?.last_scheduler_result ? (
+                <span className="text-amber-700">{status.last_scheduler_result.reason || "Chờ xử lý"}</span>
+              ) : (
+                "Chưa có"
+              )}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <span className="text-[11px] font-semibold text-slate-500">Giờ đăng video tiếp theo</span>
+            <p className="mt-1 font-extrabold text-indigo-700 text-xs">
+              {status?.next_publishing_time ? formatDateTime(status.next_publishing_time) : "Chưa có video"}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <span className="text-[11px] font-semibold text-slate-500">Video đủ điều kiện kho</span>
+            <p className="mt-1 font-extrabold text-slate-900 text-xs">
+              {status?.eligible_inventory !== undefined ? `${status.eligible_inventory} video` : "—"}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <span className="text-[11px] font-semibold text-slate-500">Hàng đợi xuất bản</span>
+            <p className="mt-1 font-extrabold text-slate-900 text-xs">
+              {status?.scheduled_jobs !== undefined ? `${status.scheduled_jobs} chờ đăng` : "—"}
+            </p>
+          </div>
+        </div>
+
+        {/* Worker Status Indicators & Reason Banner */}
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-xl bg-slate-50 p-3.5 border border-slate-200/80">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-bold">
+              <span>Scheduler:</span>
+              <span
+                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-extrabold ${
+                  status?.scheduler_worker_online
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-rose-100 text-rose-800"
+                }`}
+              >
+                {status?.scheduler_worker_online ? "🟢 Online" : "🔴 Offline"}
+              </span>
+            </div>
+
+            <div className="ml-3 flex items-center gap-1.5 text-xs font-bold">
+              <span>Publisher:</span>
+              <span
+                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-extrabold ${
+                  status?.publisher_status === "running"
+                    ? "bg-indigo-100 text-indigo-800"
+                    : status?.publisher_status === "idle"
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-rose-100 text-rose-800"
+                }`}
+              >
+                {status?.publisher_status === "running"
+                  ? "🔵 Đang xử lý"
+                  : status?.publisher_status === "idle"
+                  ? "🟢 Chờ việc (Idle)"
+                  : "🔴 Offline"}
+              </span>
+            </div>
+          </div>
+
+          <div className="text-xs text-slate-700 font-semibold flex items-center gap-1.5">
+            <span className="text-slate-400">Trạng thái:</span>
+            <span className="text-indigo-800 bg-white px-2 py-1 rounded-md border border-slate-200/80">
+              {status?.reason_message || "Đang kiểm tra trạng thái..."}
+            </span>
+          </div>
+        </div>
+      </Card>
 
       {message && (
         <div
@@ -453,7 +660,7 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
           <div>
             <h3 className="text-sm font-extrabold text-slate-900">Khung giờ phát hành tuần (Publish Slots)</h3>
             <p className="mt-0.5 text-xs text-slate-500">
-              Các mốc thời gian đăng video được phân bổ đều trong ngày
+              Các mốc thời gian đăng video được phân bổ đều trong ngày (hỗ trợ phút lẻ chính xác)
             </p>
           </div>
           <button
@@ -485,16 +692,16 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
                   <p className="text-xs font-bold text-slate-800">{wd.label}</p>
                   <p className="text-[11px] text-slate-500">{daySlots.length} slot</p>
                   <div className="mt-2 space-y-1">
-                    {daySlots.slice(0, 5).map((s) => (
+                    {daySlots.slice(0, 6).map((s) => (
                       <div
-                        key={s.id || s.slot_time}
+                        key={s.id || `${wd.id}-${s.slot_time}`}
                         className="rounded-md bg-slate-100 px-2 py-0.5 text-center text-[11px] font-mono font-medium text-slate-700"
                       >
                         {s.slot_time}
                       </div>
                     ))}
-                    {daySlots.length > 5 && (
-                      <p className="text-center text-[10px] text-slate-400">+{daySlots.length - 5} nữa</p>
+                    {daySlots.length > 6 && (
+                      <p className="text-center text-[10px] text-slate-400">+{daySlots.length - 6} nữa</p>
                     )}
                   </div>
                 </div>
@@ -503,6 +710,167 @@ export function TikTokScheduler({ pipelineId, initialSchedule, initialSlots }: P
           </div>
         )}
       </Card>
+
+      {/* Preview Schedule Modal */}
+      {previewModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl border border-slate-200 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <IconFilm size={20} className="text-indigo-600" />
+                <h3 className="text-base font-extrabold text-slate-900">Xem trước lịch phát hành (Schedule Preview)</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 text-lg font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="mt-4 flex-1 overflow-y-auto space-y-4">
+              {loadingPreview ? (
+                <div className="py-16 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+                  <Spinner size={16} />
+                  <span>Đang tính toán lịch phát hành dự kiến...</span>
+                </div>
+              ) : previewData?.ok ? (
+                <>
+                  <div className="rounded-xl bg-indigo-50 border border-indigo-100 p-4 text-xs">
+                    <p className="font-extrabold text-indigo-900">{previewData.message}</p>
+                    <div className="mt-2 flex flex-wrap gap-4 text-[11px] text-indigo-700">
+                      <span>Kênh: <b>{previewData.destination_name}</b></span>
+                      <span>Ngày mục tiêu: <b>{previewData.target_date}</b></span>
+                      <span>Giới hạn: <b>{previewData.daily_limit} video/ngày</b></span>
+                      <span>Số slot dự kiến: <b>{previewData.planned_count}</b></span>
+                    </div>
+                  </div>
+
+                  {previewData.planned_slots.length === 0 ? (
+                    <div className="py-8 text-center text-xs text-slate-500">
+                      Không có khung giờ nào khả dụng để xếp lịch cho ngày này.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
+                      {previewData.planned_slots.map((item, idx) => (
+                        <div key={idx} className="flex items-center gap-3 p-3 hover:bg-slate-50/50">
+                          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-slate-600 text-xs font-bold">
+                            {idx + 1}
+                          </span>
+                          {item.thumbnail_url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={item.thumbnail_url}
+                              alt=""
+                              className="h-12 w-9 rounded object-cover shadow-sm bg-slate-100"
+                            />
+                          ) : (
+                            <div className="h-12 w-9 rounded bg-slate-100 flex items-center justify-center text-slate-400 text-xs">
+                              Video
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-bold text-slate-900 truncate">
+                              {item.caption}
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              ID: {item.reel_id} {item.duration ? `· ${item.duration}s` : ""}
+                            </p>
+                          </div>
+                          <div className="text-right whitespace-nowrap">
+                            <span className="rounded-lg bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-xs font-bold text-indigo-700 font-mono">
+                              {item.slot_time}
+                            </span>
+                            <p className="text-[10px] text-slate-400 mt-0.5">{item.scheduled_local}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-xs text-amber-800">
+                  <p className="font-bold">Không thể tạo xem trước lịch:</p>
+                  <p className="mt-1">{previewData?.message || previewData?.reason || "Vui lòng kiểm tra lại cấu hình."}</p>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPreviewModalOpen(false)}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Đóng
+              </button>
+              {previewData?.ok && previewData.planned_count > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewModalOpen(false);
+                    setConfirmRunNowOpen(true);
+                  }}
+                  className={`${btnPrimary} text-xs py-2 px-4`}
+                >
+                  Tạo lịch theo kế hoạch này
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for Run Batch Now */}
+      {confirmRunNowOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl border border-slate-200">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-indigo-600">
+                <IconPlay size={20} />
+              </div>
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">Xác nhận tạo lịch ngay (Run Batch Now)</h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Phân bổ video vào các slot theo giới hạn hiện tại
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-xl bg-slate-50 p-3.5 text-xs text-slate-600 leading-relaxed border border-slate-200/80">
+              <p>
+                Hệ thống sẽ quét các video đủ điều kiện trong kho và đưa vào hàng đợi xuất bản với các khung giờ phát hành đã thiết lập.
+              </p>
+              <ul className="mt-2 list-disc list-inside space-y-1 text-[11px] text-slate-500 font-medium">
+                <li>Tối đa <b>{maxDaily} video</b> theo giới hạn hàng ngày.</li>
+                <li>Video <b>KHÔNG được đăng ngay lập tức</b> lên YouTube.</li>
+                <li>Publisher worker sẽ tự động xuất bản khi mốc giờ phát hành tới hạn.</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-4 mt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={runningBatch}
+                onClick={() => setConfirmRunNowOpen(false)}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={runningBatch}
+                onClick={executeRunBatchNow}
+                className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 transition disabled:opacity-50"
+              >
+                {runningBatch ? <Spinner size={14} /> : <IconPlay size={14} />}
+                <span>Xác nhận tạo lịch</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

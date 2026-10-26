@@ -3,11 +3,13 @@
 Implements automated daily batch planning:
 1. Verifies Pipeline status (enabled, auto_publish).
 2. Verifies YouTube Destination connectivity and authorization.
-3. Checks daily publication quota and active schedule slots.
-4. Filters eligible unpublished videos from TikTok inventory according to format (Shorts / Regular / Both).
-5. Generates AI metadata according to Pipeline AI Settings.
-6. Enqueues publication jobs into ``tiktok_publish_queue`` and ``tiktok_publications``.
-7. Allows manual execution ("run batch now") without waiting for the batch hour.
+3. Checks daily publication quota and active schedule slots (with HH:MM support).
+4. Handles same-day and lookahead scheduling for upcoming active days when today's slots have passed.
+5. Filters eligible unpublished videos from TikTok inventory according to format (Shorts / Regular / Both).
+6. Generates AI metadata according to Pipeline AI Settings.
+7. Enqueues publication jobs into ``tiktok_publish_queue`` and ``tiktok_publications``.
+8. Supports dry-run Preview and on-demand "Run Batch Now" with limit constraints.
+9. Tracks scheduler worker heartbeat and operational status.
 """
 
 from __future__ import annotations
@@ -17,7 +19,6 @@ import logging
 import re
 import secrets
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -33,6 +34,7 @@ from ..db.repositories import (
     scan_runs,
     schedules,
     sources,
+    system_state,
 )
 from . import schedule_generator, tiktok_scan
 from .tiktok_ai_metadata import generate_ai_metadata
@@ -70,6 +72,19 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
     poll_seconds = max(settings.tiktok_scheduler_poll_seconds, 10)
 
     while not stop_event.is_set():
+        # Heartbeat update
+        try:
+            await system_state.set_json(
+                "worker:scheduler",
+                {
+                    "status": "idle",
+                    "last_heartbeat": _now_iso(),
+                    "service": settings.service_name,
+                },
+            )
+        except Exception:
+            pass
+
         try:
             await _run_due_scans()
         except Exception as exc:
@@ -140,20 +155,43 @@ async def _run_due_schedules() -> None:
             logger.exception("Failed to execute daily batch for pipeline %s: %s", pipeline_id, exc)
 
 
-async def execute_daily_batch(
+async def count_published_or_scheduled_for_date(
+    destination_id: str,
+    target_date: Any,
+    tz: ZoneInfo,
+) -> int:
+    """Count publications already scheduled or published on a given local calendar date."""
+    start_local = datetime(target_date.year, target_date.month, target_date.day, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    count_res = await execute(
+        """
+        SELECT COUNT(*) as cnt FROM tiktok_publications
+        WHERE destination_id = :did
+        AND (
+            (scheduled_publish_at >= :start AND scheduled_publish_at < :end)
+            OR (published_at >= :start AND published_at < :end)
+        )
+        AND status IN ('queued', 'processing', 'scheduled', 'published')
+        """,
+        {"did": destination_id, "start": start_utc, "end": end_utc},
+    )
+    return count_res.rows[0][0] if count_res.rows else 0
+
+
+async def calculate_schedule_plan(
     pipeline_id: str,
     destination_id: str | None = None,
     *,
     force_now: bool = False,
     now: datetime | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Plan and enqueue publication jobs for a pipeline's daily batch.
+    """Calculate batch scheduling plan for today or lookahead to next active day.
 
-    Args:
-        pipeline_id: ID of the TikTok pipeline.
-        destination_id: Optional specific YouTube destination ID. If None, resolves default/active.
-        force_now: If True (e.g. user clicked 'Run Batch Now'), bypasses batch_time & day check.
-        now: Optional custom reference timestamp (used for testing).
+    In dry_run mode, returns planned slots and candidate videos without modifying DB.
+    In execution mode, enqueues publications and jobs up to daily limit.
     """
     pipeline = await pipelines.get_pipeline(pipeline_id)
     if pipeline is None:
@@ -222,120 +260,142 @@ async def execute_daily_batch(
         tz = ZoneInfo(_DEFAULT_TIMEZONE)
 
     now_local = utc_now.astimezone(tz)
-    local_date = now_local.date().isoformat()
-    weekday = now_local.weekday()
-
-    # Active days check
-    active_days = schedule.get("active_days") or [0, 1, 2, 3, 4, 5, 6]
-    if not force_now and weekday not in active_days:
-        return {
-            "ok": False,
-            "reason": "DAY_NOT_ACTIVE",
-            "message": f"Hôm nay ({now_local.strftime('%A')}) không thuộc ngày đăng theo lịch.",
-        }
-
-    # Batch time check
+    today_date = now_local.date()
+    today_weekday = today_date.weekday()
     batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
-    if not force_now:
-        bh, bm = _parse_time(batch_time)
-        batch_dt = now_local.replace(hour=bh, minute=bm, second=0, microsecond=0)
-        if now_local < batch_dt:
-            return {
-                "ok": False,
-                "reason": "NOT_BEFORE_BATCH_TIME",
-                "message": f"Chưa tới giờ chạy lịch hôm nay ({batch_time}).",
-            }
-
-    # Daily limit & counting already published/scheduled today
     max_daily = max(1, min(10, int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY)))
+    active_days = schedule.get("active_days") or [0, 1, 2, 3, 4, 5, 6]
 
-    start_local = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
-    end_local = start_local + timedelta(days=1)
-    start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    count_res = await execute(
-        """
-        SELECT COUNT(*) as cnt FROM tiktok_publications
-        WHERE destination_id = :did
-        AND (
-            (scheduled_publish_at >= :start AND scheduled_publish_at < :end)
-            OR (published_at >= :start AND published_at < :end)
-        )
-        AND status IN ('queued', 'processing', 'scheduled', 'published')
-        """,
-        {"did": resolved_destination_id, "start": start_utc, "end": end_utc},
-    )
-    already_count = count_res.rows[0][0] if count_res.rows else 0
-    remaining_quota = max(0, max_daily - already_count)
-
-    if remaining_quota <= 0:
-        return {
-            "ok": False,
-            "reason": "DAILY_LIMIT_REACHED",
-            "message": f"Đã đạt giới hạn tối đa {max_daily} video/ngày hôm nay ({already_count} video đã lên lịch/đăng).",
-            "daily_limit": max_daily,
-            "already_count": already_count,
-        }
-
-    # Retrieve or generate schedule slots
+    # Ensure slot records exist
     slot_rows = await schedules.list_slots(schedule["id"])
-    today_enabled_slots = [
-        s for s in slot_rows if s.get("weekday") == weekday and s.get("enabled")
-    ]
-
-    # If no slots enabled for this weekday, generate default week slots
-    if not today_enabled_slots:
+    enabled_slots = [s for s in slot_rows if s.get("enabled")]
+    if not enabled_slots:
         await schedule_generator.generate_week_schedule(
             pipeline_id, max_daily=max_daily, batch_time=batch_time
         )
         slot_rows = await schedules.list_slots(schedule["id"])
-        today_enabled_slots = [
-            s for s in slot_rows if s.get("weekday") == weekday and s.get("enabled")
-        ]
+        enabled_slots = [s for s in slot_rows if s.get("enabled")]
 
-    # Collect available future slots
-    open_slots: list[tuple[str, str]] = []  # (slot_time_str, slot_utc_iso)
-    for s in sorted(today_enabled_slots, key=lambda x: x.get("slot_time", "")):
-        st = s.get("slot_time", "")
-        sh, sm = _parse_time(st)
-        slot_dt = now_local.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    bh, bm = _parse_time(batch_time)
+    today_batch_dt = now_local.replace(hour=bh, minute=bm, second=0, microsecond=0)
 
-        # In automatic mode, slots must be in the future
-        if not force_now and slot_dt <= now_local:
-            continue
+    target_date = None
+    target_slots: list[tuple[str, str, datetime]] = []
+    is_lookahead = False
 
-        slot_utc = slot_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Check whether TODAY has open slots
+    already_today = await count_published_or_scheduled_for_date(resolved_destination_id, today_date, tz)
+    remaining_today = max(0, max_daily - already_today)
 
-        # Check if slot is already occupied
-        occupied_res = await execute(
-            """
-            SELECT 1 FROM tiktok_publications
-            WHERE destination_id = :did AND scheduled_publish_at = :utc
-            AND status IN ('queued', 'processing', 'scheduled', 'published')
-            LIMIT 1
-            """,
-            {"did": resolved_destination_id, "utc": slot_utc},
+    # If today is an active day and already reached daily limit, stop and report DAILY_LIMIT_REACHED
+    if today_weekday in active_days and remaining_today <= 0:
+        return {
+            "ok": False,
+            "reason": "DAILY_LIMIT_REACHED",
+            "message": f"Đã đạt giới hạn tối đa {max_daily} video/ngày hôm nay ({already_today} video đã lên lịch/đăng).",
+            "daily_limit": max_daily,
+            "already_count": already_today,
+            "target_date": today_date.isoformat(),
+        }
+
+    can_schedule_today = False
+    if today_weekday in active_days:
+        if force_now or now_local >= today_batch_dt:
+            can_schedule_today = True
+
+    if can_schedule_today and remaining_today > 0:
+        today_day_slots = sorted(
+            [s for s in enabled_slots if s.get("weekday") == today_weekday],
+            key=lambda x: x.get("slot_time", ""),
         )
-        if not occupied_res.rows:
-            open_slots.append((st, slot_utc))
+        for s in today_day_slots:
+            st = s.get("slot_time", "")
+            sh, sm = _parse_time(st)
+            slot_dt = now_local.replace(hour=sh, minute=sm, second=0, microsecond=0)
 
-    # If force_now and no future slots remain today, allocate upcoming incremental slots
-    if force_now and not open_slots:
-        min_int = max(5, int(schedule.get("min_interval_minutes") or 60))
-        for i in range(remaining_quota):
-            f_dt = now_local + timedelta(minutes=min_int * (i + 1))
-            st = f_dt.strftime("%H:%M")
-            f_utc = f_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            open_slots.append((st, f_utc))
+            # In automatic mode, slots must be in future or within a 15-minute grace period
+            if not force_now and slot_dt < now_local - timedelta(minutes=15):
+                continue
 
-    slots_to_allocate = open_slots[:remaining_quota]
-    if not slots_to_allocate:
+            effective_dt = slot_dt if slot_dt >= now_local else (now_local + timedelta(minutes=2))
+            slot_utc = effective_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            occupied = await execute(
+                """
+                SELECT 1 FROM tiktok_publications
+                WHERE destination_id = :did AND scheduled_publish_at = :utc
+                AND status IN ('queued', 'processing', 'scheduled', 'published')
+                LIMIT 1
+                """,
+                {"did": resolved_destination_id, "utc": slot_utc},
+            )
+            if not occupied.rows:
+                target_slots.append((st, slot_utc, effective_dt))
+
+        if target_slots:
+            target_date = today_date
+            target_slots = target_slots[:remaining_today]
+
+    # If today has not reached batch time yet on an active day and not force_now, wait for batch hour
+    if not target_slots and not force_now and today_weekday in active_days and now_local < today_batch_dt:
+        return {
+            "ok": False,
+            "reason": "NOT_BEFORE_BATCH_TIME",
+            "message": f"Chưa tới giờ chạy batch {batch_time} hôm nay (Múi giờ {tz_name}).",
+            "batch_time": batch_time,
+            "timezone": tz_name,
+            "target_date": today_date.isoformat(),
+        }
+
+    # If today has no open slots remaining, LOOK AHEAD to next active days (up to 7 days ahead)
+    if not target_slots:
+        for day_offset in range(1, 8):
+            cand_dt = now_local + timedelta(days=day_offset)
+            cand_date = cand_dt.date()
+            cand_wd = cand_date.weekday()
+            if cand_wd not in active_days:
+                continue
+
+            cand_already = await count_published_or_scheduled_for_date(resolved_destination_id, cand_date, tz)
+            cand_remaining = max(0, max_daily - cand_already)
+            if cand_remaining <= 0:
+                continue
+
+            cand_day_slots = sorted(
+                [s for s in enabled_slots if s.get("weekday") == cand_wd],
+                key=lambda x: x.get("slot_time", ""),
+            )
+            cand_open_slots: list[tuple[str, str, datetime]] = []
+            for s in cand_day_slots:
+                st = s.get("slot_time", "")
+                sh, sm = _parse_time(st)
+                slot_dt = datetime(cand_date.year, cand_date.month, cand_date.day, sh, sm, tzinfo=tz)
+                slot_utc = slot_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                occupied = await execute(
+                    """
+                    SELECT 1 FROM tiktok_publications
+                    WHERE destination_id = :did AND scheduled_publish_at = :utc
+                    AND status IN ('queued', 'processing', 'scheduled', 'published')
+                    LIMIT 1
+                    """,
+                    {"did": resolved_destination_id, "utc": slot_utc},
+                )
+                if not occupied.rows:
+                    cand_open_slots.append((st, slot_utc, slot_dt))
+
+            if cand_open_slots:
+                target_date = cand_date
+                target_slots = cand_open_slots[:cand_remaining]
+                is_lookahead = True
+                break
+
+    if not target_slots:
         return {
             "ok": False,
             "reason": "NO_FUTURE_SLOTS",
-            "message": "Không còn khung giờ phát hành trống nào trong ngày hôm nay.",
-            "remaining_quota": remaining_quota,
+            "message": "Không còn khung giờ phát hành trống nào trong hôm nay và các ngày kế tiếp đã đầy.",
+            "daily_limit": max_daily,
         }
 
     # Query eligible unpublished videos from Inventory
@@ -346,7 +406,7 @@ async def execute_daily_batch(
         else "r.source_published_at ASC, r.discovered_at ASC, r.id ASC"
     )
 
-    fetch_limit = len(slots_to_allocate) * 3
+    fetch_limit = len(target_slots) * 4
     reels_res = await execute(
         f"""
         SELECT r.id, r.source_id, r.reel_id, r.reel_url, r.caption,
@@ -368,15 +428,16 @@ async def execute_daily_batch(
     )
     candidate_reels = result_to_dicts(reels_res)
 
-    # Filter according to youtube_upload_mode
-    upload_mode = pipeline.get("youtube_upload_mode") or "shorts"
+    upload_mode = pipeline.get("youtube_upload_mode") or "both"
     eligible_reels: list[dict[str, Any]] = []
     for r in candidate_reels:
         dur = r.get("duration")
         if upload_mode == "shorts" and dur and dur > 180:
             continue
+        if upload_mode == "regular" and dur and dur <= 60:
+            continue
         eligible_reels.append(r)
-        if len(eligible_reels) >= len(slots_to_allocate):
+        if len(eligible_reels) >= len(target_slots):
             break
 
     if not eligible_reels:
@@ -384,16 +445,45 @@ async def execute_daily_batch(
             "ok": False,
             "reason": "NO_ELIGIBLE_INVENTORY",
             "message": f"Không có video phù hợp trong kho (cần định dạng '{upload_mode}').",
-            "slots_available": len(slots_to_allocate),
+            "slots_available": len(target_slots),
+            "target_date": target_date.isoformat() if target_date else None,
         }
 
-    # Create publication jobs and queue entries
+    # Preview Mode (Dry Run)
+    if dry_run:
+        planned_items = []
+        for i, reel_item in enumerate(eligible_reels[: len(target_slots)]):
+            slot_label, slot_utc, slot_dt = target_slots[i]
+            planned_items.append({
+                "reel_id": reel_item.get("reel_id"),
+                "caption": reel_item.get("caption") or "TikTok Video",
+                "thumbnail_url": reel_item.get("thumbnail_url"),
+                "duration": reel_item.get("duration"),
+                "slot_time": slot_label,
+                "scheduled_at": slot_utc,
+                "scheduled_local": slot_dt.strftime("%Y-%m-%d %H:%M"),
+            })
+
+        day_label = "ngày mai" if is_lookahead else "hôm nay"
+        target_str = target_date.strftime("%d/%m/%Y") if target_date else ""
+        return {
+            "ok": True,
+            "dry_run": True,
+            "target_date": target_date.isoformat() if target_date else "",
+            "is_lookahead": is_lookahead,
+            "planned_count": len(planned_items),
+            "planned_slots": planned_items,
+            "daily_limit": max_daily,
+            "destination_name": dest.get("channel_name") or "YouTube",
+            "message": f"Dự kiến lên lịch {len(planned_items)} video cho {day_label} ({target_str}).",
+        }
+
+    # Execution Mode: Enqueue jobs
     enqueued_jobs = []
-    for i, reel_item in enumerate(eligible_reels[: len(slots_to_allocate)]):
-        slot_label, slot_utc = slots_to_allocate[i]
+    for i, reel_item in enumerate(eligible_reels[: len(target_slots)]):
+        slot_label, slot_utc, slot_dt = target_slots[i]
         reel_db_id = reel_item["id"]
 
-        # Pre-enrich AI metadata if configured
         ai_title = None
         ai_desc = None
         ai_hashtags = "[]"
@@ -447,34 +537,232 @@ async def execute_daily_batch(
             "scheduled_at": slot_utc,
         })
 
-    # Record batch execution in tiktok_scheduler_batches
+    target_date_str = target_date.isoformat() if target_date else today_date.isoformat()
     batch_id = f"batch_{secrets.token_hex(6)}"
     try:
         await schedules.create_batch(
             batch_id=batch_id,
             pipeline_id=pipeline_id,
             destination_id=resolved_destination_id,
-            local_date=local_date,
+            local_date=target_date_str,
             scheduled_batch_time=batch_time,
             planned_count=len(enqueued_jobs),
         )
     except Exception:
-        # Ignore if duplicate batch row for today exists
         pass
 
-    logger.info(
-        "Scheduler enqueued %d video(s) for pipeline %s (destination %s)",
-        len(enqueued_jobs),
-        pipeline_id,
-        resolved_destination_id,
-    )
-
-    return {
+    result_data = {
         "ok": True,
         "videos_enqueued": len(enqueued_jobs),
         "slots": enqueued_jobs,
-        "date": local_date,
+        "date": target_date_str,
+        "is_lookahead": is_lookahead,
         "daily_limit": max_daily,
-        "remaining_today": max(0, remaining_quota - len(enqueued_jobs)),
-        "message": f"Đã lên lịch thành công {len(enqueued_jobs)} video vào hàng đợi.",
+        "message": f"Đã lên lịch thành công {len(enqueued_jobs)} video cho ngày {target_date_str}.",
+    }
+
+    try:
+        await system_state.set_json(
+            f"scheduler:pipeline:{pipeline_id}:last_run",
+            {
+                "timestamp": _now_iso(),
+                "ok": True,
+                "reason": "SUCCESS",
+                "message": result_data["message"],
+                "videos_enqueued": len(enqueued_jobs),
+                "target_date": target_date_str,
+            },
+        )
+    except Exception:
+        pass
+
+    logger.info(
+        "Scheduler enqueued %d video(s) for pipeline %s on %s (destination %s)",
+        len(enqueued_jobs),
+        pipeline_id,
+        target_date_str,
+        resolved_destination_id,
+    )
+    return result_data
+
+
+async def execute_daily_batch(
+    pipeline_id: str,
+    destination_id: str | None = None,
+    *,
+    force_now: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Execute batch planning for pipeline."""
+    return await calculate_schedule_plan(
+        pipeline_id,
+        destination_id=destination_id,
+        force_now=force_now,
+        now=now,
+        dry_run=False,
+    )
+
+
+async def preview_daily_batch(
+    pipeline_id: str,
+    destination_id: str | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Dry-run preview of the next daily batch plan."""
+    return await calculate_schedule_plan(
+        pipeline_id,
+        destination_id=destination_id,
+        force_now=True,
+        now=now,
+        dry_run=True,
+    )
+
+
+async def get_scheduler_status(pipeline_id: str) -> dict[str, Any]:
+    """Compile comprehensive scheduler and publisher runtime health and next-run metrics."""
+    pipeline = await pipelines.get_pipeline(pipeline_id)
+    if not pipeline:
+        return {"ok": False, "reason": "PIPELINE_NOT_FOUND", "message": "Pipeline không tồn tại."}
+
+    schedule = await schedules.get_by_pipeline(pipeline_id)
+    if not schedule:
+        schedule = await schedules.get_or_create_schedule(pipeline_id)
+
+    dest = await destinations.get_default_destination(pipeline_id)
+    if not dest:
+        dest_list = await destinations.list_destinations(pipeline_id)
+        connected = [d for d in dest_list if d.get("connected") and d.get("enabled")]
+        if connected:
+            dest = connected[0]
+
+    tz_name = schedule.get("timezone") or _DEFAULT_TIMEZONE
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo(_DEFAULT_TIMEZONE)
+
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(tz)
+    batch_time = schedule.get("batch_time") or _DEFAULT_BATCH_TIME
+    bh, bm = _parse_time(batch_time)
+    today_batch = now_local.replace(hour=bh, minute=bm, second=0, microsecond=0)
+
+    # Next scheduled run calculation
+    if now_local < today_batch:
+        next_run_dt = today_batch
+    else:
+        next_run_dt = today_batch + timedelta(days=1)
+    next_scheduled_run = next_run_dt.isoformat()
+
+    # Next publishing time from queue
+    next_pub_res = await execute(
+        """
+        SELECT scheduled_at FROM tiktok_publish_queue
+        WHERE pipeline_id = :pid AND status = 'queued' AND scheduled_at IS NOT NULL
+        ORDER BY scheduled_at ASC LIMIT 1
+        """,
+        {"pid": pipeline_id},
+    )
+    next_publishing_time = next_pub_res.rows[0][0] if next_pub_res.rows else None
+
+    # Scheduled jobs count
+    q_res = await execute(
+        "SELECT COUNT(*) FROM tiktok_publish_queue WHERE pipeline_id = :pid AND status = 'queued'",
+        {"pid": pipeline_id},
+    )
+    scheduled_jobs_count = q_res.rows[0][0] if q_res.rows else 0
+
+    # Eligible inventory count
+    upload_mode = pipeline.get("youtube_upload_mode") or "both"
+    inv_res = await execute(
+        """
+        SELECT r.duration FROM tiktok_reels r
+        JOIN tiktok_sources s ON s.id = r.source_id
+        WHERE s.pipeline_id = :pid AND s.enabled = 1 AND r.status IN ('new', 'active')
+        """,
+        {"pid": pipeline_id},
+    )
+    eligible_count = 0
+    for r in inv_res.rows:
+        dur = r[0]
+        if upload_mode == "shorts" and dur and dur > 180:
+            continue
+        if upload_mode == "regular" and dur and dur <= 60:
+            continue
+        eligible_count += 1
+
+    # Worker status
+    sched_worker = await system_state.get_json("worker:scheduler", {})
+    pub_worker = await system_state.get_json("worker:publisher", {})
+
+    sched_online = False
+    pub_online = False
+    now_ts = time.time()
+    if sched_worker and sched_worker.get("last_heartbeat"):
+        try:
+            hb_dt = datetime.fromisoformat(sched_worker["last_heartbeat"].replace("Z", "+00:00"))
+            if abs(now_ts - hb_dt.timestamp()) < 120:
+                sched_online = True
+        except Exception:
+            pass
+
+    if pub_worker and pub_worker.get("last_heartbeat"):
+        try:
+            hb_dt = datetime.fromisoformat(pub_worker["last_heartbeat"].replace("Z", "+00:00"))
+            if abs(now_ts - hb_dt.timestamp()) < 120:
+                pub_online = True
+        except Exception:
+            pass
+
+    # Last scheduler run
+    last_run = await system_state.get_json(f"scheduler:pipeline:{pipeline_id}:last_run", None)
+
+    # Determine reason summary
+    if not sched_online:
+        reason_code = "WORKER_OFFLINE"
+        reason_message = "Scheduler worker chưa ghi nhận hoạt động."
+    elif not schedule.get("enabled"):
+        reason_code = "SCHEDULE_DISABLED"
+        reason_message = "Lịch đăng tự động (Schedule) đang tắt."
+    elif not pipeline.get("auto_publish"):
+        reason_code = "AUTO_PUBLISH_DISABLED"
+        reason_message = "Chế độ Auto Publish đang tắt."
+    elif not dest:
+        reason_code = "NO_DESTINATION"
+        reason_message = "Chưa kết nối kênh YouTube đích."
+    elif eligible_count == 0:
+        reason_code = "NO_ELIGIBLE_INVENTORY"
+        reason_message = f"Không có video đủ điều kiện trong kho (định dạng {upload_mode})."
+    elif scheduled_jobs_count > 0:
+        reason_code = "SCHEDULED"
+        reason_message = f"Đang có {scheduled_jobs_count} video trong hàng đợi xuất bản."
+    elif now_local < today_batch:
+        diff_min = int((today_batch - now_local).total_seconds() // 60)
+        h, m = divmod(diff_min, 60)
+        reason_code = "WAITING_BATCH_TIME"
+        reason_message = f"Chưa tới giờ chạy batch {batch_time} (còn {h}h {m}p)."
+    else:
+        reason_code = "READY"
+        reason_message = "Hệ thống sẵn sàng lên lịch cho ngày tiếp theo."
+
+    return {
+        "ok": True,
+        "pipeline_id": pipeline_id,
+        "schedule_enabled": bool(schedule.get("enabled")),
+        "auto_publish": bool(pipeline.get("auto_publish")),
+        "timezone": tz_name,
+        "batch_time": batch_time,
+        "max_daily": int(schedule.get("max_daily_publish") or _DEFAULT_MAX_DAILY),
+        "next_scheduled_run": next_scheduled_run,
+        "last_scheduler_run": last_run.get("timestamp") if last_run else None,
+        "last_scheduler_result": last_run,
+        "next_publishing_time": next_publishing_time,
+        "eligible_inventory": eligible_count,
+        "scheduled_jobs": scheduled_jobs_count,
+        "reason_code": reason_code,
+        "reason_message": reason_message,
+        "scheduler_worker_online": sched_online,
+        "publisher_worker_online": pub_online,
+        "publisher_status": "running" if (pub_worker.get("status") == "processing" and pub_online) else ("idle" if pub_online else "offline"),
     }

@@ -17,6 +17,22 @@ async def get_schedule(pipeline_id: str):
     return row
 
 
+@router.get("/pipeline/{pipeline_id}/status", dependencies=[Depends(require_admin)])
+async def get_schedule_status(pipeline_id: str):
+    """Retrieve runtime operational status of scheduler, next run, and queue health."""
+    from ..services.tiktok_scheduler import get_scheduler_status
+
+    return await get_scheduler_status(pipeline_id)
+
+
+@router.get("/pipeline/{pipeline_id}/preview", dependencies=[Depends(require_admin)])
+async def preview_schedule(pipeline_id: str):
+    """Calculate and preview the upcoming batch schedule without mutating database."""
+    from ..services.tiktok_scheduler import preview_daily_batch
+
+    return await preview_daily_batch(pipeline_id)
+
+
 @router.patch("/pipeline/{pipeline_id}/enabled", dependencies=[Depends(require_admin)])
 async def toggle_schedule(pipeline_id: str, body: dict):
     from ..db.repositories import schedules

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ..config import settings
 from ..db.client import execute
-from ..db.repositories import pipelines, publications, publish_queue, reels
+from ..db.repositories import pipelines, publications, publish_queue, reels, system_state
 from .tiktok_ai_metadata import generate_ai_metadata
 from .tiktok_media import ManualMediaError, ManualResolvedMedia, download_media, resolve_manual_media
 from .tiktok_provider import ProviderError
@@ -38,6 +38,16 @@ async def publisher_loop(stop_event: asyncio.Event) -> None:
     poll_interval = max(settings.tiktok_scheduler_poll_seconds, 5)
 
     while not stop_event.is_set():
+        # Heartbeat update
+        try:
+            await system_state.set_json("worker:publisher", {
+                "status": "idle",
+                "last_heartbeat": _now_iso(),
+                "service": settings.service_name,
+            })
+        except Exception:
+            pass
+
         worker_id = f"worker_{secrets.token_hex(4)}"
         job = await publish_queue.claim_next_job(worker_id)
         if job is None:
@@ -47,6 +57,16 @@ async def publisher_loop(stop_event: asyncio.Event) -> None:
             except asyncio.TimeoutError:
                 continue
             continue
+
+        try:
+            await system_state.set_json("worker:publisher", {
+                "status": "processing",
+                "last_heartbeat": _now_iso(),
+                "current_job_id": job["id"],
+                "service": settings.service_name,
+            })
+        except Exception:
+            pass
 
         try:
             await _process_job(job)
@@ -212,6 +232,8 @@ async def _process_job(job: dict) -> None:
             thumbnail_url=reel.get("thumbnail_url") or resolved_media.thumbnail_url,
             is_shorts=is_shorts,
         )
+        if not youtube_video_id or not str(youtube_video_id).strip():
+            raise RuntimeError("YouTube API did not return a valid video ID")
 
         # Step 7: Finalize statuses
         await publications.mark_published(pub_id, youtube_video_id)
