@@ -6,8 +6,10 @@ import { useRouter } from "next/navigation";
 import { Badge, Card, CardHeader, Spinner, btnPrimary, btnSecondary, btnSmall, inputCls, labelCls } from "@/components/ui";
 import { IconAlert, IconCheck, IconClock, IconFilm, IconPlay, IconPlus, IconRefresh, IconTikTok, IconUpload, IconVideo } from "@/components/icons";
 import { TikTokPipelineToggles } from "@/components/tiktok/TikTokPipelineToggles";
+import { TikTokOverview } from "@/components/tiktok/TikTokOverview";
 import type {
   TikTokDestinationDto,
+  TikTokFlowState,
   TikTokPipelineDto,
   TikTokReelDto,
   TikTokScheduleDto,
@@ -30,6 +32,9 @@ export function TikTokPipelineDetailClient({
   destinations = [],
   initialSchedule = null,
   initialSlots = [],
+  initialFlow = null,
+  channelAvatarUrl = null,
+  channelName = null,
 }: {
   pipeline: TikTokPipelineDto;
   summary: TikTokSummaryDto | null;
@@ -37,6 +42,9 @@ export function TikTokPipelineDetailClient({
   destinations: TikTokDestinationDto[];
   initialSchedule: TikTokScheduleDto | null;
   initialSlots: TikTokSlotDto[];
+  initialFlow?: TikTokFlowState | null;
+  channelAvatarUrl?: string | null;
+  channelName?: string | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<"overview" | "sources" | "inventory" | "schedule" | "destinations">("overview");
@@ -247,26 +255,12 @@ export function TikTokPipelineDetailClient({
       {/* Tab: Overview */}
       {tab === "overview" && (
         <div className="space-y-6">
-          {summary && (
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Inventory</span>
-                <p className="mt-1 text-2xl font-black text-slate-900">{summary.inventory}</p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Published</span>
-                <p className="mt-1 text-2xl font-black text-indigo-600">{summary.published}</p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Queued</span>
-                <p className="mt-1 text-2xl font-black text-amber-600">{summary.queued}</p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Failed</span>
-                <p className="mt-1 text-2xl font-black text-rose-600">{summary.failed}</p>
-              </div>
-            </div>
-          )}
+          <TikTokOverview
+            pipeline={pipeline}
+            initialFlow={initialFlow}
+            channelAvatarUrl={channelAvatarUrl}
+            channelName={channelName}
+          />
 
           <div className="grid gap-6 md:grid-cols-2">
             <Card>

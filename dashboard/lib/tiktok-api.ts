@@ -400,6 +400,179 @@ export async function generateTikTokScheduleSlots(
   );
 }
 
+export type TikTokFlowBackendStatus =
+  | "idle"
+  | "ready"
+  | "waiting"
+  | "running"
+  | "partial"
+  | "done"
+  | "error"
+  | "not_configured";
+
+export interface TikTokFlowStep {
+  key: string;
+  title: string;
+  subtitle: string;
+  status: TikTokFlowBackendStatus;
+  detail?: string;
+}
+
+export type TikTokFlowActiveEdge =
+  | "source->inventory"
+  | "inventory->ai_metadata"
+  | "ai_metadata->scheduler"
+  | "scheduler->publisher"
+  | "publisher->youtube_destination";
+
+export interface TikTokFlowState {
+  pipeline_id: string;
+  pipeline_name: string;
+  live: boolean;
+  auto_publish: boolean;
+  sources: number;
+  inventory: number;
+  published: number;
+  queued: number;
+  processing: number;
+  failed: number;
+  steps: {
+    source: TikTokFlowBackendStatus;
+    inventory: TikTokFlowBackendStatus;
+    ai_metadata: TikTokFlowBackendStatus;
+    scheduler: TikTokFlowBackendStatus;
+    publisher: TikTokFlowBackendStatus;
+    youtube_destination: TikTokFlowBackendStatus;
+  };
+  details: {
+    source: string;
+    inventory: string;
+    ai_metadata: string;
+    scheduler: string;
+    publisher: string;
+    youtube_destination: string;
+  };
+  active_edges: string[];
+}
+
+export async function getTikTokFlowState(pipelineId: string): Promise<TikTokFlowState> {
+  const raw: any = await ttFetch<any>(`/api/tiktok/flow/pipeline/${encodeURIComponent(pipelineId)}`);
+  const pipeline = raw.pipeline || {};
+  const summary = raw.summary || {};
+  const sources = raw.sources || [];
+  const destinations = raw.destinations || [];
+
+  const totalSources = raw.sources_count ?? summary.total_sources ?? sources.length;
+  const totalReels = raw.inventory_count ?? summary.total_reels ?? 0;
+  const unpublished = summary.unpublished ?? 0;
+  const published = raw.published_count ?? summary.published ?? 0;
+  const queueCount = raw.queued_count ?? summary.queue_count ?? 0;
+
+  // Use backend computed steps if present, otherwise fallback
+  let steps = raw.steps;
+  let details = raw.details;
+  let activeEdges = raw.active_edges || [];
+
+  if (!steps || !details) {
+    let sourceStatus: TikTokFlowBackendStatus = "idle";
+    let sourceDetail = "Chưa có nguồn TikTok";
+    if (sources.length === 0) {
+      sourceStatus = "not_configured";
+    } else if (sources.some((s: any) => s.last_scan?.status === "running")) {
+      sourceStatus = "running";
+      sourceDetail = "Đang quét video TikTok...";
+    } else if (sources.some((s: any) => s.last_scan?.status === "failed")) {
+      sourceStatus = "error";
+      sourceDetail = "Quét gần nhất thất bại";
+    } else {
+      sourceStatus = "ready";
+      sourceDetail = `${sources.length} nguồn · ${totalReels} video`;
+    }
+
+    let inventoryStatus: TikTokFlowBackendStatus = "idle";
+    let inventoryDetail = "Chưa có video trong kho";
+    if (totalReels === 0) {
+      inventoryStatus = "idle";
+    } else if (unpublished > 0) {
+      inventoryStatus = "ready";
+      inventoryDetail = `${unpublished} video sẵn sàng`;
+    } else {
+      inventoryStatus = "done";
+      inventoryDetail = `${published} video đã đăng`;
+    }
+
+    const aiStatus: TikTokFlowBackendStatus = unpublished > 0 ? "ready" : "idle";
+    const aiDetail = unpublished > 0 ? "AI SEO sẵn sàng" : "Đang chờ video mới";
+
+    const isAuto = Boolean(pipeline.auto_publish);
+    const schedulerStatus: TikTokFlowBackendStatus = isAuto ? "ready" : "idle";
+    const schedulerDetail = isAuto ? "Auto ON · Sẵn sàng đăng" : "Auto OFF (Chế độ thủ công)";
+
+    let publisherStatus: TikTokFlowBackendStatus = "idle";
+    let publisherDetail = "Chưa có lượt xuất bản";
+    if (queueCount > 0) {
+      publisherStatus = "waiting";
+      publisherDetail = `${queueCount} video trong hàng đợi`;
+    } else if (published > 0) {
+      publisherStatus = "done";
+      publisherDetail = `${published} video đã đăng`;
+    }
+
+    let destStatus: TikTokFlowBackendStatus = "not_configured";
+    let destDetail = "Chưa liên kết kênh";
+    if (destinations.length > 0) {
+      const conn = destinations.find((d: any) => d.connected);
+      if (conn) {
+        destStatus = "ready";
+        destDetail = conn.channel_name || "YouTube đã liên kết";
+      } else {
+        destStatus = "waiting";
+        destDetail = "Chưa cấp quyền OAuth";
+      }
+    }
+
+    steps = {
+      source: sourceStatus,
+      inventory: inventoryStatus,
+      ai_metadata: aiStatus,
+      scheduler: schedulerStatus,
+      publisher: publisherStatus,
+      youtube_destination: destStatus,
+    };
+
+    details = {
+      source: sourceDetail,
+      inventory: inventoryDetail,
+      ai_metadata: aiDetail,
+      scheduler: schedulerDetail,
+      publisher: publisherDetail,
+      youtube_destination: destDetail,
+    };
+
+    activeEdges = [];
+    if (sourceStatus === "running") activeEdges.push("source->inventory");
+    if (unpublished > 0) activeEdges.push("inventory->ai_metadata");
+    if (queueCount > 0) activeEdges.push("scheduler->publisher");
+  }
+
+  return {
+    pipeline_id: pipeline.id || pipelineId,
+    pipeline_name: pipeline.name || "TikTok Pipeline",
+    live: Boolean(pipeline.enabled ?? true),
+    auto_publish: Boolean(pipeline.auto_publish),
+    sources: totalSources,
+    inventory: totalReels,
+    published,
+    queued: queueCount,
+    processing: 0,
+    failed: 0,
+    steps,
+    details,
+    active_edges: activeEdges,
+  };
+}
+
+
 export async function getProviderHealth() {
   return ttFetch<{ provider: string; healthy: boolean; available: string[] }>(
     "/health/providers",

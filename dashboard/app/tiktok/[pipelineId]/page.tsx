@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { btnPrimary } from "@/components/ui";
 import {
+  getTikTokFlowState,
   getTikTokPipeline,
   getTikTokSchedule,
   getTikTokScheduleSlots,
@@ -11,11 +12,13 @@ import {
   listTikTokSources,
   TikTokApiError,
   type TikTokDestinationDto,
+  type TikTokFlowState,
   type TikTokScheduleDto,
   type TikTokSlotDto,
   type TikTokSourceDto,
   type TikTokSummaryDto,
 } from "@/lib/tiktok-api";
+import { getChannelAvatarUrl } from "@/lib/youtube-avatar";
 import { TikTokPipelineDetailClient } from "./TikTokPipelineDetailClient";
 
 export default async function TikTokPipelineDetailPage({
@@ -31,6 +34,9 @@ export default async function TikTokPipelineDetailPage({
   let destinations: TikTokDestinationDto[] = [];
   let schedule: TikTokScheduleDto | null = null;
   let slots: TikTokSlotDto[] = [];
+  let flow: TikTokFlowState | null = null;
+  let channelAvatarUrl: string | null = null;
+  let channelName: string | null = null;
 
   try {
     pipeline = await getTikTokPipeline(pipelineId);
@@ -54,18 +60,28 @@ export default async function TikTokPipelineDetailPage({
   }
 
   try {
-    const [summaryRes, sourcesRes, destsRes, schedRes, slotsRes] = await Promise.all([
+    const [summaryRes, sourcesRes, destsRes, schedRes, slotsRes, flowRes] = await Promise.all([
       getTikTokSummary(pipelineId).catch(() => null),
       listTikTokSources(pipelineId).catch(() => []),
       listTikTokDestinations(pipelineId).catch(() => []),
       getTikTokSchedule(pipelineId).catch(() => null),
       getTikTokScheduleSlots(pipelineId).catch(() => []),
+      getTikTokFlowState(pipelineId).catch(() => null),
     ]);
     summary = summaryRes;
     sources = sourcesRes;
     destinations = destsRes;
     schedule = schedRes;
     slots = slotsRes;
+    flow = flowRes;
+
+    const connectedDest = destinations.find((d) => d.connected);
+    if (connectedDest) {
+      channelName = connectedDest.channel_name || null;
+      if (connectedDest.channel_id) {
+        channelAvatarUrl = await getChannelAvatarUrl(connectedDest.channel_id).catch(() => null);
+      }
+    }
   } catch {
     // Continue with partial data
   }
@@ -79,6 +95,9 @@ export default async function TikTokPipelineDetailPage({
         destinations={destinations}
         initialSchedule={schedule}
         initialSlots={slots}
+        initialFlow={flow}
+        channelAvatarUrl={channelAvatarUrl}
+        channelName={channelName}
       />
     </Shell>
   );
