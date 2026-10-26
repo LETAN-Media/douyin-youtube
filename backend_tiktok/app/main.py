@@ -43,22 +43,34 @@ _setup_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting %s v%s", settings.service_name, settings.version)
-    await migrate()
+    try:
+        await migrate()
+    except Exception as exc:
+        logger.exception("Database migration failed during startup: %s", exc)
 
     stop_event: asyncio.Event = asyncio.Event()
     tasks: list[asyncio.Task] = []
 
-    if settings.tiktok_scheduler_enabled:
-        tasks.append(asyncio.create_task(scheduler_loop(stop_event)))
-    if settings.tiktok_reconcile_enabled:
-        tasks.append(asyncio.create_task(reconciler_loop(stop_event)))
-    if settings.toolnet_ai_enabled:
-        tasks.append(asyncio.create_task(ai_worker_loop(stop_event)))
-    if getattr(settings, "tiktok_publisher_enabled", False):
-        tasks.append(asyncio.create_task(publisher_loop(stop_event)))
+    def _start_worker(coro, name: str):
+        try:
+            task = asyncio.create_task(coro)
+            task.add_done_callback(
+                lambda f: logger.warning("%s worker exited: %s", name, f.exception())
+                if not f.cancelled() and f.exception()
+                else None
+            )
+            tasks.append(task)
+        except Exception as exc:
+            logger.exception("Failed to start %s worker: %s", name, exc)
 
-    for t in tasks:
-        t.add_done_callback(lambda f: logger.warning("worker exited: %s", f.exception()) if f.exception() else None)
+    if settings.tiktok_scheduler_enabled:
+        _start_worker(scheduler_loop(stop_event), "scheduler")
+    if settings.tiktok_reconcile_enabled:
+        _start_worker(reconciler_loop(stop_event), "reconciler")
+    if settings.toolnet_ai_enabled:
+        _start_worker(ai_worker_loop(stop_event), "ai_worker")
+    if getattr(settings, "tiktok_publisher_enabled", False):
+        _start_worker(publisher_loop(stop_event), "publisher")
 
     yield
 

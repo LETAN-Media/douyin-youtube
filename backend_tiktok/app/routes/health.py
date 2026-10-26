@@ -6,6 +6,7 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
+@router.get("/api/health")
 async def health():
     from ..db.client import get_client
 
@@ -22,6 +23,12 @@ async def health():
         "version": settings.version,
         "database": db_status,
     }
+
+
+@router.get("/live")
+async def liveness():
+    """Ultra-lightweight liveness check (does not touch database or external APIs)."""
+    return {"status": "live", "service": settings.service_name}
 
 
 @router.get("/health/providers")

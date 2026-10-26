@@ -178,8 +178,21 @@ export function TikTokPipelineList({
       </div>
 
       {error && (
-        <div className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-600 border border-rose-200">
-          {error}
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-2xl border border-rose-200 bg-rose-50/90 p-4 shadow-sm text-sm text-rose-800">
+          <div className="flex items-start gap-2.5">
+            <span className="text-rose-600 mt-0.5 text-base font-bold">⚠️</span>
+            <div>
+              <p className="font-bold text-rose-900">Không thể tải danh sách TikTok Pipelines</p>
+              <p className="mt-0.5 text-xs text-rose-700 leading-relaxed">{error}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => router.refresh()}
+            className="inline-flex min-h-[38px] items-center justify-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-rose-700 shrink-0 self-start sm:self-auto"
+          >
+            Thử lại
+          </button>
         </div>
       )}
 

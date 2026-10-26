@@ -135,6 +135,24 @@ function requireEnv(): { base: string; token: string } {
   return { base, token };
 }
 
+function cleanErrorMessage(status: number, text: string): string {
+  const lower = (text || "").toLowerCase();
+  if (
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    lower.includes("upstream connect error") ||
+    lower.includes("connection refused") ||
+    lower.includes("remote connection failure") ||
+    lower.includes("bad gateway") ||
+    lower.includes("service unavailable") ||
+    lower.includes("gateway timeout")
+  ) {
+    return "Máy chủ TikTok backend đang khởi động lại hoặc tạm thời gián đoạn kết nối. Vui lòng bấm Thử lại sau giây lát.";
+  }
+  return text || `HTTP ${status}`;
+}
+
 async function ttFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { base, token } = requireEnv();
   const controller = new AbortController();
@@ -158,10 +176,31 @@ async function ttFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     if (!res.ok) {
       const text = await res.text();
-      throw new TikTokApiError(res.status, text || `HTTP ${res.status}`);
+      const message = cleanErrorMessage(res.status, text);
+      throw new TikTokApiError(res.status, message);
     }
     const text = await res.text();
     return JSON.parse(text || "{}") as T;
+  } catch (err: unknown) {
+    if (err instanceof TikTokApiError) {
+      throw err;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    const lower = msg.toLowerCase();
+    if (lower.includes("abort") || lower.includes("timeout")) {
+      throw new TikTokApiError(504, "Kết nối tới TikTok backend bị quá hạn (timeout). Vui lòng bấm Thử lại.");
+    }
+    if (
+      lower.includes("fetch failed") ||
+      lower.includes("econnrefused") ||
+      lower.includes("connection refused")
+    ) {
+      throw new TikTokApiError(
+        503,
+        "Máy chủ TikTok backend đang khởi động lại hoặc tạm thời gián đoạn kết nối. Vui lòng bấm Thử lại.",
+      );
+    }
+    throw new TikTokApiError(500, cleanErrorMessage(500, msg));
   } finally {
     clearTimeout(timer);
   }
