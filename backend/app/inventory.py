@@ -277,8 +277,12 @@ def _upsert_videos(
             # If legacy video had source_id=NULL, link it to the source
             if existing.source_id is None:
                 existing.source_id = source.id
-            existing.title = title
-            existing.description = description
+            # Protect published and scheduled video metadata from being overwritten by bare scan results
+            if existing.status not in ("published", "scheduled"):
+                if title:
+                    existing.title = title
+                if description:
+                    existing.description = description
             if url:
                 existing.url = url
             if douyin_created_at:
