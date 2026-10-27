@@ -24,7 +24,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -145,8 +145,19 @@ def quota_status() -> dict[str, Any]:
     return snap
 
 
-def can_start_import() -> bool:
-    """Provider-aware gate used by the API before queueing a scan."""
+def can_start_import(source: Any = None) -> bool:
+    """Provider-aware gate used by the API and monitor before queueing a scan."""
+    # 1. If self-hosted Douyin API is enabled, scan can always proceed without RapidAPI quota.
+    if getattr(settings, "douyin_self_hosted_enabled", True):
+        return True
+
+    # 2. If a specific source is provided, check its configured provider.
+    if source is not None:
+        provider_id = getattr(source, "feed_provider", None)
+        if provider_id in ("self_hosted", "douyin_self_hosted"):
+            return True
+
+    # 3. Check primary provider.
     try:
         provider = get_primary_provider()
     except Exception:
@@ -347,6 +358,8 @@ def _finish(
             source.inventory_synced_at = utcnow()
             source.last_checked_at = utcnow()
             source.last_scan_at = utcnow()
+            cooldown_h = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
+            source.next_scan_at = source.last_scan_at + timedelta(hours=cooldown_h)
 
 
 def queue_scan_job(
@@ -386,28 +399,48 @@ def queue_scan_job(
     return job
 
 
-def recover_incomplete_scan_jobs(db: Session | None = None) -> int:
-    """Recover scan jobs left in 'running' state after container restart or crash."""
+def recover_incomplete_scan_jobs(
+    db: Session | None = None,
+    max_age_seconds: int = 1800,
+) -> int:
+    """Recover scan jobs left in 'running' state after container restart or crash.
+    
+    Recovers running jobs when not actively executing in this process, or when
+    the job has been running longer than `max_age_seconds`.
+    """
     should_close = False
     if db is None:
         db = SessionLocal()
         should_close = True
     try:
+        now = utcnow()
         stuck_jobs = db.execute(
             select(DouyinScanJob).where(DouyinScanJob.status == STATUS_RUNNING)
         ).scalars().all()
         recovered = 0
         for job in stuck_jobs:
-            job.retry_count = int(job.retry_count or 0) + 1
-            if job.retry_count > 5:
-                job.status = STATUS_FAILED
-                job.stop_reason = STOP_REASON_ERROR
-                job.error = "Max retries exceeded after crash recovery"
-            else:
-                job.status = STATUS_PENDING
-            job.locked_at = None
-            job.locked_by = None
-            recovered += 1
+            with _active_lock:
+                is_locally_active = job.source_id in _active_sources
+            job_age = None
+            ref_time = job.started_at or job.locked_at or job.created_at
+            if ref_time:
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                job_age = (now - ref_time).total_seconds()
+
+            if (not is_locally_active) or (job_age is not None and job_age > max_age_seconds):
+                job.retry_count = int(job.retry_count or 0) + 1
+                if job.retry_count > 5:
+                    job.status = STATUS_FAILED
+                    job.stop_reason = STOP_REASON_ERROR
+                    job.error = "Max retries exceeded after crash recovery"
+                else:
+                    job.status = STATUS_PENDING
+                job.locked_at = None
+                job.locked_by = None
+                with _active_lock:
+                    _active_sources.discard(job.source_id)
+                recovered += 1
         if recovered:
             db.commit()
             logger.info("Recovered %s stuck DouyinScanJob(s)", recovered)
@@ -552,6 +585,8 @@ def _execute_self_hosted_fallback(
             if source is not None:
                 source.last_refresh_at = utcnow()
                 source.last_scan_at = utcnow()
+                cooldown_h = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
+                source.next_scan_at = source.last_scan_at + timedelta(hours=cooldown_h)
                 source.provider_status = PROVIDER_OK
                 source.provider_status_detail = f"Discovered {len(items)} videos ({new_count} new) via self-hosted fallback"
                 source.feed_provider = "douyin_self_hosted"
@@ -1023,6 +1058,8 @@ def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
                 if source is not None:
                     source.last_refresh_at = utcnow()
                     source.last_scan_at = utcnow()
+                    cooldown_h = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
+                    source.next_scan_at = source.last_scan_at + timedelta(hours=cooldown_h)
                     source.provider_status = provider_status
                     source.provider_status_detail = error
                     source.feed_provider = page_source.provider_id

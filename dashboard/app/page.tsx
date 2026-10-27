@@ -362,14 +362,65 @@ async function DashboardView() {
                           <ProgressBar value={done} tone={p.failed > 0 ? "amber" : "indigo"} />
                         </div>
                         {noInventory && p.enabled ? (
-                          <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] font-bold text-rose-700">
-                            Hết video khả dụng (0 video) · Tự bổ sung khi có video mới
+                          <p
+                            className={`mt-2 rounded-lg px-2.5 py-1.5 text-[11px] font-bold ${
+                              p.scan_status === "scanning"
+                                ? "bg-sky-50 text-sky-700"
+                                : p.scan_reason === "API_ERROR" || p.scan_reason === "WORKER_OFFLINE"
+                                  ? "bg-rose-50 text-rose-700"
+                                  : p.scan_status === "cooldown" || p.scan_reason === "NO_NEW_VIDEOS"
+                                    ? "bg-amber-50 text-amber-800"
+                                    : "bg-rose-50 text-rose-700"
+                            }`}
+                          >
+                            {p.scan_reason_detail || "Hết video khả dụng (0 video) · Tự bổ sung khi có video mới"}
                           </p>
                         ) : reasonLabel ? (
                           <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-700">
                             {reasonLabel}
                           </p>
                         ) : null}
+
+                        {(p.sources_count ?? 0) > 0 && (
+                          <div className="mt-2.5 grid grid-cols-3 gap-1 rounded-lg bg-slate-50 px-2.5 py-2 text-[11px]">
+                            <div>
+                              <span className="block font-semibold text-slate-400">Quét lần cuối</span>
+                              <span className="font-bold text-slate-700">{p.last_scan_at ? formatTime(p.last_scan_at) : "—"}</span>
+                            </div>
+                            <div>
+                              <span className="block font-semibold text-slate-400">Quét tiếp</span>
+                              <span className="font-bold text-slate-700">
+                                {p.scan_status === "scanning" ? (
+                                  <span className="text-sky-600 animate-pulse">Đang quét...</span>
+                                ) : p.next_scan_at ? (
+                                  formatTime(p.next_scan_at)
+                                ) : (
+                                  "—"
+                                )}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="block font-semibold text-slate-400">Kết quả</span>
+                              <span
+                                className={`font-bold ${
+                                  p.scan_status === "failed"
+                                    ? "text-rose-600"
+                                    : (p.scan_result?.new ?? 0) > 0
+                                      ? "text-emerald-600"
+                                      : "text-slate-600"
+                                }`}
+                              >
+                                {p.scan_status === "failed"
+                                  ? "Lỗi"
+                                  : (p.scan_result?.new ?? 0) > 0
+                                    ? `+${p.scan_result?.new} mới`
+                                    : p.scan_result?.status === "completed"
+                                      ? "Đã cập nhật"
+                                      : "—"}
+                              </span>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs">

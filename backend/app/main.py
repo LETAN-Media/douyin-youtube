@@ -277,6 +277,7 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict:
     from app.scheduler import scheduler_runtime
+    from app.monitor import monitor_runtime
 
     return {
         "ok": True,
@@ -286,9 +287,10 @@ def health() -> dict:
         "worker": (
             settings.worker_enabled
         ),
-        "monitor": (
+        "monitor": bool(
             getattr(settings, "monitor_enabled", True)
             and monitor_task is not None
+            and not monitor_task.done()
         ),
         "scheduler": bool(
             getattr(settings, "scheduler_enabled", True)
@@ -296,6 +298,7 @@ def health() -> dict:
             and not scheduler_task.done()
         ),
         "scheduler_runtime": dict(scheduler_runtime),
+        "monitor_runtime": dict(monitor_runtime),
     }
 
 
@@ -801,6 +804,7 @@ def dashboard_stats(
         f"UNION ALL SELECT pipeline_id, 'inv_total', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids GROUP BY pipeline_id "
         f"UNION ALL SELECT pipeline_id, 'inv_backlog', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'backlog' GROUP BY pipeline_id "
         f"UNION ALL SELECT pipeline_id, 'inv_new', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'new' GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'inv_inventory', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'inventory' GROUP BY pipeline_id "
         f"UNION ALL SELECT pipeline_id, 'inv_scheduled', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'scheduled' GROUP BY pipeline_id "
         f"UNION ALL SELECT pipeline_id, 'inv_published', {cast_sql} FROM douyin_videos WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
         f"UNION ALL SELECT pipeline_id, 'dest_count', {cast_sql} FROM destinations WHERE pipeline_id IN :pids GROUP BY pipeline_id "
@@ -811,7 +815,8 @@ def dashboard_stats(
         f"UNION ALL SELECT pipeline_id, 'pub_scheduled', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status IN ('scheduled', 'queued') GROUP BY pipeline_id "
         f"UNION ALL SELECT pipeline_id, 'pub_published', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status = 'published' GROUP BY pipeline_id "
         f"UNION ALL SELECT pipeline_id, 'today_vj', {cast_sql} FROM video_jobs WHERE pipeline_id IN :pids AND status = 'published' AND created_at >= :today GROUP BY pipeline_id "
-        f"UNION ALL SELECT pipeline_id, 'today_pub', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status = 'published' AND published_at >= :today GROUP BY pipeline_id"
+        f"UNION ALL SELECT pipeline_id, 'today_pub', {cast_sql} FROM publications WHERE pipeline_id IN :pids AND status = 'published' AND published_at >= :today GROUP BY pipeline_id "
+        f"UNION ALL SELECT pipeline_id, 'active_scans', {cast_sql} FROM douyin_scan_jobs WHERE pipeline_id IN :pids AND status IN ('pending', 'running') GROUP BY pipeline_id"
         f") AS agg"
     ).bindparams(_bindparam("pids", expanding=True))
     _t_agg = time.perf_counter()
@@ -853,6 +858,7 @@ def dashboard_stats(
             "inventory_total": _g(_pid, "inv_total"),
             "backlog": _g(_pid, "inv_backlog"),
             "new": _g(_pid, "inv_new"),
+            "inventory": _g(_pid, "inv_inventory"),
             "scheduled": _g(_pid, "inv_scheduled"),
             "published": _g(_pid, "inv_published"),
         }
@@ -887,10 +893,10 @@ def dashboard_stats(
         elif _connected_n <= 0:
             auto_reasons[pid] = "DESTINATION_NOT_CONNECTED"
         else:
-            inv_available = int(
-                inventory_stats.get(pid, {}).get("new", 0) or 0
-            ) + int(
-                inventory_stats.get(pid, {}).get("backlog", 0) or 0
+            inv_available = (
+                int(inventory_stats.get(pid, {}).get("new", 0) or 0)
+                + int(inventory_stats.get(pid, {}).get("backlog", 0) or 0)
+                + int(inventory_stats.get(pid, {}).get("inventory", 0) or 0)
             )
             if inv_available <= 0:
                 auto_reasons[pid] = "NO_AVAILABLE_INVENTORY"
@@ -916,6 +922,43 @@ def dashboard_stats(
 
     timings["db_ms"], t_mark = _ms_since(t0)
     timings["aggregate_ms"] = timings["db_ms"]
+
+    # Sources metadata query for scan observability
+    sources_by_pipeline: dict[str, list[dict]] = {}
+    try:
+        source_rows = db.execute(
+            select(
+                DouyinSource.pipeline_id,
+                DouyinSource.id,
+                DouyinSource.name,
+                DouyinSource.enabled,
+                DouyinSource.last_scan_at,
+                DouyinSource.next_scan_at,
+                DouyinSource.last_scan_stats,
+                DouyinSource.inventory_sync_status,
+                DouyinSource.inventory_sync_error,
+            ).where(DouyinSource.pipeline_id.in_(pipeline_ids))
+        ).all()
+        for sr in source_rows:
+            sources_by_pipeline.setdefault(str(sr[0]), []).append({
+                "id": str(sr[1]),
+                "name": sr[2],
+                "enabled": bool(sr[3]),
+                "last_scan_at": sr[4],
+                "next_scan_at": sr[5],
+                "last_scan_stats": sr[6],
+                "inventory_sync_status": sr[7],
+                "inventory_sync_error": sr[8],
+            })
+    except Exception:
+        logger.exception("Failed loading sources for dashboard scan observability")
+
+    is_monitor_online = bool(
+        getattr(settings, "monitor_enabled", True)
+        and monitor_task is not None
+        and not monitor_task.done()
+    )
+    cooldown_hours = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
 
     # Build result
     t_build = time.perf_counter()
@@ -969,9 +1012,108 @@ def dashboard_stats(
                 except (ValueError, AttributeError):
                     pass
 
-        inv_available = int(inv_stat.get("new", 0) or 0) + int(inv_stat.get("backlog", 0) or 0)
+        inv_available = (
+            int(inv_stat.get("new", 0) or 0)
+            + int(inv_stat.get("backlog", 0) or 0)
+            + int(inv_stat.get("inventory", 0) or 0)
+        )
         connected_count = connected_counts.get(pipeline_id, 0)
         auto_reason = auto_reasons.get(pipeline_id)
+
+        # Scan state calculation
+        p_sources = sources_by_pipeline.get(pipeline_id, [])
+        enabled_sources = [s for s in p_sources if s["enabled"]]
+        has_active_scan = _g(pipeline_id, "active_scans") > 0
+
+        last_scan_dt: datetime | None = None
+        next_scan_dt: datetime | None = None
+        latest_scan_stats: dict[str, Any] | None = None
+        source_error: str | None = None
+
+        for s in p_sources:
+            ls = s.get("last_scan_at")
+            if ls is not None:
+                if ls.tzinfo is None:
+                    ls = ls.replace(tzinfo=timezone.utc)
+                if last_scan_dt is None or ls > last_scan_dt:
+                    last_scan_dt = ls
+                    raw_stats = s.get("last_scan_stats")
+                    if raw_stats:
+                        try:
+                            latest_scan_stats = json.loads(raw_stats) if isinstance(raw_stats, str) else raw_stats
+                        except Exception:
+                            pass
+            ns = s.get("next_scan_at")
+            if ns is not None:
+                if isinstance(ns, str):
+                    try:
+                        ns = datetime.fromisoformat(ns)
+                    except Exception:
+                        ns = None
+                if ns and ns.tzinfo is None:
+                    ns = ns.replace(tzinfo=timezone.utc)
+                if ns and (next_scan_dt is None or ns < next_scan_dt):
+                    next_scan_dt = ns
+            if s.get("inventory_sync_status") == "failed" or s.get("inventory_sync_error"):
+                source_error = s.get("inventory_sync_error") or "Lỗi kết nối nguồn"
+
+        now_utc = _utcnow()
+        if last_scan_dt is not None:
+            eff_next = last_scan_dt + timedelta(hours=cooldown_hours)
+            if next_scan_dt is None or next_scan_dt < last_scan_dt:
+                next_scan_dt = eff_next
+
+        # Determine scan_status, scan_reason, scan_reason_detail
+        if not pipeline["enabled"] or not p_sources or not enabled_sources:
+            scan_status = "disabled"
+            scan_reason = "DISABLED"
+            scan_reason_detail = "Chưa bật pipeline hoặc chưa có nguồn Douyin"
+        elif has_active_scan:
+            scan_status = "scanning"
+            scan_reason = "SCAN_RUNNING"
+            scan_reason_detail = "Đang quét bổ sung video từ Douyin..."
+            next_scan_dt = now_utc
+        elif not is_monitor_online:
+            scan_status = "idle"
+            scan_reason = "WORKER_OFFLINE"
+            scan_reason_detail = "Monitor worker đang offline · Tạm dừng tự động quét"
+        elif source_error:
+            scan_status = "failed"
+            scan_reason = "API_ERROR"
+            scan_reason_detail = f"Lỗi quét: {source_error}"
+        elif last_scan_dt is not None and next_scan_dt is not None and now_utc < next_scan_dt:
+            scan_status = "cooldown"
+            rem = next_scan_dt - now_utc
+            rem_h = int(rem.total_seconds() // 3600)
+            rem_m = int((rem.total_seconds() % 3600) // 60)
+            time_str = f"{rem_h}h {rem_m}m" if rem_h > 0 else f"{rem_m}m"
+            next_clock = next_scan_dt.strftime("%H:%M")
+            new_found = (latest_scan_stats or {}).get("new", 0)
+            if new_found == 0:
+                scan_reason = "NO_NEW_VIDEOS"
+                scan_reason_detail = f"Nguồn chưa có video mới · Quét tiếp lúc {next_clock} (sau {time_str})"
+            else:
+                scan_reason = "COOLDOWN"
+                scan_reason_detail = f"Đang chờ cooldown · Quét tiếp lúc {next_clock} (sau {time_str})"
+        elif inv_available <= 0:
+            scan_status = "idle"
+            scan_reason = "READY_TO_SCAN"
+            scan_reason_detail = "Hết video khả dụng · Sẵn sàng quét trong chu kỳ tới"
+        else:
+            scan_status = "idle"
+            scan_reason = "INVENTORY_SUFFICIENT"
+            scan_reason_detail = "Kho video khả dụng còn đủ"
+
+        scan_result = None
+        if latest_scan_stats:
+            scan_result = {
+                "found": int(latest_scan_stats.get("found", 0) or 0),
+                "new": int(latest_scan_stats.get("new", 0) or 0),
+                "duplicates": int(latest_scan_stats.get("duplicates", 0) or 0),
+                "status": latest_scan_stats.get("status", "completed"),
+                "stop_reason": latest_scan_stats.get("stop_reason", ""),
+                "error": latest_scan_stats.get("error", None) or source_error,
+            }
 
         result.append({
             "id": pipeline_id,
@@ -1003,6 +1145,12 @@ def dashboard_stats(
             "inventory_available": int(inv_available),
             "connected_destinations": connected_count,
             "auto_reason": auto_reason,
+            "last_scan_at": last_scan_dt.isoformat() if last_scan_dt else None,
+            "next_scan_at": next_scan_dt.isoformat() if next_scan_dt else None,
+            "scan_status": scan_status,
+            "scan_result": scan_result,
+            "scan_reason": scan_reason,
+            "scan_reason_detail": scan_reason_detail,
         })
 
     timings["build_ms"] = int((time.perf_counter() - t_build) * 1000)
@@ -4137,6 +4285,117 @@ def pipeline_scheduler_status(
             ),
         })
 
+    # Scan observability
+    p_sources = list(
+        db.execute(
+            select(DouyinSource)
+            .where(DouyinSource.pipeline_id == pipeline_id)
+        ).scalars().all()
+    )
+    has_active_scan = bool(
+        db.execute(
+            select(DouyinScanJob.id)
+            .where(DouyinScanJob.pipeline_id == pipeline_id)
+            .where(DouyinScanJob.status.in_(["pending", "running"]))
+            .limit(1)
+        ).scalar_one_or_none()
+    )
+    is_monitor_online = bool(
+        getattr(settings, "monitor_enabled", True)
+        and monitor_task is not None
+        and not monitor_task.done()
+    )
+    cooldown_hours = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
+
+    last_scan_dt: datetime | None = None
+    next_scan_dt: datetime | None = None
+    latest_scan_stats: dict[str, Any] | None = None
+    source_error: str | None = None
+
+    for s in p_sources:
+        ls = s.last_scan_at
+        if ls is not None:
+            if ls.tzinfo is None:
+                ls = ls.replace(tzinfo=timezone.utc)
+            if last_scan_dt is None or ls > last_scan_dt:
+                last_scan_dt = ls
+                raw_stats = s.last_scan_stats
+                if raw_stats:
+                    try:
+                        latest_scan_stats = json.loads(raw_stats) if isinstance(raw_stats, str) else raw_stats
+                    except Exception:
+                        pass
+        ns = s.next_scan_at
+        if ns is not None:
+            if isinstance(ns, str):
+                try:
+                    ns = datetime.fromisoformat(ns)
+                except Exception:
+                    ns = None
+            if ns and ns.tzinfo is None:
+                ns = ns.replace(tzinfo=timezone.utc)
+            if ns and (next_scan_dt is None or ns < next_scan_dt):
+                next_scan_dt = ns
+        if s.inventory_sync_status == "failed" or s.inventory_sync_error:
+            source_error = s.inventory_sync_error or "Lỗi kết nối nguồn"
+
+    if last_scan_dt is not None:
+        eff_next = last_scan_dt + timedelta(hours=cooldown_hours)
+        if next_scan_dt is None or next_scan_dt < last_scan_dt:
+            next_scan_dt = eff_next
+
+    enabled_sources = [s for s in p_sources if s.enabled]
+    if not pipeline.enabled or not p_sources or not enabled_sources:
+        scan_status = "disabled"
+        scan_reason = "DISABLED"
+        scan_reason_detail = "Chưa bật pipeline hoặc chưa có nguồn Douyin"
+    elif has_active_scan:
+        scan_status = "scanning"
+        scan_reason = "SCAN_RUNNING"
+        scan_reason_detail = "Đang quét bổ sung video từ Douyin..."
+        next_scan_dt = now
+    elif not is_monitor_online:
+        scan_status = "idle"
+        scan_reason = "WORKER_OFFLINE"
+        scan_reason_detail = "Monitor worker đang offline · Tạm dừng tự động quét"
+    elif source_error:
+        scan_status = "failed"
+        scan_reason = "API_ERROR"
+        scan_reason_detail = f"Lỗi quét: {source_error}"
+    elif last_scan_dt is not None and next_scan_dt is not None and now < next_scan_dt:
+        scan_status = "cooldown"
+        rem = next_scan_dt - now
+        rem_h = int(rem.total_seconds() // 3600)
+        rem_m = int((rem.total_seconds() % 3600) // 60)
+        time_str = f"{rem_h}h {rem_m}m" if rem_h > 0 else f"{rem_m}m"
+        next_clock = next_scan_dt.strftime("%H:%M")
+        new_found = (latest_scan_stats or {}).get("new", 0)
+        if new_found == 0:
+            scan_reason = "NO_NEW_VIDEOS"
+            scan_reason_detail = f"Nguồn chưa có video mới · Quét tiếp lúc {next_clock} (sau {time_str})"
+        else:
+            scan_reason = "COOLDOWN"
+            scan_reason_detail = f"Đang chờ cooldown · Quét tiếp lúc {next_clock} (sau {time_str})"
+    elif int(inventory_available or 0) <= 0:
+        scan_status = "idle"
+        scan_reason = "READY_TO_SCAN"
+        scan_reason_detail = "Hết video khả dụng · Sẵn sàng quét trong chu kỳ tới"
+    else:
+        scan_status = "idle"
+        scan_reason = "INVENTORY_SUFFICIENT"
+        scan_reason_detail = "Kho video khả dụng còn đủ"
+
+    scan_result = None
+    if latest_scan_stats:
+        scan_result = {
+            "found": int(latest_scan_stats.get("found", 0) or 0),
+            "new": int(latest_scan_stats.get("new", 0) or 0),
+            "duplicates": int(latest_scan_stats.get("duplicates", 0) or 0),
+            "status": latest_scan_stats.get("status", "completed"),
+            "stop_reason": latest_scan_stats.get("stop_reason", ""),
+            "error": latest_scan_stats.get("error", None) or source_error,
+        }
+
     return {
         "enabled": bool(
             pipeline.enabled and getattr(
@@ -4154,6 +4413,12 @@ def pipeline_scheduler_status(
         "connected_destinations": len(connected),
         "destinations_total": len(destinations),
         "today": today_rows,
+        "last_scan_at": last_scan_dt.isoformat() if last_scan_dt else None,
+        "next_scan_at": next_scan_dt.isoformat() if next_scan_dt else None,
+        "scan_status": scan_status,
+        "scan_result": scan_result,
+        "scan_reason": scan_reason,
+        "scan_reason_detail": scan_reason_detail,
     }
 
 

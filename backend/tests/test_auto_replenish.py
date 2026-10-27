@@ -371,6 +371,147 @@ class TestAutoInventoryAndReplenish(unittest.TestCase):
             existing_yt_id = getattr(j, "youtube_video_id", None)
             self.assertEqual(existing_yt_id, "yt_existing_video_id")
 
+    def test_auto_replenish_when_available_zero_and_scan_on(self):
+        """When available inventory = 0 (all published or rejected) and SCAN ON, system schedules replenishment."""
+        with self.Session() as db:
+            # 26 published, 21 rejected, 1 held (exact JoyBeat situation: 0 available)
+            db.add(DouyinVideo(id="pub-1", pipeline_id="pipe-1", source_id="src-1", video_id="pub-1", url="https://example.com/pub1", status="published"))
+            db.add(DouyinVideo(id="rej-1", pipeline_id="pipe-1", source_id="src-1", video_id="rej-1", url="https://example.com/rej1", status="rejected"))
+            db.add(DouyinVideo(id="hld-1", pipeline_id="pipe-1", source_id="src-1", video_id="hld-1", url="https://example.com/hld1", status="held"))
+            
+            src = db.get(DouyinSource, "src-1")
+            src.enabled = True
+            # Cooldown has passed (scanned 8 hours ago)
+            src.last_scan_at = datetime.now(timezone.utc) - timedelta(hours=8)
+            db.commit()
+
+        with self.Session() as db:
+            available = monitor.count_available_inventory_for_source(db, "src-1")
+            self.assertEqual(available, 0)
+            
+            scheduled = monitor.check_and_schedule_replenishments(db)
+            self.assertEqual(len(scheduled), 1)
+
+            job = db.get(DouyinScanJob, scheduled[0])
+            self.assertEqual(job.scan_mode, "replenish")
+            self.assertEqual(job.status, "pending")
+
+    def test_legacy_rapidapi_quota_does_not_block_self_hosted(self):
+        """Legacy RapidAPI quota exhaustion must never block self-hosted scanning."""
+        with self.Session() as db:
+            src = db.get(DouyinSource, "src-1")
+            src.enabled = True
+            src.feed_provider = "self_hosted"
+            src.last_scan_at = datetime.now(timezone.utc) - timedelta(hours=10)
+            db.commit()
+
+        # Mock rapidapi quota as exhausted
+        from app import douyin_quota
+        with patch.object(douyin_quota, "can_spend", return_value=False):
+            # With self-hosted enabled, can_start_import returns True
+            with patch.object(settings, "douyin_self_hosted_enabled", True):
+                self.assertTrue(douyin_import.can_start_import())
+                
+                with self.Session() as db:
+                    scheduled = monitor.check_and_schedule_replenishments(db)
+                    self.assertEqual(len(scheduled), 1)
+
+    def test_cooldown_prevents_continuous_scan_when_no_new_videos(self):
+        """Cooldown strictly prevents continuous scanning when creator published no new videos."""
+        now = datetime.now(timezone.utc)
+        with self.Session() as db:
+            src = db.get(DouyinSource, "src-1")
+            src.enabled = True
+            # Last scan 2 hours ago: found 0 new videos
+            src.last_scan_at = now - timedelta(hours=2)
+            src.last_scan_stats = '{"new": 0, "found": 21, "status": "completed", "stop_reason": "KNOWN_REELS_REACHED"}'
+            db.commit()
+
+        with self.Session() as db:
+            # 2 hours < 6 hours cooldown -> must not schedule
+            scheduled = monitor.check_and_schedule_replenishments(db)
+            self.assertEqual(len(scheduled), 0)
+
+            # Ensure source.next_scan_at is set to last_scan_at + 6 hours
+            src = db.get(DouyinSource, "src-1")
+            self.assertIsNotNone(src.next_scan_at)
+            # next_scan_at should be approximately now + 4 hours
+            diff = (src.next_scan_at.replace(tzinfo=timezone.utc) - now).total_seconds()
+            self.assertGreater(diff, 3.5 * 3600)
+            self.assertLess(diff, 4.5 * 3600)
+
+    def test_stuck_scan_job_auto_recovery_and_execution(self):
+        """A scan job stuck in 'running' state is recovered and can then be executed successfully."""
+        with self.Session() as db:
+            job = douyin_import.queue_scan_job(db, "src-1", scan_mode="replenish")
+            job.status = "running"
+            job.locked_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+            job.locked_by = "dead_worker_99"
+            db.commit()
+            job_id = job.id
+
+        with self.Session() as db:
+            # Automatic recovery resets status to pending
+            recovered = douyin_import.recover_incomplete_scan_jobs(db, max_age_seconds=1800)
+            self.assertEqual(recovered, 1)
+            
+            j = db.get(DouyinScanJob, job_id)
+            self.assertEqual(j.status, "pending")
+            self.assertIsNone(j.locked_by)
+
+        # Worker can now claim and execute the recovered job
+        fake_page = {"items": [_video("vid_rec_1")], "has_more": False, "next_cursor": ""}
+        provider = _FakeProvider([fake_page])
+        with patch.object(douyin_import, "get_primary_provider", return_value=provider):
+            summary = douyin_import.claim_and_run_scan_job(job_id=job_id, worker_id="monitor_worker")
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["new"], 1)
+
+        with self.Session() as db:
+            j = db.get(DouyinScanJob, job_id)
+            self.assertEqual(j.status, "completed")
+
+    def test_dashboard_stats_includes_scan_observability(self):
+        """dashboard_stats endpoint returns last_scan_at, next_scan_at, scan_status, scan_result, scan_reason."""
+        from app.main import dashboard_stats
+        now = datetime.now(timezone.utc)
+
+        with self.Session() as db:
+            src = db.get(DouyinSource, "src-1")
+            src.enabled = True
+            src.last_scan_at = now - timedelta(hours=1)
+            src.last_scan_stats = '{"job_id": "job-1", "found": 21, "new": 0, "duplicates": 21, "status": "completed", "stop_reason": "KNOWN_REELS_REACHED"}'
+            db.commit()
+
+            # 1. When monitor is offline, correctly reports WORKER_OFFLINE
+            with patch("app.main.monitor_task", None):
+                res = dashboard_stats(db=db)
+                pipe_rows = [p for p in res["pipelines"] if p["id"] == "pipe-1"]
+                self.assertEqual(len(pipe_rows), 1)
+                p = pipe_rows[0]
+                self.assertEqual(p["scan_reason"], "WORKER_OFFLINE")
+                self.assertIn("offline", p["scan_reason_detail"])
+
+            # 2. When monitor is online, correctly reports cooldown & NO_NEW_VIDEOS
+            mock_task = MagicMock()
+            mock_task.done.return_value = False
+            with patch("app.main.monitor_task", mock_task), patch.object(settings, "monitor_enabled", True):
+                res = dashboard_stats(db=db)
+                pipe_rows = [p for p in res["pipelines"] if p["id"] == "pipe-1"]
+                p = pipe_rows[0]
+                self.assertIn("last_scan_at", p)
+                self.assertIsNotNone(p["last_scan_at"])
+                self.assertIn("next_scan_at", p)
+                self.assertIsNotNone(p["next_scan_at"])
+                self.assertEqual(p["scan_status"], "cooldown")
+                self.assertEqual(p["scan_reason"], "NO_NEW_VIDEOS")
+                self.assertIn("Nguồn chưa có video mới", p["scan_reason_detail"])
+                self.assertIsNotNone(p["scan_result"])
+                self.assertEqual(p["scan_result"]["new"], 0)
+                self.assertEqual(p["scan_result"]["found"], 21)
+                self.assertEqual(p["scan_result"]["stop_reason"], "KNOWN_REELS_REACHED")
+
 
 if __name__ == "__main__":
     unittest.main()

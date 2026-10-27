@@ -51,6 +51,19 @@ export interface DashboardPipelineRow {
   inventory_available?: number | null;
   connected_destinations?: number | null;
   auto_reason?: string | null;
+  last_scan_at?: string | null;
+  next_scan_at?: string | null;
+  scan_status?: "scanning" | "cooldown" | "idle" | "failed" | "disabled" | null;
+  scan_result?: {
+    found?: number;
+    new?: number;
+    duplicates?: number;
+    status?: string;
+    stop_reason?: string;
+    error?: string | null;
+  } | null;
+  scan_reason?: string | null;
+  scan_reason_detail?: string | null;
 }
 
 export interface PipelineStats {

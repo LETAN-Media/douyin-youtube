@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,6 +15,15 @@ from app.inventory import sync_source_inventory
 from app.models import DouyinSource, Pipeline
 
 logger = logging.getLogger("douyin-youtube-monitor")
+
+monitor_runtime: dict[str, Any] = {
+    "last_cycle_started_at": None,
+    "last_cycle_finished_at": None,
+    "last_cycle_ok": True,
+    "consecutive_failures": 0,
+    "last_error": None,
+    "last_replenish_count": 0,
+}
 
 
 def utcnow() -> datetime:
@@ -226,10 +235,6 @@ def check_and_schedule_replenishments(db: Session) -> list[str]:
     from app import douyin_import
     from app.models import DouyinScanJob
 
-    if not douyin_import.can_start_import():
-        logger.info("RapidAPI quota floor reached; auto-replenishment skipped this cycle")
-        return []
-
     now = utcnow()
     threshold = int(getattr(settings, "douyin_replenish_threshold", 3) or 3)
     min_interval_hours = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
@@ -241,9 +246,14 @@ def check_and_schedule_replenishments(db: Session) -> list[str]:
     ).scalars().all()
 
     scheduled: list[str] = []
+    sources_updated = False
     for source in sources:
         pipeline = db.get(Pipeline, source.pipeline_id) if source.pipeline_id else None
         if pipeline is None or not pipeline.enabled:
+            continue
+
+        # Check quota/provider gate per source (does not block self-hosted)
+        if not douyin_import.can_start_import(source=source):
             continue
 
         # Check if an active scan job already exists
@@ -261,6 +271,10 @@ def check_and_schedule_replenishments(db: Session) -> list[str]:
         if last_scan is not None:
             if last_scan.tzinfo is None:
                 last_scan = last_scan.replace(tzinfo=timezone.utc)
+            eff_next = last_scan + timedelta(hours=min_interval_hours)
+            if source.next_scan_at != eff_next:
+                source.next_scan_at = eff_next
+                sources_updated = True
             elapsed_hours = (now - last_scan).total_seconds() / 3600.0
             if elapsed_hours < min_interval_hours:
                 continue
@@ -281,7 +295,15 @@ def check_and_schedule_replenishments(db: Session) -> list[str]:
         if should_replenish:
             logger.info("Scheduling replenish scan for source %s: %s", source.id, reason)
             job = douyin_import.queue_scan_job(db, source.id, scan_mode="replenish")
+            source.next_scan_at = now
+            sources_updated = True
             scheduled.append(job.id)
+
+    if sources_updated:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
 
     return scheduled
 
@@ -290,67 +312,83 @@ def run_monitor_once() -> None:
     """Monitor cycle: handles auto-replenishment, scan jobs execution, and legacy auto-scan."""
     from app import douyin_import
 
-    # 1. Evaluate auto-replenishment
-    with SessionLocal() as db:
-        try:
-            scheduled_ids = check_and_schedule_replenishments(db)
-            if scheduled_ids:
-                logger.info("Scheduled %s replenishment scan job(s)", len(scheduled_ids))
-        except Exception:
-            logger.exception("Failed checking auto-replenishments")
-
-    # 2. Claim and run pending scan jobs up to max concurrency
-    max_concurrent = max(1, int(getattr(settings, "douyin_scan_max_concurrent_sources", 1) or 1))
-    for _ in range(max_concurrent):
-        try:
-            summary = douyin_import.claim_and_run_scan_job(worker_id="monitor_worker")
-            if summary is None:
-                break
-            logger.info("Executed scan job from queue: %s", summary)
-        except Exception:
-            logger.exception("Failed executing queued scan job")
-            break
-
-    # 3. Legacy auto-scan if enabled
-    if not getattr(settings, "douyin_auto_scan_enabled", False):
-        return
-
     now = utcnow()
-    with SessionLocal() as db:
-        sources = db.execute(
-            select(DouyinSource)
-            .where(DouyinSource.enabled == True)  # noqa: E712
-            .order_by(DouyinSource.created_at.asc())
-        ).scalars().all()
-        due_ids = [s.id for s in sources if _source_is_due(s, now)]
+    monitor_runtime["last_cycle_started_at"] = now.isoformat()
 
     try:
-        concurrency = int(
-            getattr(settings, "douyin_scan_concurrency", 2) or 2
-        )
-    except (TypeError, ValueError):
-        concurrency = 2
-    concurrency = max(1, min(concurrency, 4))
-
-    logger.info(
-        "Monitoring %s enabled sources (%s due, concurrency=%s)",
-        len(sources), len(due_ids), concurrency,
-    )
-
-    if not due_ids:
-        return
-
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=concurrency
-    ) as pool:
-        futures = [pool.submit(_scan_one_source, sid) for sid in due_ids]
-        for fut in concurrent.futures.as_completed(futures):
+        # 0. Crash recovery: release stale locked scan jobs if any crashed worker left them
+        with SessionLocal() as db:
             try:
-                fut.result()
+                douyin_import.recover_incomplete_scan_jobs(db, max_age_seconds=1800)
             except Exception:
-                logger.exception("Monitor scan task failed")
+                logger.exception("Failed recovering incomplete scan jobs")
+
+        # 1. Evaluate auto-replenishment
+        scheduled_count = 0
+        with SessionLocal() as db:
+            try:
+                scheduled_ids = check_and_schedule_replenishments(db)
+                scheduled_count = len(scheduled_ids)
+                if scheduled_ids:
+                    logger.info("Scheduled %s replenishment scan job(s)", scheduled_count)
+            except Exception:
+                logger.exception("Failed checking auto-replenishments")
+
+        monitor_runtime["last_replenish_count"] = scheduled_count
+
+        # 2. Claim and run pending scan jobs up to max concurrency
+        max_concurrent = max(1, int(getattr(settings, "douyin_scan_max_concurrent_sources", 1) or 1))
+        for _ in range(max_concurrent):
+            try:
+                summary = douyin_import.claim_and_run_scan_job(worker_id="monitor_worker")
+                if summary is None:
+                    break
+                logger.info("Executed scan job from queue: %s", summary)
+            except Exception:
+                logger.exception("Failed executing queued scan job")
+                break
+
+        # 3. Legacy auto-scan if enabled
+        if getattr(settings, "douyin_auto_scan_enabled", False):
+            now_scan = utcnow()
+            with SessionLocal() as db:
+                sources = db.execute(
+                    select(DouyinSource)
+                    .where(DouyinSource.enabled == True)  # noqa: E712
+                    .order_by(DouyinSource.created_at.asc())
+                ).scalars().all()
+                due_ids = [s.id for s in sources if _source_is_due(s, now_scan)]
+
+            try:
+                concurrency = int(
+                    getattr(settings, "douyin_scan_concurrency", 2) or 2
+                )
+            except (TypeError, ValueError):
+                concurrency = 2
+            concurrency = max(1, min(concurrency, 4))
+
+            if due_ids:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=concurrency
+                ) as pool:
+                    futures = [pool.submit(_scan_one_source, sid) for sid in due_ids]
+                    for fut in concurrent.futures.as_completed(futures):
+                        try:
+                            fut.result()
+                        except Exception:
+                            logger.exception("Monitor scan task failed")
+
+        monitor_runtime["last_cycle_finished_at"] = utcnow().isoformat()
+        monitor_runtime["last_cycle_ok"] = True
+        monitor_runtime["consecutive_failures"] = 0
+        monitor_runtime["last_error"] = None
+    except Exception as exc:
+        monitor_runtime["last_cycle_finished_at"] = utcnow().isoformat()
+        monitor_runtime["last_cycle_ok"] = False
+        monitor_runtime["consecutive_failures"] = int(monitor_runtime.get("consecutive_failures", 0)) + 1
+        monitor_runtime["last_error"] = str(exc)[:500]
+        raise
 
 
 async def monitor_loop() -> None:
