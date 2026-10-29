@@ -153,6 +153,17 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _format_iso_utc(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
+
+
+
 worker_task: asyncio.Task | None = None
 monitor_task: asyncio.Task | None = None
 scheduler_task: asyncio.Task | None = None
@@ -1029,6 +1040,8 @@ def dashboard_stats(
         next_scan_dt: datetime | None = None
         latest_scan_stats: dict[str, Any] | None = None
         source_error: str | None = None
+        source_provider_status: str = "ok"
+        source_feed_provider: str | None = None
 
         for s in p_sources:
             ls = s.get("last_scan_at")
@@ -1056,11 +1069,15 @@ def dashboard_stats(
                     next_scan_dt = ns
             if s.get("inventory_sync_status") == "failed" or s.get("inventory_sync_error"):
                 source_error = s.get("inventory_sync_error") or "Lỗi kết nối nguồn"
+            if s.get("provider_status") and s.get("provider_status") != "ok":
+                source_provider_status = s.get("provider_status")
+            if s.get("feed_provider"):
+                source_feed_provider = s.get("feed_provider")
 
         now_utc = _utcnow()
         if last_scan_dt is not None:
             eff_next = last_scan_dt + timedelta(hours=cooldown_hours)
-            if next_scan_dt is None or next_scan_dt < last_scan_dt:
+            if next_scan_dt is None or (next_scan_dt < last_scan_dt and not source_error):
                 next_scan_dt = eff_next
 
         # Determine scan_status, scan_reason, scan_reason_detail
@@ -1078,9 +1095,14 @@ def dashboard_stats(
             scan_reason = "WORKER_OFFLINE"
             scan_reason_detail = "Monitor worker đang offline · Tạm dừng tự động quét"
         elif source_error:
+            from app.douyin_self_hosted import shorten_provider_error
             scan_status = "failed"
             scan_reason = "API_ERROR"
-            scan_reason_detail = f"Lỗi quét: {source_error}"
+            short_err = shorten_provider_error(source_error)
+            scan_reason_detail = f"Lỗi quét: {short_err} · Tự động thử lại"
+            source_provider_status = "provider_error"
+            if next_scan_dt is not None and next_scan_dt <= now_utc:
+                next_scan_dt = now_utc
         elif last_scan_dt is not None and next_scan_dt is not None and now_utc < next_scan_dt:
             scan_status = "cooldown"
             rem = next_scan_dt - now_utc
@@ -1145,12 +1167,14 @@ def dashboard_stats(
             "inventory_available": int(inv_available),
             "connected_destinations": connected_count,
             "auto_reason": auto_reason,
-            "last_scan_at": last_scan_dt.isoformat() if last_scan_dt else None,
-            "next_scan_at": next_scan_dt.isoformat() if next_scan_dt else None,
+            "last_scan_at": _format_iso_utc(last_scan_dt),
+            "next_scan_at": _format_iso_utc(next_scan_dt),
             "scan_status": scan_status,
             "scan_result": scan_result,
             "scan_reason": scan_reason,
             "scan_reason_detail": scan_reason_detail,
+            "provider_status": source_provider_status,
+            "provider_id": source_feed_provider or "self_hosted",
         })
 
     timings["build_ms"] = int((time.perf_counter() - t_build) * 1000)
@@ -4311,6 +4335,8 @@ def pipeline_scheduler_status(
     next_scan_dt: datetime | None = None
     latest_scan_stats: dict[str, Any] | None = None
     source_error: str | None = None
+    source_provider_status: str = "ok"
+    source_feed_provider: str | None = None
 
     for s in p_sources:
         ls = s.last_scan_at
@@ -4338,10 +4364,15 @@ def pipeline_scheduler_status(
                 next_scan_dt = ns
         if s.inventory_sync_status == "failed" or s.inventory_sync_error:
             source_error = s.inventory_sync_error or "Lỗi kết nối nguồn"
+        prov_stat = getattr(s, "provider_status", None)
+        if prov_stat and prov_stat != "ok":
+            source_provider_status = prov_stat
+        if getattr(s, "feed_provider", None):
+            source_feed_provider = s.feed_provider
 
     if last_scan_dt is not None:
         eff_next = last_scan_dt + timedelta(hours=cooldown_hours)
-        if next_scan_dt is None or next_scan_dt < last_scan_dt:
+        if next_scan_dt is None or (next_scan_dt < last_scan_dt and not source_error):
             next_scan_dt = eff_next
 
     enabled_sources = [s for s in p_sources if s.enabled]
@@ -4359,9 +4390,14 @@ def pipeline_scheduler_status(
         scan_reason = "WORKER_OFFLINE"
         scan_reason_detail = "Monitor worker đang offline · Tạm dừng tự động quét"
     elif source_error:
+        from app.douyin_self_hosted import shorten_provider_error
         scan_status = "failed"
         scan_reason = "API_ERROR"
-        scan_reason_detail = f"Lỗi quét: {source_error}"
+        short_err = shorten_provider_error(source_error)
+        scan_reason_detail = f"Lỗi quét: {short_err} · Tự động thử lại"
+        source_provider_status = "provider_error"
+        if next_scan_dt is not None and next_scan_dt <= now:
+            next_scan_dt = now
     elif last_scan_dt is not None and next_scan_dt is not None and now < next_scan_dt:
         scan_status = "cooldown"
         rem = next_scan_dt - now
@@ -4404,21 +4440,21 @@ def pipeline_scheduler_status(
             )
         ),
         "pipeline_enabled": bool(pipeline.enabled),
-        "last_cycle_at": last_cycle.isoformat() if last_cycle else None,
-        "last_job_created_at": (
-            last_job_created.isoformat() if last_job_created else None
-        ),
+        "last_cycle_at": _format_iso_utc(last_cycle),
+        "last_job_created_at": _format_iso_utc(last_job_created),
         "next_slots": next_slots,
         "inventory_available": int(inventory_available or 0),
         "connected_destinations": len(connected),
         "destinations_total": len(destinations),
         "today": today_rows,
-        "last_scan_at": last_scan_dt.isoformat() if last_scan_dt else None,
-        "next_scan_at": next_scan_dt.isoformat() if next_scan_dt else None,
+        "last_scan_at": _format_iso_utc(last_scan_dt),
+        "next_scan_at": _format_iso_utc(next_scan_dt),
         "scan_status": scan_status,
         "scan_result": scan_result,
         "scan_reason": scan_reason,
         "scan_reason_detail": scan_reason_detail,
+        "provider_status": source_provider_status,
+        "provider_id": source_feed_provider or "self_hosted",
     }
 
 

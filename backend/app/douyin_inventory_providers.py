@@ -451,17 +451,19 @@ class SelfHostedDouyinProvider(DouyinInventoryProvider):
         if not target:
             raise DouyinInventoryError("DOUYIN_SOURCE_INVALID: empty secUid")
 
-        from app.douyin_self_hosted import DouyinSelfHostedClient
+        from app.douyin_self_hosted import DouyinSelfHostedClient, DouyinSelfHostedError, shorten_provider_error
 
         client = DouyinSelfHostedClient()
         try:
             items = client.fetch_video_items(target)
+        except DouyinSelfHostedError as exc:
+            raise DouyinInventoryError(f"PROVIDER_ERROR: {exc.short_message}") from exc
         except Exception as exc:
             if "DOUYIN_SELF_HOSTED_ENABLED" in str(exc):
                 raise DouyinInventoryError("PROVIDER_DISABLED: self-hosted API disabled")
             if "NO_KEY" in str(exc):
                 raise DouyinInventoryError("PROVIDER_DISABLED: self-hosted API key not configured")
-            raise DouyinInventoryError(f"PROVIDER_ERROR: {exc}")
+            raise DouyinInventoryError(f"PROVIDER_ERROR: {shorten_provider_error(str(exc))}") from exc
 
         normalized = [self._normalize_item(item) for item in items]
 
@@ -1639,6 +1641,23 @@ def discover_profile_videos(
                 videos = videos[:30]
             return videos, provider_name
         except Exception as exc:
+            # Fallback between SelfHosted and RapidAPI Pool when one fails
+            if isinstance(primary, SelfHostedDouyinProvider):
+                try:
+                    from app.douyin_quota import can_spend
+                    if can_spend(1):
+                        pool_provider = RapidApiPoolProvider()
+                        if pool_provider.has_available_provider():
+                            logger.info("Self-hosted primary failed (%s); falling back to RapidAPI pool", str(exc)[:80])
+                            videos, provider_name = pool_provider.fetch_all_with_provider(
+                                profile_url, sec_uid, source_id, cookie_jar
+                            )
+                            if not full:
+                                videos = videos[:30]
+                            return videos, provider_name
+                except Exception as pool_exc:
+                    logger.warning("RapidAPI pool fallback after self-hosted failure also failed: %s", str(pool_exc)[:80])
+
             if not getattr(settings, "douyin_creator_fallbacks_enabled", False):
                 raise
             # Log which provider failed

@@ -180,6 +180,7 @@ class TestDouyinSelfHostedIntegration(unittest.TestCase):
 
         with (
             patch.object(douyin_import, "SessionLocal", self.Session),
+            patch("app.douyin_quota.SessionLocal", self.Session),
             patch.object(douyin_import, "_provider", side_effect=rapidapi_error),
             patch("app.douyin_self_hosted.DouyinSelfHostedClient.fetch_video_items", return_value=mock_self_hosted_items),
         ):

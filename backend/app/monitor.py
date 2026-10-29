@@ -268,16 +268,24 @@ def check_and_schedule_replenishments(db: Session) -> list[str]:
 
         # Cooldown check
         last_scan = source.last_scan_at or source.last_refresh_at
+        is_failed = (source.inventory_sync_status == "failed" or source.provider_status != "ok")
         if last_scan is not None:
             if last_scan.tzinfo is None:
                 last_scan = last_scan.replace(tzinfo=timezone.utc)
-            eff_next = last_scan + timedelta(hours=min_interval_hours)
-            if source.next_scan_at != eff_next:
-                source.next_scan_at = eff_next
-                sources_updated = True
-            elapsed_hours = (now - last_scan).total_seconds() / 3600.0
-            if elapsed_hours < min_interval_hours:
-                continue
+            if is_failed:
+                eff_next = source.next_scan_at or (last_scan + timedelta(minutes=5))
+                if eff_next.tzinfo is None:
+                    eff_next = eff_next.replace(tzinfo=timezone.utc)
+                if now < eff_next:
+                    continue
+            else:
+                eff_next = last_scan + timedelta(hours=min_interval_hours)
+                if source.next_scan_at != eff_next:
+                    source.next_scan_at = eff_next
+                    sources_updated = True
+                elapsed_hours = (now - last_scan).total_seconds() / 3600.0
+                if elapsed_hours < min_interval_hours:
+                    continue
 
         available = count_available_inventory_for_source(db, source.id)
         should_replenish = False

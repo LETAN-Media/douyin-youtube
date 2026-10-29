@@ -37,6 +37,7 @@ from app.douyin_inventory_providers import (
     get_default_provider_id,
     get_primary_provider,
 )
+from app.douyin_self_hosted import shorten_provider_error
 from app.integrations.rapidapi.errors import RapidApiPoolError
 from app.inventory import _upsert_videos
 from app.models import DouyinScanJob, DouyinSource, DouyinVideo, Pipeline
@@ -62,6 +63,19 @@ PROVIDER_OK = "ok"
 PROVIDER_QUOTA = "quota_exhausted"
 PROVIDER_ERROR = "provider_error"
 PROVIDER_INVALID = "invalid"
+
+MAX_JOB_RETRIES = 3
+
+
+def _is_retryable_error(exc: Exception | str) -> bool:
+    text = str(exc).lower()
+    retryable_keywords = (
+        "502", "503", "504", "500", "429", "timeout", "timed out",
+        "offline", "connection refused", "bad gateway", "network",
+        "temporary", "reset by peer", "broken pipe",
+    )
+    return any(k in text for k in retryable_keywords)
+
 
 #: Sources with an import/refresh in flight *in this process*, so two button
 #: clicks cannot spend the same page twice.
@@ -334,6 +348,7 @@ def _finish(
     provider_id: str | None = None,
     scan_stats: dict[str, Any] | None = None,
 ) -> None:
+    clean_detail = shorten_provider_error(detail) if detail else None
     with SessionLocal.begin() as db:
         source = db.get(DouyinSource, source_id)
         if source is None:
@@ -344,10 +359,10 @@ def _finish(
                 "failed" if status == STATUS_FAILED else status
             )
         )
-        source.inventory_sync_error = detail
-        source.initial_import_last_error = detail
+        source.inventory_sync_error = clean_detail
+        source.initial_import_last_error = clean_detail
         source.provider_status = provider_status
-        source.provider_status_detail = detail
+        source.provider_status_detail = clean_detail
         if provider_id:
             source.feed_provider = provider_id
         if scan_stats is not None:
@@ -360,6 +375,8 @@ def _finish(
             source.last_scan_at = utcnow()
             cooldown_h = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
             source.next_scan_at = source.last_scan_at + timedelta(hours=cooldown_h)
+        elif status == STATUS_FAILED and source.next_scan_at is None:
+            source.next_scan_at = utcnow() + timedelta(minutes=15)
 
 
 def queue_scan_job(
@@ -456,6 +473,7 @@ def claim_and_run_scan_job(
 ) -> dict[str, Any] | None:
     """Claim a pending scan job and execute it."""
     claimed_id: str | None = None
+    now = utcnow()
     with SessionLocal.begin() as db:
         if job_id is not None:
             job = db.get(DouyinScanJob, job_id)
@@ -465,6 +483,10 @@ def claim_and_run_scan_job(
             job = db.execute(
                 select(DouyinScanJob)
                 .where(DouyinScanJob.status == STATUS_PENDING)
+                .where(
+                    (DouyinScanJob.next_retry_at.is_(None)) |
+                    (DouyinScanJob.next_retry_at <= now)
+                )
                 .order_by(DouyinScanJob.created_at.asc())
                 .limit(1)
             ).scalar_one_or_none()
@@ -613,6 +635,135 @@ def _execute_self_hosted_fallback(
         videos=len(items),
         provider="douyin_self_hosted",
     )
+
+
+def _execute_rapidapi_fallback(
+    *,
+    job_id: str | None,
+    source_id: str,
+    pipeline_id: str,
+    sec_uid: str,
+    scan_mode: str,
+    is_backlog: bool,
+    existing_error: str | None = None,
+) -> dict[str, Any] | None:
+    """Fallback scanner using RapidAPI pool when self-hosted API fails."""
+    try:
+        from app.douyin_quota import can_spend
+        from app.integrations.rapidapi.pool import get_rapidapi_pool
+        if not can_spend(1):
+            return None
+        pool = get_rapidapi_pool()
+        if not pool.has_available_provider():
+            return None
+    except Exception as exc:
+        logger.debug("RapidAPI fallback check failed: %s", exc)
+        return None
+
+    if not sec_uid:
+        return None
+
+    logger.info(
+        "Self-hosted failed (%s); attempting RapidAPI fallback for source=%s sec_uid=%s",
+        (existing_error or "")[:120],
+        source_id,
+        sec_uid,
+    )
+
+    try:
+        session = pool.open_scan(sec_uid)
+        page = session.fetch_page(None)
+        items = list(page.get("items") or [])
+        provider_id = getattr(session, "provider_id", "rapidapi_justone")
+    except Exception as exc:
+        logger.warning("RapidAPI fallback also failed for source=%s: %s", source_id, exc)
+        return None
+
+    new_count, updated_count = _persist_page(
+        source_id=source_id,
+        items=items,
+        backfill=is_backlog,
+        cursor=None,
+        provider_id=provider_id,
+    )
+
+    status = STATUS_COMPLETED
+    stop_reason = STOP_REASON_END_OF_RESULTS
+    duplicate_count = max(0, len(items) - new_count)
+
+    scan_stats = {
+        "job_id": job_id,
+        "scan_mode": scan_mode,
+        "provider": provider_id,
+        "pages": 1,
+        "found": len(items),
+        "new": new_count,
+        "duplicates": duplicate_count,
+        "status": status,
+        "stop_reason": stop_reason,
+    }
+
+    if job_id:
+        with SessionLocal.begin() as db:
+            j = db.get(DouyinScanJob, job_id)
+            if j:
+                j.status = status
+                j.stop_reason = stop_reason
+                j.provider_id = provider_id
+                j.pages_scanned = 1
+                j.videos_discovered = len(items)
+                j.videos_new = new_count
+                j.videos_duplicate = duplicate_count
+                j.error = None
+                j.completed_at = utcnow()
+                j.locked_at = None
+                j.locked_by = None
+
+    if is_backlog:
+        _finish(
+            source_id,
+            status,
+            provider_status=PROVIDER_OK,
+            detail=f"Discovered {len(items)} videos ({new_count} new) via RapidAPI fallback",
+            completed=True,
+            provider_id=provider_id,
+            scan_stats=scan_stats,
+        )
+    else:
+        with SessionLocal.begin() as db:
+            source = db.get(DouyinSource, source_id)
+            if source is not None:
+                source.last_refresh_at = utcnow()
+                source.last_scan_at = utcnow()
+                cooldown_h = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
+                source.next_scan_at = source.last_scan_at + timedelta(hours=cooldown_h)
+                source.provider_status = PROVIDER_OK
+                source.provider_status_detail = f"Discovered {len(items)} videos ({new_count} new) via RapidAPI fallback"
+                source.feed_provider = provider_id
+                source.last_scan_stats = json.dumps(scan_stats, ensure_ascii=False)
+                source.inventory_sync_status = "completed"
+                source.inventory_sync_error = None
+                source.inventory_synced_at = utcnow()
+                source.last_checked_at = utcnow()
+
+    logger.info(
+        "RapidAPI fallback completed for source=%s: found=%d new=%d duplicates=%d",
+        source_id,
+        len(items),
+        new_count,
+        duplicate_count,
+    )
+
+    return _summary(
+        source_id,
+        status,
+        new=new_count,
+        updated=updated_count,
+        pages=1,
+        videos=len(items),
+        provider=provider_id,
+    )
+
 
 
 def scan_source_self_hosted(source_id: str, max_count: int | None = None) -> dict[str, Any]:
@@ -901,6 +1052,19 @@ def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
                 break
             except Exception as exc:
                 text = str(exc)
+                if pages == 0 and "self_hosted" in getattr(page_source, "provider_id", ""):
+                    fallback_res = _execute_rapidapi_fallback(
+                        job_id=job_id,
+                        source_id=source_id,
+                        pipeline_id=pipeline_id,
+                        sec_uid=sec_uid,
+                        scan_mode=scan_mode,
+                        is_backlog=is_backlog,
+                        existing_error=text,
+                    )
+                    if fallback_res is not None:
+                        return fallback_res
+
                 if uses_quota and (
                     "QUOTA" in text.upper()
                     or isinstance(exc, douyin_quota.QuotaExhausted)
@@ -1012,69 +1176,99 @@ def execute_scan_job(job_id: str, worker_id: str = "main") -> dict[str, Any]:
                 stop_reason = STOP_REASON_MAX_PAGES_REACHED
                 provider_status = PROVIDER_OK
 
+        will_retry = False
+        next_retry_at = None
+        short_err = shorten_provider_error(error) if error else None
+
+        if status == STATUS_FAILED and error and _is_retryable_error(error):
+            with SessionLocal() as check_db:
+                check_j = check_db.get(DouyinScanJob, job_id)
+                current_retry = int(check_j.retry_count or 0) if check_j else 0
+            if current_retry < MAX_JOB_RETRIES:
+                current_retry += 1
+                backoff_mins = [2, 5, 15][min(current_retry - 1, 2)]
+                next_retry_at = utcnow() + timedelta(minutes=backoff_mins)
+                will_retry = True
+
         # Persist final DouyinScanJob state
         with SessionLocal.begin() as db:
             j = db.get(DouyinScanJob, job_id)
             if j:
-                j.status = status
-                j.stop_reason = stop_reason
-                j.error = error
-                j.completed_at = utcnow()
-                j.locked_at = None
-                j.locked_by = None
+                if will_retry:
+                    j.status = STATUS_PENDING
+                    j.retry_count = current_retry
+                    j.next_retry_at = next_retry_at
+                    j.stop_reason = stop_reason
+                    j.error = short_err
+                    j.completed_at = None
+                    j.locked_at = None
+                    j.locked_by = None
+                else:
+                    j.status = status
+                    j.stop_reason = stop_reason
+                    j.error = short_err
+                    j.completed_at = utcnow()
+                    j.locked_at = None
+                    j.locked_by = None
                 j.pages_scanned = pages
                 j.videos_discovered = found_total
                 j.videos_new = new_total
                 j.videos_duplicate = max(0, found_total - new_total)
                 j.cursor = cursor if status != STATUS_COMPLETED else None
-                j.provider_id = page_source.provider_id
+                j.provider_id = getattr(page_source, "provider_id", "self_hosted")
 
         scan_stats = {
             "job_id": job_id,
             "scan_mode": scan_mode,
-            "provider": page_source.provider_id,
+            "provider": getattr(page_source, "provider_id", "self_hosted"),
             "pages": pages,
             "found": found_total,
             "new": new_total,
             "duplicates": max(0, found_total - new_total),
-            "status": status,
+            "status": STATUS_PENDING if will_retry else status,
             "stop_reason": stop_reason,
+            "error": short_err,
         }
 
         completed = (status == STATUS_COMPLETED)
         if is_backlog:
             _finish(
                 source_id,
-                status,
+                STATUS_PENDING if will_retry else status,
                 provider_status=provider_status,
-                detail=error,
+                detail=short_err,
                 completed=completed,
-                provider_id=page_source.provider_id,
+                provider_id=getattr(page_source, "provider_id", "self_hosted"),
                 scan_stats=scan_stats,
             )
         else:
             with SessionLocal.begin() as db:
                 source = db.get(DouyinSource, source_id)
                 if source is not None:
-                    source.last_refresh_at = utcnow()
-                    source.last_scan_at = utcnow()
-                    cooldown_h = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
-                    source.next_scan_at = source.last_scan_at + timedelta(hours=cooldown_h)
                     source.provider_status = provider_status
-                    source.provider_status_detail = error
-                    source.feed_provider = page_source.provider_id
+                    source.provider_status_detail = short_err
+                    source.feed_provider = getattr(page_source, "provider_id", "self_hosted")
                     source.last_scan_stats = json.dumps(scan_stats, ensure_ascii=False)
-                    if status == STATUS_COMPLETED:
+                    if completed:
+                        source.last_refresh_at = utcnow()
+                        source.last_scan_at = utcnow()
+                        cooldown_h = float(getattr(settings, "douyin_refresh_min_interval_hours", 6.0) or 6.0)
+                        source.next_scan_at = source.last_scan_at + timedelta(hours=cooldown_h)
                         source.inventory_sync_status = "completed"
                         source.inventory_sync_error = None
                         source.inventory_synced_at = utcnow()
                         source.last_checked_at = utcnow()
+                    elif will_retry:
+                        source.inventory_sync_status = "failed"
+                        source.inventory_sync_error = short_err
+                        source.next_scan_at = next_retry_at
                     elif status in (STATUS_PAUSED_QUOTA, STATUS_PAUSED):
                         source.inventory_sync_status = status
-                        source.inventory_sync_error = error
+                        source.inventory_sync_error = short_err
                     else:
                         source.inventory_sync_status = "failed"
-                        source.inventory_sync_error = error
+                        source.inventory_sync_error = short_err
+                        source.next_scan_at = utcnow() + timedelta(minutes=15)
 
         return _summary(
             source_id,

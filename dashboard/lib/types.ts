@@ -64,6 +64,8 @@ export interface DashboardPipelineRow {
   } | null;
   scan_reason?: string | null;
   scan_reason_detail?: string | null;
+  provider_status?: string | null;
+  provider_id?: string | null;
 }
 
 export interface PipelineStats {

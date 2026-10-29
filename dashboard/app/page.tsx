@@ -361,7 +361,11 @@ async function DashboardView() {
                         <div className="mt-1.5">
                           <ProgressBar value={done} tone={p.failed > 0 ? "amber" : "indigo"} />
                         </div>
-                        {noInventory && p.enabled ? (
+                        {p.scan_status === "failed" && p.scan_reason_detail ? (
+                          <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] font-bold text-rose-700">
+                            {p.scan_reason_detail}
+                          </p>
+                        ) : noInventory && p.enabled ? (
                           <p
                             className={`mt-2 rounded-lg px-2.5 py-1.5 text-[11px] font-bold ${
                               p.scan_status === "scanning"
@@ -382,7 +386,7 @@ async function DashboardView() {
                         ) : null}
 
                         {(p.sources_count ?? 0) > 0 && (
-                          <div className="mt-2.5 grid grid-cols-3 gap-1 rounded-lg bg-slate-50 px-2.5 py-2 text-[11px]">
+                          <div className="mt-2.5 grid grid-cols-4 gap-1 rounded-lg bg-slate-50 px-2.5 py-2 text-[11px]">
                             <div>
                               <span className="block font-semibold text-slate-400">Quét lần cuối</span>
                               <span className="font-bold text-slate-700">{p.last_scan_at ? formatTime(p.last_scan_at) : "—"}</span>
@@ -392,11 +396,31 @@ async function DashboardView() {
                               <span className="font-bold text-slate-700">
                                 {p.scan_status === "scanning" ? (
                                   <span className="text-sky-600 animate-pulse">Đang quét...</span>
+                                ) : p.scan_status === "failed" ? (
+                                  <span className="text-amber-600">{p.next_scan_at ? formatTime(p.next_scan_at) : "Sắp thử lại"}</span>
                                 ) : p.next_scan_at ? (
                                   formatTime(p.next_scan_at)
                                 ) : (
                                   "—"
                                 )}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="block font-semibold text-slate-400">Provider</span>
+                              <span
+                                className={`font-bold ${
+                                  p.provider_status === "provider_error"
+                                    ? "text-rose-600"
+                                    : p.provider_status === "rate_limited"
+                                      ? "text-amber-600"
+                                      : "text-emerald-600"
+                                }`}
+                              >
+                                {p.provider_status === "provider_error"
+                                  ? "Lỗi kết nối"
+                                  : p.provider_status === "rate_limited"
+                                    ? "Hết quota"
+                                    : "Sẵn sàng"}
                               </span>
                             </div>
                             <div>
