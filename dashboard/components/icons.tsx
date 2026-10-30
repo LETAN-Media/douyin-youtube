@@ -248,4 +248,19 @@ export const IconVideo = (p: P) => (
   </Svg>
 );
 
+export const IconYoutube = (p: P) => (
+  <Svg {...p}>
+    <path d="M2 8.5c0-4.7 3.8 0-8.5 0s-8.5-4.7-8.5 0c0 4.7 3.8 9.4 8.5 9.4s8.5-4.7 8.5-9.4Z" />
+    <path d="m13 10L9.5 12l3.5 2z" />
+  </Svg>
+);
+
+export const IconYoutubeToFacebook = (p: P) => (
+  <Svg {...p}>
+    <path d="M3 8.5c0-2.2 1.8-4 4-4h8c2.2 0 4 1.8 4 4v7c0 2.2-1.8 4-4 4H7c-2.2 0-4-1.8-4-4z" />
+    <path d="m12 8v4l2 2M8 12h4" />
+    <circle cx="9" cy="11" r="1" />
+  </Svg>
+);
+
 
