@@ -325,7 +325,6 @@ export function PipelineFlowGraph({
 
     if (activeRs.length > 0) {
       if (!isLit) return { look: { kind: "idle" }, dimmed: true };
-      // Prefer the color of a route inside the current selection highlight.
       const pick = activeRs.find((r) => visibleRoutes.includes(r)) ?? activeRs[0];
       const idx = colorOf.get(pick.key) ?? 0;
       return { look: { kind: "active", gradientId: PALETTE[idx] }, dimmed: false };
@@ -335,10 +334,47 @@ export function PipelineFlowGraph({
       return { look: { kind: "failed" }, dimmed: false };
     }
     if (fadedHere) return { look: { kind: "faded" }, dimmed: !!effSel };
-    // Idle: faint gray while the graph has activity, full gray when all idle.
+    if (!effSel && routes.length === 0 && canShowAmbient(id)) {
+      const phase = computePhase(id);
+      return { look: { kind: "ambient", gradientId: "fAmbient", phase }, dimmed: false };
+    }
     if (!effSel) return { look: { kind: "idle" }, dimmed: routes.length > 0 };
     if (potential && potentialEdge(id)) return { look: { kind: "idle" }, dimmed: false };
     return { look: { kind: "idle" }, dimmed: true };
+  };
+
+  const canShowAmbient = (id: string): boolean => {
+    if (id.startsWith("s:")) {
+      const srcId = id.slice(2);
+      const src = flow.sources.find((s) => s.id === srcId);
+      return !!(src?.enabled && src.inventory_count > 0);
+    }
+    if (id.startsWith("d:")) {
+      const dstId = id.slice(2);
+      const dst = flow.destinations.find((d) => d.id === dstId);
+      return !!(dst?.enabled && dst.connected);
+    }
+    if (id.startsWith("c:")) {
+      const hasActiveSource = flow.sources.some((s) => s.enabled && s.inventory_count > 0);
+      const hasActiveDest = flow.destinations.some((d) => d.enabled && d.connected);
+      return hasActiveSource && hasActiveDest;
+    }
+    return false;
+  };
+
+  const computePhase = (id: string): string => {
+    if (id.startsWith("s:")) {
+      const idx = flow.sources.findIndex((s) => `s:${s.id}` === id);
+      return `${-idx * 0.3}s`;
+    }
+    if (id.startsWith("d:")) {
+      const idx = flow.destinations.findIndex((d) => `d:${d.id}` === id);
+      return `${-idx * 0.3}s`;
+    }
+    if (id === "c:0") return "0s";
+    if (id === "c:1") return "-0.6s";
+    if (id === "c:2") return "-1.2s";
+    return "0s";
   };
 
   const potentialEdge = (id: string): boolean => {
@@ -502,6 +538,11 @@ export function PipelineFlowGraph({
                   <stop offset="0%" stopColor="#3b82f6" />
                   <stop offset="55%" stopColor="#22d3e8" />
                   <stop offset="100%" stopColor="#34d399" />
+                </linearGradient>
+                <linearGradient id="fAmbient" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stopColor="#a78bfa" />
+                  <stop offset="55%" stopColor="#818cf8" />
+                  <stop offset="100%" stopColor="#c084fc" />
                 </linearGradient>
               </defs>
               {layout.edges.map((e) => {
