@@ -299,12 +299,8 @@ def _try_pick_video(
 
             candidates = db.execute(query.limit(50)).scalars().all()
             for cand in candidates:
-                # Check content_match if destination or pipeline requires it
-                niche = destination.metadata_profile if destination else pipeline.niche
-                prompt_override = destination.prompt_override if destination else None
-
+                # Explicit source keyword settings remain user-controlled.
                 text = f"{cand.title or ''}\n{cand.description or ''}"
-
                 # Source keyword filters act like verdicts.
                 if _keywords_hit(text, source.exclude_keywords):
                     reason = (
@@ -328,56 +324,10 @@ def _try_pick_video(
                     )
                     continue
 
-                level, match_reason = evaluate_content_level(
-                    text,
-                    niche=niche,
-                    prompt_override=prompt_override,
-                )
-                cand.match_level = level
-
-                if level == "match":
-                    pipeline.source_selection_cursor = (idx + 1) % len(sources)
-                    return cand
-
-                if level == "borderline":
-                    policy = (source.borderline_policy or "hold").lower()
-                    if policy == "continue":
-                        logger.info(
-                            "Video %s borderline but source %s policy=continue",
-                            cand.video_id,
-                            source.id,
-                        )
-                        pipeline.source_selection_cursor = (idx + 1) % len(sources)
-                        return cand
-                    logger.info(
-                        "Video %s held (borderline) for destination %s: %s",
-                        cand.video_id,
-                        destination.id if destination else None,
-                        match_reason,
-                    )
-                    _hold_video(db, cand, level=level, reason=match_reason)
-                    continue
-
-                # mismatch
-                policy = (source.mismatch_policy or "reject").lower()
-                if policy == "hold":
-                    logger.info(
-                        "Video %s held (mismatch) for destination %s: %s",
-                        cand.video_id,
-                        destination.id if destination else None,
-                        match_reason,
-                    )
-                    _hold_video(db, cand, level=level, reason=match_reason)
-                else:
-                    logger.warning(
-                        "Video %s (%s) rejected by AI content match for destination %s: %s",
-                        cand.video_id,
-                        cand.title,
-                        destination.id if destination else None,
-                        match_reason,
-                    )
-                    _reject_video(db, cand, level=level, reason=match_reason)
-                continue
+                # AI Profile guides metadata; an advisory relevance verdict
+                # must never prevent AUTO from selecting a source video.
+                pipeline.source_selection_cursor = (idx + 1) % len(sources)
+                return cand
 
     # Second pass: fallback for legacy videos with source_id=NULL but matching pipeline_id
     # These are videos imported before the Source model was integrated.
@@ -406,50 +356,8 @@ def _try_pick_video(
         legacy_query = legacy_query.order_by(DouyinVideo.douyin_created_at.asc())
 
     legacy_candidates = db.execute(legacy_query.limit(50)).scalars().all()
-    for cand in legacy_candidates:
-        # For legacy videos, skip source keyword filters (no source to check against)
-        # Only apply AI content match against pipeline niche
-        niche = destination.metadata_profile if destination else pipeline.niche
-        prompt_override = destination.prompt_override if destination else None
-
-        text = f"{cand.title or ''}\n{cand.description or ''}"
-
-        level, match_reason = evaluate_content_level(
-            text,
-            niche=niche,
-            prompt_override=prompt_override,
-        )
-        cand.match_level = level
-
-        if level == "match":
-            logger.info(
-                "Legacy video %s selected for pipeline %s (source_id=NULL)",
-                cand.video_id,
-                pipeline.id,
-            )
-            return cand
-
-        if level == "borderline":
-            # For legacy videos, default to "hold" policy (no source policy to reference)
-            logger.info(
-                "Legacy video %s held (borderline) for destination %s: %s",
-                cand.video_id,
-                destination.id if destination else None,
-                match_reason,
-            )
-            _hold_video(db, cand, level=level, reason=match_reason)
-            continue
-
-        # mismatch
-        logger.warning(
-            "Legacy video %s (%s) rejected by AI content match for destination %s: %s",
-            cand.video_id,
-            cand.title,
-            destination.id if destination else None,
-            match_reason,
-        )
-        _reject_video(db, cand, level=level, reason=match_reason)
-        continue
+    if legacy_candidates:
+        return legacy_candidates[0]
 
     return None
 

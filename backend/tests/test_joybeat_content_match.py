@@ -189,7 +189,7 @@ def test_validate_hashtags_for_joybeat_destination():
     assert is_valid is True
 
 
-def test_scheduler_pick_video_guardrail(db_session=None):
+def test_scheduler_does_not_reject_video_based_on_ai_profile(db_session=None):
     # Mock DB session for testing pick_video filtering
     mock_db = MagicMock()
     pipeline = Pipeline(
@@ -205,7 +205,7 @@ def test_scheduler_pick_video_guardrail(db_session=None):
     )
     source = DouyinSource(id="src-1", pipeline_id=pipeline.id, enabled=True)
 
-    # Candidate 1: fitness body showcase (should be rejected and marked content_mismatch)
+    # AI profile content is advisory; it must not mutate inventory status.
     v1 = DouyinVideo(
         id="v1",
         video_id="111",
@@ -235,11 +235,9 @@ def test_scheduler_pick_video_guardrail(db_session=None):
 
     picked = pick_video(mock_db, pipeline, "new", destination=destination)
 
-    # v1 must be rejected (held/rejected per policy; no inventory consumed)
-    assert v1.status in ("rejected", "held", "content_mismatch")
-    # v2 must be picked
+    assert v1.status == "new"
     assert picked is not None
-    assert picked.video_id == "222"
+    assert picked.video_id == "111"
 
 
 def test_joybeat_authentic_prompt_and_hashtags():
