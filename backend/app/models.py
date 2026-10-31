@@ -906,6 +906,9 @@ class DouyinVideo(Base):
         index=True,
     )
 
+    match_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    hold_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     is_backlog: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
