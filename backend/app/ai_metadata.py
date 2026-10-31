@@ -225,6 +225,12 @@ def evaluate_content_level(
     if not has_strict_match:
         return "match", "Channel does not enforce strict content match"
 
+    # A bare provider video ID is not content evidence. Do not ask the AI to
+    # classify it as unrelated: route it to the configured borderline policy so
+    # a reviewer can obtain the original caption or inspect the video.
+    if not context_text or re.fullmatch(r"[\d\s]+", context_text):
+        return "borderline", "Insufficient content context: only a video ID or no caption is available"
+
     ai_enabled = (
         bool(settings.ai_enabled)
         or os.getenv("AI_ENABLED", "false").lower() in ("true", "1", "yes")

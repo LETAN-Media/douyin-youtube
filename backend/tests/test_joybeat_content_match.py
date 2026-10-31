@@ -326,3 +326,12 @@ def test_description_trailing_hashtags_stripped():
     is_valid, error = validate_hashtags(gen["final_description"])
     assert is_valid is True
 
+
+
+@pytest.mark.parametrize("context", ["", "7702383117105674427", "7702383117105674427\n\n7702383117105674427"])
+def test_missing_content_is_uncertain_not_rejected(context):
+    with patch("app.ai_metadata.httpx.post") as ai:
+        level, reason = evaluate_content_level(context, niche="dance choreography")
+    assert level == "borderline"
+    assert "Insufficient content context" in reason
+    ai.assert_not_called()
