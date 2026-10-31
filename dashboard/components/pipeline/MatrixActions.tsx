@@ -1,17 +1,17 @@
 "use client";
 
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
 import { Badge, btnSmall } from "@/components/ui";
 import {
   actionPublishNow,
-  actionReschedulePublication,
   actionRetryPublication,
   actionSkipPublication,
 } from "@/lib/actions";
 import { formatDateTime, platformLabel, publicationLabel } from "@/lib/format";
 import type { Destination, Publication } from "@/lib/types";
+import { RescheduleDialog } from "./RescheduleDialog";
 
 export function MatrixActions({
   pipelineId,
@@ -28,6 +28,9 @@ export function MatrixActions({
   const [pending, start] = useTransition();
   const router = useRouter();
   const isFacebook = destination.platform === "facebook";
+  const [rescheduleTarget, setRescheduleTarget] = useState<Publication | null>(
+    null,
+  );
 
   const act = (
     fn: () => Promise<{ ok: true } | { ok: false; error: string }>,
@@ -105,11 +108,7 @@ export function MatrixActions({
             type="button"
             className={btnSmall}
             disabled={pending}
-            onClick={() => {
-              const v = window.prompt("Reschedule tới (YYYY-MM-DDTHH:mm):", "2026-09-15T08:00");
-              if (!v) return;
-              act(() => actionReschedulePublication(pipelineId, publication.id, v), "Đã reschedule.");
-            }}
+            onClick={() => setRescheduleTarget(publication)}
           >
             Reschedule
           </button>
@@ -120,6 +119,20 @@ export function MatrixActions({
           </a>
         ) : null}
       </div>
+
+      {rescheduleTarget ? (
+        <RescheduleDialog
+          pipelineId={pipelineId}
+          publication={rescheduleTarget}
+          destinationName={destination.name}
+          onClose={() => setRescheduleTarget(null)}
+          onDone={(message) => {
+            setRescheduleTarget(null);
+            toast(message, "success");
+            router.refresh();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
