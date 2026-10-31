@@ -1114,6 +1114,10 @@ def get_youtube_status(
     }
 
 
+class YouTubeUploadRejected(RuntimeError):
+    """A terminal HTTP rejection, as opposed to an unknown upload outcome."""
+
+
 def upload_video(
     db: Session,
     file_path: Path,
@@ -1124,6 +1128,7 @@ def upload_video(
     destination_id: str | None = None,
     publish_at: datetime | str | None = None,
     publish_mode: str | None = None,
+    credentials: Credentials | None = None,
 ) -> str:
     """Upload with native YouTube scheduling support.
 
@@ -1136,11 +1141,10 @@ def upload_video(
             f"Không tìm thấy video: {file_path}"
         )
 
-    credentials = load_credentials(
-        db,
-        pipeline_id=pipeline_id,
-        destination_id=destination_id,
-    )
+    if credentials is None:
+        credentials = load_credentials(
+            db, pipeline_id=pipeline_id, destination_id=destination_id,
+        )
 
     youtube = build(
         "youtube",
@@ -1249,7 +1253,7 @@ def upload_video(
             if not retryable:
                 from app.youtube_scheduling import normalize_youtube_error as _norm
 
-                raise RuntimeError(
+                raise YouTubeUploadRejected(
                     _norm(exc)
                     or (
                         f"YouTube API error "

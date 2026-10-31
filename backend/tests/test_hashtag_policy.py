@@ -90,6 +90,7 @@ def test_retry_rejects_existing_publication_or_job_video_id():
     from fastapi import HTTPException
     from app.main import _guard_publication_retry
     db = MagicMock()
+    db.get.return_value = None  # no prior durable upload intent
     pub = Profile(id='p', external_post_id=None, external_url=None)
     db.scalar.return_value = None
     _guard_publication_retry(db, pub)

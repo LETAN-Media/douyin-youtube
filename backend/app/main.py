@@ -26,6 +26,7 @@ from fastapi.responses import (
     HTMLResponse,
 )
 from sqlalchemy import case, func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, lazyload
 
 from app.config import settings
@@ -35,7 +36,7 @@ from app.db import (
     engine,
     get_db,
 )
-from app.db_retry import with_retry
+from app.db_retry import with_retry, is_retriable_db_error
 from app.migrate import run_migrations
 from app.models import (
     Destination,
@@ -322,6 +323,23 @@ app.add_middleware(
 )
 
 
+# A dropped libSQL/Hrana connection is commonly a ValueError, not DBAPIError.
+@app.exception_handler(DBAPIError)
+@app.exception_handler(ValueError)
+async def database_unavailable_response(request: Request, exc: Exception):
+    from fastapi.responses import JSONResponse
+    if is_retriable_db_error(exc):
+        logger.warning("Database unavailable method=%s path=%s exception_type=%s",
+                       request.method, request.url.path, type(exc).__name__)
+        return JSONResponse(status_code=503, headers={"Retry-After": "2"}, content={
+            "code": "DATABASE_TEMPORARILY_UNAVAILABLE",
+            "detail": "Database connection interrupted. Check publication status before resubmitting a publish request.",
+        })
+    logger.error("Unhandled request error path=%s exception_type=%s",
+                 request.url.path, type(exc).__name__)
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
 @app.exception_handler(ScheduleError)
 async def invalid_schedule_response(request: Request, exc: ScheduleError):
     from fastapi.responses import JSONResponse
@@ -359,6 +377,7 @@ def health() -> dict:
         "service": (
             "douyin-youtube"
         ),
+        "upload_recovery": {"version": 1, "unknown_outcome_blocks_retry": True},
         "worker": (
             settings.worker_enabled
         ),
@@ -1648,6 +1667,10 @@ def retry_job(
         raise HTTPException(status_code=409, detail="Job already has a YouTube video ID; reconcile before retry")
     if linked is not None:
         _guard_publication_retry(db, linked)
+    else:
+        from app.upload_attempts import read_attempt, read_receipt
+        if read_attempt(db, job.id) or read_receipt(job.id) or (job.error and "Hrana" in job.error and not job.error.startswith("BEFORE_UPLOAD:")):
+            raise HTTPException(status_code=409, detail="UPLOAD_RECONCILIATION_REQUIRED")
 
     if job.status not in {
         "failed",
@@ -4057,6 +4080,11 @@ def get_publication(
 
 
 def _guard_publication_retry(db, publication):
+    from app.upload_attempts import guard_retry, UploadReconciliationRequired
+    try:
+        guard_retry(db, publication)
+    except UploadReconciliationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     existing_job = db.scalar(
         select(VideoJob).where(
             VideoJob.publication_id == publication.id,
@@ -4803,7 +4831,7 @@ def manual_publish_endpoint(
         destinations.append(dest)
 
     # Duplicate protection check (Requirement 16)
-    if not payload.force_duplicate and payload.video_id:
+    if not payload.force_duplicate and (payload.video_id or payload.source_url):
         for dest in destinations:
             existing = db.execute(
                 select(Publication)
@@ -4862,7 +4890,8 @@ def manual_publish_endpoint(
         video = db.execute(
             select(DouyinVideo)
             .where(DouyinVideo.pipeline_id == pipeline.id)
-            .where(DouyinVideo.video_id == video_id_val)
+            .where(DouyinVideo.video_id == video_id_val if payload.video_id
+                   else DouyinVideo.url == payload.source_url)
             .limit(1)
         ).scalar_one_or_none()
 
@@ -4913,10 +4942,18 @@ def manual_publish_endpoint(
             db.add(pub)
             db.flush()
         else:
+            # Re-submitting Manual Publish is also a retry. Never replace a
+            # successful/uncertain publication or create a second active job.
+            _guard_publication_retry(db, pub)
+            active_job = db.scalar(select(VideoJob).where(
+                VideoJob.publication_id == pub.id,
+                VideoJob.status.in_(["pending", "downloading", "uploading", "upload_unknown", "scheduled"]),
+            ).limit(1))
+            if active_job is not None or pub.status == "published":
+                raise HTTPException(status_code=409, detail="Publication already active or published")
             pub.publication_mode = "manual"
             pub.status = "queued"
             pub.error = None
-            pub.attempts = 0
             pub.scheduled_at = now
             pub.title = title
             pub.description = description

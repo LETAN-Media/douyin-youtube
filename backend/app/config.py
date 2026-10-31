@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     turso_url: str = ""
     turso_token: str = ""
     database_provider: str = "postgresql"
+    db_pool_size: int = Field(default=5, ge=1, le=50)
+    db_pool_max_overflow: int = Field(default=5, ge=0, le=50)
+    db_pool_timeout_seconds: float = Field(default=30, gt=0)
+    db_pool_recycle_seconds: int = Field(default=60, ge=1)
 
     public_base_url: str = "http://localhost:8000"
 
@@ -28,6 +32,7 @@ class Settings(BaseSettings):
     worker_poll_seconds: int = 5
 
     temp_dir: str = "/tmp/douyin-youtube"
+    upload_journal_dir: str = "/tmp/douyin-youtube-upload-receipts"
 
     # Optional Netscape cookies.txt encoded with base64.
     douyin_cookies_b64: str = ""
@@ -313,7 +318,7 @@ class Settings(BaseSettings):
     @property
     def sqlalchemy_connect_args(self) -> dict:
         if self.database_provider == "turso" and self.turso_url and self.turso_url.strip() and self.turso_token:
-            return {"auth_token": self.turso_token}
+            return {"auth_token": self.turso_token, "check_same_thread": False}
         return {}
 
     @property

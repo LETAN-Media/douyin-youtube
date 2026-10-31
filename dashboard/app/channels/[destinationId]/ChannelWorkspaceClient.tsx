@@ -1901,7 +1901,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   ) : null}
 
                   <div>
-                    <label className="text-xs font-bold text-slate-600">Hashtags (5 hashtags):</label>
+                    <label className="text-xs font-bold text-slate-600">Hashtags ({new Set((hashtags.match(/#[\p{L}\p{N}_]+/gu) ?? []).map((tag) => tag.toLowerCase())).size} hashtags):</label>
                     <input
                       type="text"
                       value={hashtags}
