@@ -114,3 +114,19 @@ class TestOAuthFailureState(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_monitor_reports_replenishment_database_failure(monkeypatch):
+    from contextlib import nullcontext
+    from unittest.mock import Mock
+    from app import monitor, douyin_import
+    monkeypatch.setattr(monitor, 'SessionLocal', lambda: nullcontext(object()))
+    monkeypatch.setattr(douyin_import, 'recover_incomplete_scan_jobs', Mock())
+    monkeypatch.setattr(douyin_import, 'claim_and_run_scan_job', lambda **_: None)
+    monkeypatch.setattr(monitor, 'check_and_schedule_replenishments', Mock(side_effect=ValueError('Hrana connection reset')))
+    monkeypatch.setattr(monitor.settings, 'douyin_auto_scan_enabled', False)
+    monkeypatch.setattr(monitor, 'monitor_runtime', {'consecutive_failures': 0})
+    monitor.run_monitor_once()
+    assert monitor.monitor_runtime['last_cycle_ok'] is False
+    assert monitor.monitor_runtime['last_error'] == 'auto-replenishments: ValueError'
+    assert monitor.monitor_runtime['consecutive_failures'] == 1

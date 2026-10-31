@@ -14,6 +14,7 @@ T = TypeVar("T")
 _RETRIABLE_MESSAGES = (
     "connection reset",
     "connection error",
+    "connection closed before message completed",
     "http error",
     "timeout",
     "broken pipe",

@@ -293,7 +293,7 @@ def _load_upload_context(db, job_id):
     pub = _find_linked_publication(db, job)
     if pub is not None and not pub.external_post_id and not job.youtube_video_id:
         from app.upload_attempts import guard_retry
-        guard_retry(db, pub)
+        guard_retry(db, pub, exclude_job_id=job.id)
     destination = db.get(Destination, job.destination_id) if job.destination_id else None
     if destination is None:
         candidates = list(db.scalars(select(Destination).where(

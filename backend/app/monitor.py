@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import yt_dlp
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, lazyload
 
 from app.config import settings
 from app.db import SessionLocal
@@ -242,13 +242,14 @@ def check_and_schedule_replenishments(db: Session) -> list[str]:
 
     sources = db.execute(
         select(DouyinSource)
+        .options(lazyload("*"))
         .where(DouyinSource.enabled == True)  # noqa: E712
     ).scalars().all()
 
     scheduled: list[str] = []
     sources_updated = False
     for source in sources:
-        pipeline = db.get(Pipeline, source.pipeline_id) if source.pipeline_id else None
+        pipeline = db.get(Pipeline, source.pipeline_id, options=[lazyload("*")]) if source.pipeline_id else None
         if pipeline is None or not pipeline.enabled:
             continue
 
@@ -323,12 +324,14 @@ def run_monitor_once() -> None:
     now = utcnow()
     monitor_runtime["last_cycle_started_at"] = now.isoformat()
 
+    cycle_errors: list[str] = []
     try:
         # 0. Crash recovery: release stale locked scan jobs if any crashed worker left them
         with SessionLocal() as db:
             try:
                 douyin_import.recover_incomplete_scan_jobs(db, max_age_seconds=1800)
-            except Exception:
+            except Exception as exc:
+                cycle_errors.append(f"scan recovery: {type(exc).__name__}")
                 logger.exception("Failed recovering incomplete scan jobs")
 
         # 1. Evaluate auto-replenishment
@@ -339,7 +342,8 @@ def run_monitor_once() -> None:
                 scheduled_count = len(scheduled_ids)
                 if scheduled_ids:
                     logger.info("Scheduled %s replenishment scan job(s)", scheduled_count)
-            except Exception:
+            except Exception as exc:
+                cycle_errors.append(f"auto-replenishments: {type(exc).__name__}")
                 logger.exception("Failed checking auto-replenishments")
 
         monitor_runtime["last_replenish_count"] = scheduled_count
@@ -352,7 +356,8 @@ def run_monitor_once() -> None:
                 if summary is None:
                     break
                 logger.info("Executed scan job from queue: %s", summary)
-            except Exception:
+            except Exception as exc:
+                cycle_errors.append(f"queued scan: {type(exc).__name__}")
                 logger.exception("Failed executing queued scan job")
                 break
 
@@ -384,13 +389,14 @@ def run_monitor_once() -> None:
                     for fut in concurrent.futures.as_completed(futures):
                         try:
                             fut.result()
-                        except Exception:
+                        except Exception as exc:
+                            cycle_errors.append(f"scan task: {type(exc).__name__}")
                             logger.exception("Monitor scan task failed")
 
         monitor_runtime["last_cycle_finished_at"] = utcnow().isoformat()
-        monitor_runtime["last_cycle_ok"] = True
-        monitor_runtime["consecutive_failures"] = 0
-        monitor_runtime["last_error"] = None
+        monitor_runtime["last_cycle_ok"] = not cycle_errors
+        monitor_runtime["consecutive_failures"] = (int(monitor_runtime.get("consecutive_failures", 0)) + 1) if cycle_errors else 0
+        monitor_runtime["last_error"] = "; ".join(cycle_errors)[:500] if cycle_errors else None
     except Exception as exc:
         monitor_runtime["last_cycle_finished_at"] = utcnow().isoformat()
         monitor_runtime["last_cycle_ok"] = False

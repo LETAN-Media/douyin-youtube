@@ -4124,6 +4124,17 @@ def retry_publication(
             detail="Publication đã published",
         )
 
+    active = db.scalar(select(VideoJob.id).where(
+        VideoJob.publication_id == publication.id,
+        VideoJob.status.in_(["pending", "downloading", "uploading", "upload_unknown", "scheduled"]),
+    ).limit(1))
+    if active is not None:
+        raise HTTPException(status_code=409, detail="Publication already has an active job")
+    previous_job_id = db.scalar(select(VideoJob.id).where(
+        VideoJob.publication_id == publication.id
+    ).order_by(VideoJob.created_at.desc(), VideoJob.id.desc()).limit(1))
+    retry_key = f"retry:{publication.id}:{previous_job_id or 'initial'}"
+
     destination = db.get(Destination, publication.destination_id)
     if destination is not None and destination.platform == "facebook":
         raise HTTPException(
@@ -4133,7 +4144,6 @@ def retry_publication(
 
     publication.status = "queued"
     publication.error = None
-    publication.attempts = 0
     # Keep the original slot so a failed job retries into its reserved
     # place (slot auto-frees while failed). Only assign now when empty.
     if publication.scheduled_at is None:
@@ -4175,19 +4185,20 @@ def retry_publication(
             destination_id=publication.destination_id,
             publication_id=publication.id,
         )
-        try:
-            if publication.scheduled_at is not None:
-                _sk = publication.scheduled_at
-                if _sk.tzinfo is None:
-                    _sk = _sk.replace(tzinfo=timezone.utc)
-                job.schedule_slot_key = (
-                    f"{publication.destination_id}:{_sk.isoformat()}"
-                )
-        except Exception:
-            pass
+        # Each retry follows a distinct prior attempt; concurrent retries of
+        # the same attempt share a deterministic key and cannot both commit.
+        job.schedule_slot_key = retry_key
         db.add(job)
+        publication.status = "scheduled"
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        message = str(exc).lower()
+        if "unique constraint" in message and "video_jobs" in message and "schedule_slot_key" in message:
+            raise HTTPException(status_code=409, detail="Publication retry already queued") from exc
+        raise
     db.refresh(publication)
     return publication
 

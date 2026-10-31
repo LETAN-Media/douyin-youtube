@@ -275,6 +275,10 @@ def test_confirmed_quota_rejection_preserves_pause_but_transport_failure_does_no
         assert db.get(VideoJob, case.job_id).status == 'pending'
         assert 'YOUTUBE_QUOTA_EXHAUSTED' in db.get(VideoJob, case.job_id).error
         assert read_attempt(db, case.job_id)['phase'] == 'rejected'
+        with pytest.raises(UploadReconciliationRequired):
+            guard_retry(db, db.get(Publication, case.pub_id))
+        db.get(VideoJob, case.job_id).status = 'failed'
+        db.commit()
         guard_retry(db, db.get(Publication, case.pub_id))
     worker.recover_incomplete_jobs()
     assert case.upload.call_count == 1
@@ -302,3 +306,87 @@ def test_failure_recording_reset_retries_the_whole_database_unit(case, monkeypat
         assert db.get(VideoJob, case.job_id).status == 'failed'
         assert db.get(Publication, case.pub_id).status == 'failed'
     case.upload.assert_not_called()
+
+
+def test_explicit_publication_retry_preserves_history_and_does_not_reuse_slot(case, monkeypatch):
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+    from sqlalchemy import select
+    from app import main, scheduler
+    monkeypatch.setattr(main, 'require_publication', lambda db, pid: db.get(Publication, pid))
+    monkeypatch.setattr(scheduler, 'count_day_usage', lambda *_: (0, 0))
+    monkeypatch.setattr(scheduler, 'destination_today', lambda *_: datetime.now(timezone.utc).date())
+    monkeypatch.setattr(scheduler, 'shorts_daily_limit', lambda *_: 4)
+    with case.factory.begin() as db:
+        pub = db.get(Publication, case.pub_id)
+        pub.status = 'failed'
+        pub.attempts = 7
+        pub.scheduled_at = datetime.now(timezone.utc)
+        job = db.get(VideoJob, case.job_id)
+        job.status = 'failed'
+        job.error = 'download failed before upload'
+        job.schedule_slot_key = 'old-slot'
+    with case.factory() as db:
+        pub = main.retry_publication(case.pub_id, db)
+        assert pub.status == 'scheduled'
+        assert pub.attempts == 7
+        jobs = list(db.scalars(select(VideoJob).where(VideoJob.publication_id == case.pub_id)))
+        assert len(jobs) == 2
+        assert next(j for j in jobs if j.id == case.job_id).schedule_slot_key == 'old-slot'
+        assert next(j for j in jobs if j.id != case.job_id).schedule_slot_key == f'retry:{case.pub_id}:{case.job_id}'
+        with pytest.raises(HTTPException) as exc:
+            main.retry_publication(case.pub_id, db)
+        assert exc.value.status_code == 409
+    case.upload.assert_not_called()
+
+
+def test_closed_hrana_stream_is_retriable():
+    assert is_retriable_db_error(ValueError('Hrana: http error: connection closed before message completed'))
+
+
+def test_retry_unique_conflict_rolls_back_and_returns_409(case, monkeypatch):
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+    from app import main, scheduler
+    monkeypatch.setattr(main, 'require_publication', lambda db, pid: db.get(Publication, pid))
+    monkeypatch.setattr(scheduler, 'count_day_usage', lambda *_: (0, 0))
+    monkeypatch.setattr(scheduler, 'destination_today', lambda *_: datetime.now(timezone.utc).date())
+    monkeypatch.setattr(scheduler, 'shorts_daily_limit', lambda *_: 4)
+    with case.factory.begin() as db:
+        pub = db.get(Publication, case.pub_id)
+        pub.status = 'failed'
+        pub.scheduled_at = datetime.now(timezone.utc)
+        db.get(VideoJob, case.job_id).status = 'failed'
+    with case.factory() as db:
+        monkeypatch.setattr(db, 'commit', Mock(side_effect=ValueError(
+            'Hrana: UNIQUE constraint failed: video_jobs.pipeline_id, video_jobs.schedule_slot_key')))
+        with pytest.raises(HTTPException) as exc:
+            main.retry_publication(case.pub_id, db)
+        assert exc.value.status_code == 409
+    with case.factory() as db:
+        assert db.get(Publication, case.pub_id).status == 'failed'
+    case.upload.assert_not_called()
+
+
+def test_legacy_job_youtube_id_blocks_retry_for_same_source_and_destination(case):
+    with case.factory.begin() as db:
+        job = db.get(VideoJob, case.job_id)
+        job.publication_id = None
+        job.status = 'failed'
+        job.youtube_video_id = 'already-uploaded'
+    with case.factory() as db:
+        with pytest.raises(UploadReconciliationRequired):
+            guard_retry(db, db.get(Publication, case.pub_id))
+
+
+def test_related_job_in_another_destination_does_not_block(case):
+    with case.factory.begin() as db:
+        job = db.get(VideoJob, case.job_id)
+        job.status = 'failed'
+        other = Destination(id=str(uuid4()), pipeline_id=job.pipeline_id, name='Another', platform='youtube')
+        db.add(other)
+        db.add(VideoJob(id=str(uuid4()), pipeline_id=job.pipeline_id, destination_id=other.id,
+                        source_video_id=job.source_video_id, source_url=job.source_url,
+                        status='published', youtube_video_id='another-channel-id'))
+    with case.factory() as db:
+        guard_retry(db, db.get(Publication, case.pub_id))

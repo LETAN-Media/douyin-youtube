@@ -72,22 +72,42 @@ def read_receipt(job_id):
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def guard_retry(db, publication):
-    from sqlalchemy import select
-    from app.models import VideoJob
+def guard_retry(db, publication, *, exclude_job_id=None):
+    from sqlalchemy import and_, or_, select
+    from app.models import DouyinVideo, VideoJob
     owner = db.get(AppSetting, "youtube_upload_publication:" + publication.id)
     if owner:
         attempt = read_attempt(db, owner.value)
         if not attempt or attempt.get("phase") != "rejected":
             raise UploadReconciliationRequired("UPLOAD_RECONCILIATION_REQUIRED: publication upload intent exists")
-    for job in db.scalars(select(VideoJob).where(VideoJob.publication_id == publication.id)):
+    criteria = [VideoJob.publication_id == publication.id]
+    video_id = getattr(publication, "douyin_video_id", None)
+    source_video_id = db.scalar(select(DouyinVideo.video_id).where(DouyinVideo.id == video_id)) if video_id else None
+    if source_video_id:
+        criteria.append(and_(VideoJob.pipeline_id == publication.pipeline_id,
+                             VideoJob.destination_id == publication.destination_id,
+                             VideoJob.source_video_id == source_video_id))
+    query = select(VideoJob).where(or_(*criteria))
+    if exclude_job_id is not None:
+        query = query.where(VideoJob.id != exclude_job_id)
+    for job in db.scalars(query):
+        if job.youtube_video_id or job.youtube_url:
+            raise UploadReconciliationRequired("UPLOAD_RECONCILIATION_REQUIRED: a related job already has a YouTube ID or URL")
         attempt = read_attempt(db, job.id)
         if (attempt and attempt.get("phase") != "rejected") or read_receipt(job.id):
             raise UploadReconciliationRequired(
                 "UPLOAD_RECONCILIATION_REQUIRED: prior upload intent/receipt exists; verify YouTube before retry"
             )
+        # A worker preparing one of several jobs for the same publication
+        # may proceed to the durable per-publication claim; that claim elects
+        # one winner. Legacy jobs without a link remain conservatively held.
+        preparing_same_publication = (exclude_job_id is not None
+            and job.publication_id == publication.id
+            and job.status in {"pending", "downloading"})
+        if preparing_same_publication:
+            continue
         # Historical failures have no receipt. A missing ID alone proves nothing.
-        if job.status in {"uploading", "upload_unknown"} or (
+        if job.status in {"pending", "downloading", "uploading", "upload_unknown", "scheduled", "published"} or (
             job.error and not job.error.startswith("BEFORE_UPLOAD:")
             and ("Hrana" in job.error or "AFTER_UPLOAD" in job.error)
         ):
