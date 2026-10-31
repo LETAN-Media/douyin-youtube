@@ -131,6 +131,8 @@ def prepare_schedule_update(owner, data, pipeline=None):
     minimum = merged.get('min_upload_interval_minutes')
     if minimum is not None and minimum < settings.scheduler_min_slot_interval_minutes:
         raise ScheduleError(f'Minimum interval must be at least {settings.scheduler_min_slot_interval_minutes} minute(s)')
+    if not merged.get('auto_distribute_upload_slots') and not merged.get('upload_slots'):
+        raise ScheduleError('Manual schedule requires explicit upload slots; use Generate Slots or enable Auto Distribute')
     target = SimpleNamespace(**merged)
     schedule = effective_schedule(target)
     budget = settings.youtube_project_daily_upload_budget

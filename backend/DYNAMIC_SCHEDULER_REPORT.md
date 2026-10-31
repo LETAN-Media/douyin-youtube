@@ -14,7 +14,7 @@ The scheduler now uses the effective Pipeline/Destination schedule instead of a 
 
 ## Slot contract
 
-Auto mode distributes the requested number of slots evenly, includes both window endpoints for counts greater than one, rounds to minute resolution, and rejects collisions/impossible spacing. One video uses the start time. Overnight schedules require an explicit flag and End before Start. Manual Save requires exactly the requested number of unique, in-window, adequately spaced slots.
+Auto mode distributes the requested number of slots evenly, includes both window endpoints for counts greater than one, rounds to minute resolution, and rejects collisions/impossible spacing. One video uses the start time. Overnight schedules require an explicit flag and End before Start. Manual Save requires exactly the requested number of unique, in-window, adequately spaced slots. An explicitly empty manual schedule is rejected rather than falling back to generated default hours.
 
 Daily Limit 10, 08:00–23:00:
 
@@ -41,8 +41,8 @@ Preview is computed locally and does not write the database. Save validates the 
 
 No real YouTube upload was made for this task. All automated tests and browser checks used isolated SQLite fixtures, dummy OAuth values, and disabled workers/scheduler/monitor/comment processing.
 
-- Backend suite: **452 passed, 5 skipped, 9 subtests passed**. Skips require connected YouTube destinations or production workspace fixtures. Existing deprecation warnings remain.
-- Scheduler regression module: 57 passing cases, including counts 1/3/5/6/10/15/20 in UTC and Asia/Ho_Chi_Minh, overnight scheduling, destination override, manual hours, migration idempotency, daily limit across restart, quota pause, source-pool fallback, settings cutover and preserving reservations.
+- Backend suite: **453 passed, 5 skipped, 9 subtests passed**. Skips require connected YouTube destinations or production workspace fixtures. Existing deprecation warnings remain.
+- Scheduler regression module: 58 passing cases, including counts 1/3/5/6/10/15/20 in UTC and Asia/Ho_Chi_Minh, overnight scheduling, destination override, manual hours, migration idempotency, daily limit across restart, quota pause, source-pool fallback, settings cutover and preserving reservations.
 - Frontend schedule contracts: **12 passed** with `node --experimental-strip-types tests/schedule.test.mjs`.
 - `npm run lint`: TypeScript and ESLint PASS.
 - `npm run build`: Next.js production build PASS, including TypeScript and static generation.

@@ -287,3 +287,12 @@ def test_status_next_slot_uses_effective_timezone(db,monkeypatch,tz,expected):
     pipe,dest=make(db,10,tz)
     monkeypatch.setattr(main,'_utcnow',lambda:datetime(2026,11,2,0,55,tzinfo=timezone.utc))
     assert main._destination_next_upload(dest)==expected
+
+
+def test_empty_manual_slots_do_not_fall_back_to_generated_defaults(db):
+    pipe,dest=make(db,3)
+    old=list(pipe.upload_slots)
+    with pytest.raises(ScheduleError,match='explicit upload slots'):
+        prepare_schedule_update(pipe,{'auto_distribute_upload_slots':False,'upload_slots':[]})
+    assert pipe.upload_slots==old
+    assert pipe.auto_distribute_upload_slots is True
