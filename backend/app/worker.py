@@ -200,6 +200,15 @@ def claim_job() -> str | None:
             select(ranked.c.id).where(ranked.c.rank == 1)))
             .order_by(VideoJob.created_at.asc()).limit(100).with_for_update(skip_locked=True)).all()
         for job in candidates:
+            # A rescheduled publication holds its job pending until the new
+            # slot is due. Never upload ahead of the publication schedule.
+            linked_pub = _find_linked_publication(db, job)
+            if linked_pub is not None and linked_pub.scheduled_at is not None:
+                slot = linked_pub.scheduled_at
+                if slot.tzinfo is None:
+                    slot = slot.replace(tzinfo=timezone.utc)
+                if slot > utcnow():
+                    continue
             if job.destination_id:
                 from app.scheduler import locked_destination
                 destination = locked_destination(db, job.destination_id)

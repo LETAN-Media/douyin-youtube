@@ -12,10 +12,10 @@ import {
   btnSmall,
 } from "@/components/ui";
 import {
-  actionReschedulePublication,
   actionRetryPublication,
   actionSkipPublication,
 } from "@/lib/actions";
+import { RescheduleDialog } from "./RescheduleDialog";
 import { formatDateTime, publicationLabel } from "@/lib/format";
 import type { Destination, Publication } from "@/lib/types";
 import { IconPublications } from "@/components/icons";
@@ -37,6 +37,9 @@ export function PublicationsPanel({
   const router = useRouter();
   const [, start] = useTransition();
   const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [rescheduleTarget, setRescheduleTarget] = useState<Publication | null>(
+    null,
+  );
 
   const destName = new Map(destinations.map((d) => [d.id, d.name]));
 
@@ -127,11 +130,7 @@ export function PublicationsPanel({
                           ) : null}
                           {p.status !== "published" ? (
                             <button type="button" className={btnSmall} disabled={pendingKey !== null}
-                              onClick={() => {
-                                const v = window.prompt("Reschedule tới (YYYY-MM-DDTHH:mm):", "2026-09-15T08:00");
-                                if (!v) return;
-                                act(`resched:${p.id}`, () => actionReschedulePublication(pipelineId, p.id, v), "Đã reschedule.");
-                              }}>
+                              onClick={() => setRescheduleTarget(p)}>
                               Reschedule
                             </button>
                           ) : null}
@@ -175,11 +174,7 @@ export function PublicationsPanel({
                     ) : null}
                     {p.status !== "published" ? (
                       <button type="button" className={btnSmall} disabled={pendingKey !== null}
-                        onClick={() => {
-                          const v = window.prompt("Reschedule tới (YYYY-MM-DDTHH:mm):", "2026-09-15T08:00");
-                          if (!v) return;
-                          act(`resched:${p.id}`, () => actionReschedulePublication(pipelineId, p.id, v), "Đã reschedule.");
-                        }}>
+                        onClick={() => setRescheduleTarget(p)}>
                         Resched.
                       </button>
                     ) : null}
@@ -190,6 +185,22 @@ export function PublicationsPanel({
           </div>
         </>
       )}
+      {rescheduleTarget ? (
+        <RescheduleDialog
+          pipelineId={pipelineId}
+          publication={rescheduleTarget}
+          destinationName={
+            destName.get(rescheduleTarget.destination_id) ??
+            rescheduleTarget.platform
+          }
+          onClose={() => setRescheduleTarget(null)}
+          onDone={(message) => {
+            setRescheduleTarget(null);
+            toast(message, "success");
+            router.refresh();
+          }}
+        />
+      ) : null}
     </Card>
   );
 }

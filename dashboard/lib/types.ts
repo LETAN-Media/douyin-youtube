@@ -151,6 +151,37 @@ export interface Publication {
   updated_at: string;
 }
 
+export interface RescheduleSlotHint {
+  at: string;
+  label: string;
+}
+
+/** Payload behind the Reschedule dialog. Times are UTC ISO 8601 instants. */
+export interface RescheduleOptions {
+  publication_id: string;
+  video_title?: string | null;
+  destination_id: string;
+  destination_name: string;
+  platform: string;
+  status: string;
+  publication_mode?: string | null;
+  scheduled_at?: string | null;
+  scheduled_at_label?: string | null;
+  timezone: string;
+  timezone_label: string;
+  suggested_at: string;
+  suggested_at_label: string;
+  current_is_future: boolean;
+  can_reschedule: boolean;
+  block_reason?: string | null;
+  daily_limit: number;
+  used_on_target_day: number;
+  minimum_interval_minutes: number;
+  youtube_uploaded: boolean;
+  youtube_native: boolean;
+  next_free_slots: RescheduleSlotHint[];
+}
+
 export interface VideoWithPublications extends InventoryVideo {
   source_name?: string | null;
   publications: Publication[];

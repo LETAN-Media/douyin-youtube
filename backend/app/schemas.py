@@ -775,7 +775,46 @@ class InventoryListResponse(BaseModel):
 
 
 class PublicationRescheduleRequest(BaseModel):
+    """New time for one publication. Must be an absolute ISO 8601 instant.
+
+    A naive datetime is rejected unless an explicit timezone is supplied, so
+    the server never reinterprets a UTC value as local time.
+    """
+
     scheduled_at: datetime
+    timezone: str | None = Field(default=None, max_length=64)
+
+
+class RescheduleSlotHint(BaseModel):
+    at: datetime
+    label: str
+
+
+class PublicationRescheduleOptions(BaseModel):
+    """Everything the Reschedule dialog needs to render safe defaults."""
+
+    publication_id: str
+    video_title: str | None = None
+    destination_id: str
+    destination_name: str
+    platform: str
+    status: str
+    publication_mode: str = "auto"
+    scheduled_at: datetime | None = None
+    scheduled_at_label: str | None = None
+    timezone: str
+    timezone_label: str
+    suggested_at: datetime
+    suggested_at_label: str
+    current_is_future: bool = False
+    can_reschedule: bool = True
+    block_reason: str | None = None
+    daily_limit: int = 0
+    used_on_target_day: int = 0
+    minimum_interval_minutes: int = 1
+    youtube_uploaded: bool = False
+    youtube_native: bool = False
+    next_free_slots: list[RescheduleSlotHint] = Field(default_factory=list)
 
 
 class PublicationPublishRequest(BaseModel):

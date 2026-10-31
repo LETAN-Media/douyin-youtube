@@ -23,6 +23,7 @@ import type {
   Pipeline,
   PipelineStats,
   Publication,
+  RescheduleOptions,
   VideoWithPublications,
   YoutubeStatus,
 } from "./types";
@@ -450,6 +451,14 @@ export async function skipPublication(id: string): Promise<Publication> {
   return apiFetch<Publication>(
     `/api/publications/${encodeURIComponent(id)}/skip`,
     { method: "POST" },
+  );
+}
+
+export async function getPublicationRescheduleOptions(
+  id: string,
+): Promise<RescheduleOptions> {
+  return apiFetch<RescheduleOptions>(
+    `/api/publications/${encodeURIComponent(id)}/reschedule-options`,
   );
 }
 

@@ -10,6 +10,7 @@ import {
   deleteDestination,
   deletePipeline,
   deleteSource,
+  getPublicationRescheduleOptions,
   getYoutubeOauthUrl,
   publishNow,
   reschedulePublication,
@@ -24,7 +25,7 @@ import {
 } from "./api";
 import { ApiError } from "./api";
 import { slugify, parseSlots } from "./format";
-import type { ActionResult } from "./types";
+import type { ActionResult, RescheduleOptions } from "./types";
 
 function err(e: unknown): ActionResult {
   if (e instanceof ApiError) return { ok: false, error: e.message };
@@ -469,14 +470,45 @@ export async function actionSkipPublication(
   }
 }
 
+export async function actionGetRescheduleOptions(
+  publicationId: string,
+): Promise<{ ok: true; options: RescheduleOptions } | { ok: false; error: string }> {
+  try {
+    const options = await getPublicationRescheduleOptions(publicationId);
+    return { ok: true, options };
+  } catch (e) {
+    if (e instanceof ApiError) return { ok: false, error: e.message };
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Không tải được thông tin lịch.",
+    };
+  }
+}
+
 export async function actionReschedulePublication(
   pipelineId: string,
   publicationId: string,
   scheduledAt: string,
 ): Promise<ActionResult> {
   try {
-    const iso = new Date(scheduledAt).toISOString();
-    await reschedulePublication(publicationId, iso);
+    // Only absolute instants are accepted: a bare local string would be read
+    // in the server's timezone and shift the schedule silently.
+    if (
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(
+        scheduledAt,
+      )
+    ) {
+      return {
+        ok: false,
+        error:
+          "Thời gian đổi lịch phải là ISO 8601 kèm múi giờ (ví dụ 2026-11-02T13:30:00Z).",
+      };
+    }
+    const parsed = new Date(scheduledAt);
+    if (Number.isNaN(parsed.getTime())) {
+      return { ok: false, error: "Thời gian đổi lịch không hợp lệ." };
+    }
+    await reschedulePublication(publicationId, parsed.toISOString());
     revalidatePipeline(pipelineId);
     return { ok: true };
   } catch (e) {

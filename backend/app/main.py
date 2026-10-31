@@ -91,6 +91,7 @@ from app.schemas import (
     PipelineUpdate,
     PublicationOut,
     PublicationPublishRequest,
+    PublicationRescheduleOptions,
     PublicationRescheduleRequest,
     ScheduleCapacityOut,
     SourceCookieSave,
@@ -4230,6 +4231,39 @@ def skip_publication(
     return publication
 
 
+@app.get(
+    "/api/publications/{publication_id}/reschedule-options",
+    response_model=PublicationRescheduleOptions,
+    dependencies=[
+        Depends(authenticate_request)
+    ],
+)
+def publication_reschedule_options(
+    publication_id: str,
+    db: Session = Depends(
+        get_db
+    ),
+) -> PublicationRescheduleOptions:
+    """Defaults for the Reschedule dialog: timezone, limits, next free slot.
+
+    Read-only. Never changes the publication.
+    """
+    from app.publication_reschedule import (
+        RescheduleError,
+        build_reschedule_options,
+    )
+
+    publication = require_publication(db, publication_id)
+    try:
+        options = build_reschedule_options(db, publication, _utcnow())
+    except RescheduleError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
+    return PublicationRescheduleOptions(**options)
+
+
 @app.post(
     "/api/publications/{publication_id}/reschedule",
     response_model=PublicationOut,
@@ -4244,27 +4278,31 @@ def reschedule_publication(
         get_db
     ),
 ) -> Publication:
+    """Move one publication to a new time with server-side validation.
+
+    Rejects published/in-flight rows, past times, slot collisions, daily-limit
+    and minimum-interval violations, and hands native YouTube schedules to the
+    YouTube API. Touches only this publication and its linked jobs.
+    """
+    from app.publication_reschedule import (
+        RescheduleError,
+        reschedule_publication as apply_reschedule,
+    )
+
     publication = require_publication(db, publication_id)
-
-    if publication.status == "published":
-        raise HTTPException(
-            status_code=409,
-            detail="Không thể reschedule publication đã published",
-        )
-
-    publication.status = "scheduled"
-    publication.scheduled_at = payload.scheduled_at
-    publication.error = None
     try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="SLOT_COLLISION: this time slot is already taken for this channel",
+        return apply_reschedule(
+            db,
+            publication,
+            payload.scheduled_at,
+            timezone_name=payload.timezone,
+            now=_utcnow(),
         )
-    db.refresh(publication)
-    return publication
+    except RescheduleError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
 
 
 @app.get(
