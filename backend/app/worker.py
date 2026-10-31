@@ -7,6 +7,10 @@ from typing import Any
 from sqlalchemy import select, update
 
 from app.config import settings
+from app.hashtag_policy import (
+    validate_hashtags, repair_description,
+    validate_metadata,
+)
 from app.ai_metadata import generate_youtube_metadata
 from app.db import SessionLocal
 from app.douyin import (
@@ -47,77 +51,9 @@ def validate_final_description(text: str) -> bool:
         return False
     if "复制打开抖音" in text:
         return False
-    if "https://" in lowered or "http://" in lowered:
-        return False
     return True
 
 
-def validate_hashtags(
-    text: str,
-    pipeline: Pipeline | None = None,
-    destination: Destination | None = None,
-) -> tuple[bool, str | None]:
-    """Validate hashtags in description.
-    
-    Returns (is_valid, error_message).
-    error_message is None when valid, otherwise contains detailed reason.
-    """
-    tags = re.findall(r"#\w+", text)
-    if len(tags) != 5:
-        return False, f"Expected exactly 5 hashtags, found {len(tags)}: {tags}"
-    if len(set(tags)) != 5:
-        duplicates = [t for t in tags if tags.count(t) > 1]
-        return False, f"Duplicate hashtags found: {set(duplicates)}"
-    
-    banned_tags = []
-    for tag in tags:
-        tag_lower = tag.lower()
-        if "http" in tag_lower:
-            banned_tags.append(f"{tag} (contains 'http')")
-        elif "douyin" in tag_lower:
-            banned_tags.append(f"{tag} (contains 'douyin')")
-        elif tag_lower == "#tiktok":
-            banned_tags.append(f"{tag} (standalone #tiktok is banned)")
-        elif tag_lower in {"#joybeat", "#danielxu", "#danniu"}:
-            banned_tags.append(f"{tag} (banned creator name)")
-    
-    if banned_tags:
-        return False, f"Banned hashtags: {', '.join(banned_tags)}"
-
-    if destination is None and pipeline is None:
-        return True, None
-
-    fixed_src = (
-        destination.fixed_hashtags
-        if (destination and destination.fixed_hashtags is not None)
-        else (pipeline.fixed_hashtags if pipeline else [])
-    ) or []
-    adaptive_src = (
-        destination.adaptive_hashtags
-        if (destination and destination.adaptive_hashtags is not None)
-        else (pipeline.adaptive_hashtags if pipeline else [])
-    ) or []
-
-    fixed_hashtags = [tag.lower() for tag in fixed_src]
-    adaptive_hashtags = [tag.lower() for tag in adaptive_src]
-    allowed_hashtags = set(fixed_hashtags) | set(adaptive_hashtags)
-
-    if not allowed_hashtags:
-        return True, None
-
-    tags_lower = [tag.lower() for tag in tags]
-
-    fixed_required = sum(1 for tag in tags_lower if tag in fixed_hashtags)
-    if fixed_required < len(fixed_hashtags):
-        missing = [f for f in fixed_hashtags if f not in tags_lower]
-        return False, f"Missing required fixed hashtags: {missing}"
-
-    niche_count = sum(1 for tag in tags_lower if tag in allowed_hashtags)
-    if niche_count < 3:
-        allowed_in_desc = [t for t in tags_lower if t in allowed_hashtags]
-        return False, f"Only {niche_count}/3 allowed hashtags found. Present: {allowed_in_desc}, Allowed: {list(allowed_hashtags)[:10]}"
-
-    return True, None
 
 
 def _find_linked_publication(db, job: VideoJob) -> Publication | None:
@@ -536,38 +472,17 @@ def process_job(
                 job.title = title
                 job.description = description
 
-            # For manual mode, allow user-edited hashtags without strict pipeline whitelist check
-            target_pipeline_for_tags = None if is_manual else pipeline
-            target_dest_for_tags = None if is_manual else destination
-            is_valid, error_msg = validate_hashtags(description, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags)
-            if not is_valid:
-                logger.warning(
-                    "First-pass hashtag validation failed for job %s: %s. Retrying AI once.",
-                    job_id,
-                    error_msg,
-                )
-                ai_result = generate_youtube_metadata(
-                    source_context,
-                    pipeline=pipeline,
-                    destination=destination,
-                )
-                if not ai_result:
-                    raise RuntimeError(
-                        "AI metadata generation failed on retry; upload blocked"
-                    )
-
-                retry_title, retry_desc = ai_result
-                is_valid_retry, error_msg_retry = validate_hashtags(retry_desc, pipeline=target_pipeline_for_tags, destination=target_dest_for_tags)
-                if not is_valid_retry:
-                    raise RuntimeError(
-                        f"AI hashtags validation failed after retry; upload blocked. "
-                        f"First error: {error_msg}. Retry error: {error_msg_retry}"
-                    )
-
-                title = retry_title or title
-                description = retry_desc
-                job.title = title
-                job.description = description
+            # Only DNA locks are mandatory. Pipeline lists are reference data.
+            locked = []
+            if destination is not None:
+                from app.channel_dna import get_dna
+                dna = get_dna(db, destination.id)
+                locked = (dna.locked_hashtags or []) if dna is not None else []
+            description = repair_description(description, locked=locked)
+            job.description = description
+            valid, reason = validate_metadata(title, description, locked=locked)
+            if not valid:
+                raise RuntimeError(f"Metadata validation failed; upload blocked: {reason}")
 
             try:
                 _set_publication_status(db, pub, "uploading")
@@ -647,7 +562,7 @@ def process_job(
             # Layer C Dedup: check if job or publication already has youtube_video_id
             existing_yt_id = getattr(job, "youtube_video_id", None)
             if not existing_yt_id and _pub_for_upload is not None:
-                existing_yt_id = getattr(_pub_for_upload, "youtube_video_id", None)
+                existing_yt_id = getattr(_pub_for_upload, "external_post_id", None)
 
             try:
                 if existing_yt_id:

@@ -183,10 +183,10 @@ def test_validate_hashtags_for_joybeat_destination():
     is_valid, error = validate_hashtags(has_joybeat, destination=dest)
     assert is_valid is False
 
-    # Invalid: missing fixed hashtag
+    # Valid: profile hashtags are optional suggestions
     missing_fixed = "Amazing moves\n\n#dance #dancevideo #dancecover #dancer #urbandance"
     is_valid, error = validate_hashtags(missing_fixed, destination=dest)
-    assert is_valid is False
+    assert is_valid is True
 
 
 def test_scheduler_pick_video_guardrail(db_session=None):

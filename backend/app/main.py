@@ -38,6 +38,7 @@ from app.db_retry import with_retry
 from app.migrate import run_migrations
 from app.models import (
     Destination,
+    DouyinScanJob,
     DouyinSource,
     DouyinVideo,
     OAuthState,
@@ -1578,6 +1579,12 @@ def retry_job(
     ),
 ) -> VideoJob:
     job = require_job(db, job_id)
+
+    linked = db.get(Publication, job.publication_id) if job.publication_id else None
+    if job.youtube_video_id:
+        raise HTTPException(status_code=409, detail="Job already has a YouTube video ID; reconcile before retry")
+    if linked is not None:
+        _guard_publication_retry(db, linked)
 
     if job.status not in {
         "failed",
@@ -4001,6 +4008,18 @@ def get_publication(
     return publication
 
 
+def _guard_publication_retry(db, publication):
+    existing_job = db.scalar(
+        select(VideoJob).where(
+            VideoJob.publication_id == publication.id,
+            VideoJob.youtube_video_id.is_not(None),
+            VideoJob.youtube_video_id != "",
+        ).limit(1)
+    )
+    if publication.external_post_id or publication.external_url or existing_job:
+        raise HTTPException(status_code=409, detail="Publication already has an external video ID or URL; reconcile before retry")
+
+
 @app.post(
     "/api/publications/{publication_id}/retry",
     response_model=PublicationOut,
@@ -4015,6 +4034,7 @@ def retry_publication(
     ),
 ) -> Publication:
     publication = require_publication(db, publication_id)
+    _guard_publication_retry(db, publication)
 
     if publication.status not in {"failed", "skipped", "queued", "scheduled"}:
         raise HTTPException(
@@ -5213,6 +5233,7 @@ def retry_manual_publication_endpoint(
     db: Session = Depends(get_db),
 ) -> ManualPublicationItem:
     p = require_publication(db, publication_id)
+    _guard_publication_retry(db, p)
 
     if p.status == "published":
         raise HTTPException(status_code=409, detail="Publication đã published")

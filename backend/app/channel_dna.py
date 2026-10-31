@@ -79,7 +79,7 @@ def get_or_create_dna(db, destination: Destination) -> YouTubeChannelDNA:
         title_style="",
         title_patterns=[],
         core_keywords=list(destination.fixed_hashtags or [])[:10],
-        locked_hashtags=list(destination.fixed_hashtags or [])[:5],
+        locked_hashtags=[],  # Profile suggestions never create mandatory DNA locks.
         locked_tags=[],
         winning_topics=[],
         weak_topics=[],

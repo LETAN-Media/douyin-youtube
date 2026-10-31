@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.hashtag_policy import clean_hashtag, compose_hashtags, resolve_policy, validate_metadata
 from app.models import Destination, Pipeline
 
 
@@ -66,37 +67,6 @@ def extract_json(text: str) -> dict:
 
     return result
 
-
-def clean_hashtag(value: str) -> str:
-    tag = value.strip().lower()
-
-    if not tag:
-        return ""
-
-    tag = re.sub(
-        r"\s+",
-        "",
-        tag,
-    )
-
-    if not tag.startswith("#"):
-        tag = "#" + tag
-
-    # Block disallowed channel name hashtags or attributions
-    disallowed = {"#joybeat", "#danielxu", "#danniu", "#daniel"}
-    if tag in disallowed:
-        return ""
-    
-    # Block hashtags with banned keywords
-    if "http" in tag:
-        return ""
-    if "douyin" in tag:
-        return ""
-    # Only block standalone #tiktok, allow compound tags like #dogsoftiktok
-    if tag == "#tiktok":
-        return ""
-
-    return tag[:60]
 
 
 DANCE_POSITIVE_KEYWORDS = [
@@ -457,21 +427,16 @@ def generate_metadata_structured(
         encoding="utf-8",
     )
 
-    if destination is not None and destination.prompt_override and destination.prompt_override.strip():
-        prompt = destination.prompt_override.strip()
+    profile_prompt = (
+        (destination.prompt_override if destination else None)
+        or (pipeline.prompt_profile if pipeline else None)
+    )
+    if profile_prompt and profile_prompt.strip():
+        prompt = profile_prompt.strip()
 
+    fixed_hashtags, adaptive_hashtags = resolve_policy(pipeline, destination)
     profile_section = ""
     if destination is not None:
-        fixed_hashtags = (
-            destination.fixed_hashtags
-            if destination.fixed_hashtags is not None
-            else (pipeline.fixed_hashtags if pipeline else [])
-        ) or []
-        adaptive_hashtags = (
-            destination.adaptive_hashtags
-            if destination.adaptive_hashtags is not None
-            else (pipeline.adaptive_hashtags if pipeline else [])
-        ) or []
         niche = (
             destination.metadata_profile
             or (pipeline.niche if pipeline else "")
@@ -486,29 +451,26 @@ def generate_metadata_structured(
             f"Channel: {destination.name} ({destination.platform})\n"
             f"Niche: {niche or ''}\n"
             f"Language: {language or 'en'}\n"
-            f"Fixed hashtags: {', '.join(fixed_hashtags)}\n"
-            f"Adaptive hashtags: {', '.join(adaptive_hashtags)}\n"
+            f"Preferred hashtags: {', '.join(fixed_hashtags)}\n"
+            f"Suggested hashtags: {', '.join(adaptive_hashtags)}\n"
             "\n"
             "Use this channel profile to tailor title, description, and hashtags.\n"
-            "You must include fixed hashtags if provided.\n"
-            "Total hashtags must be EXACTLY 5 hashtags."
+            "Profile hashtags are optional suggestions, chosen only when relevant.\n"
+            "Use at most 5 valid relevant hashtags; do not fill a quota."
         )
     elif pipeline is not None:
-        fixed_hashtags = pipeline.fixed_hashtags or []
-        adaptive_hashtags = pipeline.adaptive_hashtags or []
-
         profile_section = (
             "\n\nPIPELINE PROFILE:\n"
             f"Name: {pipeline.name}\n"
             f"Niche: {pipeline.niche or ''}\n"
             f"Language: {pipeline.language or 'en'}\n"
-            f"Fixed hashtags: {', '.join(fixed_hashtags)}\n"
-            f"Adaptive hashtags: {', '.join(adaptive_hashtags)}\n"
+            f"Preferred hashtags: {', '.join(fixed_hashtags)}\n"
+            f"Suggested hashtags: {', '.join(adaptive_hashtags)}\n"
             "\n"
             "Use this pipeline profile to keep channel identity in the metadata.\n"
-            "You must include all fixed hashtags.\n"
-            "For the remaining slots, prefer adaptive hashtags supported by the content,\n"
-            "then add video-specific topic hashtags if needed."
+            "Profile hashtags are optional suggestions, never mandatory.\n"
+            "Prefer relevant suggested hashtags, then create content-specific tags.\n"
+            "Use at most 5; never add unrelated tags to fill slots."
         )
 
     # Pre-evaluate content relevance (advisory only). The verdict guides the
@@ -519,7 +481,7 @@ def generate_metadata_structured(
         or (pipeline.niche if pipeline else "")
     )
     prompt_val = (
-        (destination.prompt_override if destination else None)
+        profile_prompt
         or ""
     )
     pre_level, match_reason = evaluate_content_level(
@@ -568,6 +530,19 @@ def generate_metadata_structured(
                 "remove/replace/translate/rewrite): "
                 + ", ".join(dna_ctx["locked_hashtags"])
             )
+    # This contract overrides legacy prompt instructions about quotas/language.
+    prompt += (
+        "\nMETADATA CONTRACT (overrides conflicting legacy instructions): "
+        "Use the profile Language for title and description. Create a natural, "
+        "engaging title grounded in the video, preferably 40-75 characters and "
+        "never over 100. Vary style; do not invent people, brands or facts. "
+        "Write a meaningful content-specific description, at most 5000 characters "
+        "including hashtags. No source links, share text or SEO stuffing. "
+        "Preferred/Fixed and Suggested/Adaptive profile hashtags are optional "
+        "reference data, never mandatory; no minimum from either list. "
+        "Select only relevant tags, creating new ones as needed, at most 5 total "
+        "with no minimum or filler. Preserve separately configured DNA locks."
+    )
     user_content = (
         "ORIGINAL DOUYIN CONTEXT/SHARE TEXT:\n\n"
         + context_text
@@ -713,11 +688,8 @@ def generate_metadata_structured(
             or ""
         ).strip()
 
-        # The model often appends hashtags inside the description even when
-        # told not to. Strip any trailing hashtag block so final_description
-        # (= description + hashtags) contains exactly 5 tags, otherwise the
-        # worker hashtag validation fails and forces wasteful AI retries.
-        description = re.sub(r"(\s*#\w+\s*)+$", "", description).strip()
+        embedded_tags = re.findall(r"#[^\s#]+", description)
+        description = re.sub(r"#[^\s#]+", "", description).strip()
 
         # Sanitize against hallucinated creator attributions unless present in original context
         ctx_lower = context_text.lower()
@@ -738,61 +710,13 @@ def generate_metadata_structured(
         ):
             raw_tags = []
 
-        hashtags: list[str] = []
+        hashtags = compose_hashtags(raw_tags + embedded_tags, pipeline, destination)
 
-        for item in raw_tags:
-            tag = clean_hashtag(
-                str(item)
-            )
-
-            if not tag:
-                continue
-
-            if tag in hashtags:
-                continue
-
-            hashtags.append(tag)
-
-            if len(hashtags) == 5:
-                break
-
-        # If fewer than 5 hashtags, fallback to fixed or adaptive tags
-        if len(hashtags) < 5:
-            fallback_candidates = []
-            if destination and destination.fixed_hashtags:
-                fallback_candidates.extend(destination.fixed_hashtags)
-            elif pipeline and pipeline.fixed_hashtags:
-                fallback_candidates.extend(pipeline.fixed_hashtags)
-
-            if destination and destination.adaptive_hashtags:
-                fallback_candidates.extend(destination.adaptive_hashtags)
-            elif pipeline and pipeline.adaptive_hashtags:
-                fallback_candidates.extend(pipeline.adaptive_hashtags)
-
-            fallback_candidates.extend(["#shorts", "#dance", "#choreography", "#video"])
-            for cand in fallback_candidates:
-                cleaned = clean_hashtag(str(cand))
-                if cleaned and cleaned not in hashtags:
-                    hashtags.append(cleaned)
-                    if len(hashtags) == 5:
-                        break
-
-        # ---- Locked core hashtags enforcement (DNA channels only) ----
-        core_hashtags: list[str] = []
-        dynamic_hashtags: list[str] = list(hashtags)
-        if dna_ctx and dna_ctx.get("locked_hashtags"):
-            try:
-                from app.channel_dna import merge_final_hashtags
-
-                merged, kept, added = merge_final_hashtags(
-                    dna_ctx.get("locked_hashtags"), hashtags
-                )
-                # AI contract is exactly 5 hashtags: locked first, then dynamic.
-                hashtags = (kept + added)[:5]
-                core_hashtags = [h for h in kept if h in hashtags]
-                dynamic_hashtags = [h for h in hashtags if h not in core_hashtags]
-            except ImportError:
-                pass
+        # DNA locks are mandatory and independent of optional profile suggestions.
+        locked = (dna_ctx or {}).get("locked_hashtags") or []
+        hashtags = compose_hashtags(hashtags, locked=locked)
+        core_hashtags = compose_hashtags([], locked=locked)
+        dynamic_hashtags = [h for h in hashtags if h not in core_hashtags]
 
         hashtag_text = " ".join(hashtags)
 
@@ -801,6 +725,10 @@ def generate_metadata_structured(
             + "\n\n"
             + hashtag_text
         ).strip()
+
+        valid, reason = validate_metadata(title, final_description, locked=locked)
+        if not valid:
+            raise ValueError(reason)
 
         logger.info(
             "AI metadata generated title=%r hashtags=%s",

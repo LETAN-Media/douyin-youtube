@@ -50,13 +50,14 @@ export function AiProfileForm({
           <input id="ai-lang" name="language" defaultValue={pipeline.language ?? "en"} className={inputCls} />
         </div>
         <div>
-          <label className={labelCls} htmlFor="ai-fixed">Fixed hashtags (mỗi dòng 1 tag)</label>
+          <label className={labelCls} htmlFor="ai-fixed">Preferred Hashtags (mỗi dòng 1 tag)</label>
           <textarea id="ai-fixed" name="fixed_hashtags" rows={3} defaultValue={(pipeline.fixed_hashtags ?? []).join("\n")} className={inputCls} />
         </div>
         <div>
-          <label className={labelCls} htmlFor="ai-adaptive">Adaptive hashtags</label>
+          <label className={labelCls} htmlFor="ai-adaptive">Suggested Hashtags</label>
           <textarea id="ai-adaptive" name="adaptive_hashtags" rows={4} defaultValue={(pipeline.adaptive_hashtags ?? []).join("\n")} className={inputCls} />
         </div>
+        <p className="text-xs text-slate-500">Hashtag chỉ là gợi ý. AI chọn lọc theo nội dung video, có thể tạo tag mới; tối đa 5 tag, không bắt buộc dùng đủ. Locked Hashtags trong Channel DNA là quy tắc riêng.</p>
         <div>
           <label className={labelCls} htmlFor="ai-prompt">Prompt profile</label>
           <textarea id="ai-prompt" name="prompt_profile" rows={5} defaultValue={pipeline.prompt_profile ?? ""} className={inputCls} />

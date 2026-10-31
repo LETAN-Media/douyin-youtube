@@ -2894,7 +2894,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             </div>
 
             <div>
-              <label className="text-xs font-bold text-slate-700">Fixed Hashtags (Bắt buộc, cách nhau bởi dấu cách)</label>
+              <label className="text-xs font-bold text-slate-700">Preferred Hashtags (Gợi ý ưu tiên, cách nhau bởi dấu cách)</label>
               <input
                 type="text"
                 value={aiFixedTags}
@@ -2905,7 +2905,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
             </div>
 
             <div>
-              <label className="text-xs font-bold text-slate-700">Adaptive Hashtags (Gợi ý ưu tiên cho AI)</label>
+              <label className="text-xs font-bold text-slate-700">Suggested Hashtags (Gợi ý cho AI)</label>
               <input
                 type="text"
                 value={aiAdaptiveTags}
@@ -2915,6 +2915,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               />
             </div>
 
+            <p className="text-xs text-slate-500">Hashtag chỉ là gợi ý. AI chọn lọc theo video, có thể tạo tag mới; tối đa 5 tag, không bắt buộc dùng đủ. Locked Hashtags trong Channel DNA là quy tắc riêng.</p>
             <div>
               <label className="text-xs font-bold text-slate-700">Prompt Override / AI System Prompt</label>
               <textarea

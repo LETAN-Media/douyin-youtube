@@ -151,3 +151,13 @@ def test_fingerprint_saved_per_publication(db):
         YouTubeContentFingerprint.publication_id == pub.id
     ).one()
     assert row.fingerprint["topic"] == "T"
+
+
+def test_profile_suggestions_do_not_become_dna_locks(db):
+    dest = _dest(db, 'Suggestions')
+    record = dna.get_or_create_dna(db, dest)
+    assert record.locked_hashtags == []
+    dna.update_dna(db, record, {'locked_hashtags': ['#explicit']})
+    dest.fixed_hashtags = ['#newpreferred']
+    db.commit()
+    assert dna.get_or_create_dna(db, dest).locked_hashtags == ['#explicit']

@@ -806,7 +806,7 @@ def test_channel_ai_prompt_and_locked_tags_isolation(monkeypatch):
     with TestingSession() as db:
         specs = [
             ("FLUFFY-MARKER", IDS["dest_a1"], ["#fluffy", "#cutepets"], "pet"),
-            ("JOYBEAT-MARKER", IDS["dest_b1"], ["#joybeat", "#dance"], "dance"),
+            ("JOYBEAT-MARKER", IDS["dest_b1"], ["#joybeatdance", "#dance"], "dance"),
             ("HBU-MARKER", IDS["dest_admin"], ["#handsome", "#menstyle"], "style"),
         ]
         for marker, dest_id, locked, niche in specs:
@@ -843,9 +843,9 @@ def test_channel_ai_prompt_and_locked_tags_isolation(monkeypatch):
     assert "HBU-MARKER" not in captured["FLUFFY-MARKER"]
     # Locked hashtags enforced per channel in final output.
     assert "#fluffy" in results["FLUFFY-MARKER"]["hashtags"]
-    assert "#joybeat" in results["JOYBEAT-MARKER"]["hashtags"]
+    assert "#joybeatdance" in results["JOYBEAT-MARKER"]["hashtags"]
     assert "#handsome" in results["HBU-MARKER"]["hashtags"]
-    assert "#joybeat" not in results["FLUFFY-MARKER"]["hashtags"]
+    assert "#joybeatdance" not in results["FLUFFY-MARKER"]["hashtags"]
     assert "#fluffy" not in results["JOYBEAT-MARKER"]["hashtags"]
     assert "#handsome" not in results["FLUFFY-MARKER"]["hashtags"]
 

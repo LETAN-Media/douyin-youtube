@@ -337,7 +337,8 @@ class PromptIsolationTests(_CommentTestBase):
 
         self.assertIsNotNone(result)
         system = captured["messages"][0]["content"]
-        self.assertEqual(system, METADATA_PROMPT)
+        self.assertTrue(system.startswith(METADATA_PROMPT + "\nMETADATA CONTRACT"))
+        self.assertIn("optional", system)
         self.assertNotIn(COMMENT_PROMPT, system)
         self.assertEqual(result["title"], "Generated Title")
         self.assertEqual(len(result["hashtags"]), 5)
