@@ -4,9 +4,11 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 
 from app.config import settings
+from app.schedule_policy import effective_schedule, ScheduleError
+from app.upload_quota import quota_block_reason, is_quota_error, pause_after_quota_error
 from app.hashtag_policy import (
     validate_hashtags, repair_description,
     validate_metadata,
@@ -184,45 +186,66 @@ def recover_incomplete_jobs() -> None:
                 video.scheduled_at = None
 
 
+def _upload_policy_block(db, destination, job_id=None):
+    from app.scheduler import count_published_day, destination_today
+    reason = quota_block_reason(db, include_pending=False, exclude_job_id=job_id, destination_id=destination.id)
+    if reason:
+        return reason
+    schedule = effective_schedule(destination)
+    now = utcnow()
+    published = count_published_day(db, destination, destination_today(destination, now))
+    active = select(func.count(VideoJob.id)).where(
+        VideoJob.destination_id == destination.id,
+        VideoJob.status.in_(["downloading", "uploading"]),
+    )
+    if job_id:
+        active = active.where(VideoJob.id != job_id)
+    if published + (db.scalar(active) or 0) >= schedule.daily_upload_limit:
+        return "DAILY_LIMIT_REACHED"
+    latest = db.scalar(select(func.max(Publication.published_at)).where(
+        Publication.destination_id == destination.id, Publication.status == "published"))
+    if latest:
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        if (now-latest).total_seconds() < schedule.min_upload_interval_minutes * 60:
+            return "UPLOAD_INTERVAL_WAIT"
+    # Serialize uploads to one destination even when multiple workers run.
+    if db.scalar(active):
+        return "DESTINATION_UPLOAD_IN_PROGRESS"
+    return None
+
+
 def claim_job() -> str | None:
     with SessionLocal.begin() as db:
-        statement = (
-            select(VideoJob)
-            .where(
-                VideoJob.status
-                == "pending"
-            )
-            .order_by(
-                VideoJob.created_at.asc()
-            )
-            .limit(1)
-            .with_for_update(
-                skip_locked=True
-            )
-        )
-
-        job = (
-            db.execute(statement)
-            .scalars()
-            .first()
-        )
-
-        if job is None:
-            return None
-
-        job.status = "downloading"
-        job.progress = 10
-        job.error = None
-        job.attempts += 1
-
-        # Mirror state to Publication: scheduled/queued -> downloading.
-        try:
+        # One oldest pending job per destination avoids a blocked channel
+        # starving every other pipeline after a restart.
+        ranked = select(VideoJob.id.label("id"), func.row_number().over(
+            partition_by=VideoJob.destination_id,
+            order_by=(VideoJob.created_at.asc(), VideoJob.id.asc()),
+        ).label("rank")).where(VideoJob.status == "pending").subquery()
+        candidates = db.scalars(select(VideoJob).where(VideoJob.id.in_(
+            select(ranked.c.id).where(ranked.c.rank == 1)))
+            .order_by(VideoJob.created_at.asc()).limit(100).with_for_update(skip_locked=True)).all()
+        for job in candidates:
+            if job.destination_id:
+                from app.scheduler import locked_destination
+                destination = locked_destination(db, job.destination_id)
+                if destination:
+                    try:
+                        reason = _upload_policy_block(db, destination)
+                    except ScheduleError as exc:
+                        reason = f"INVALID_SCHEDULE: {exc}"
+                    if reason:
+                        destination.last_skip_reason = reason
+                        continue
+            changed = db.execute(update(VideoJob).where(VideoJob.id == job.id, VideoJob.status == "pending")
+                .values(status="downloading", progress=10, error=None, attempts=VideoJob.attempts+1))
+            if changed.rowcount != 1:
+                continue
             pub = _find_linked_publication(db, job)
             _set_publication_status(db, pub, "downloading")
-        except Exception:
-            logger.exception("Failed to update publication on claim %s", job.id)
-
-        return job.id
+            return job.id
+    return None
 
 
 def mark_failed(
@@ -243,6 +266,20 @@ def mark_failed(
         )
 
         if job is None:
+            return
+
+        if is_quota_error(error_text) or error_text.startswith("UPLOAD_POLICY_WAIT:"):
+            if is_quota_error(error_text):
+                until = pause_after_quota_error(db, destination_id=job.destination_id if "uploadlimitexceeded" in error_text.lower() else None)
+                error_text = f"YOUTUBE_QUOTA_EXHAUSTED until {until.isoformat()}: {error_text}"
+            job.status = "pending"
+            job.error = error_text
+            pub = _find_linked_publication(db, job)
+            _set_publication_status(db, pub, "scheduled", error=error_text)
+            if job.destination_id:
+                dest = db.get(Destination, job.destination_id)
+                if dest:
+                    dest.last_skip_reason = error_text
             return
 
         job.status = "failed"
@@ -563,6 +600,14 @@ def process_job(
             existing_yt_id = getattr(job, "youtube_video_id", None)
             if not existing_yt_id and _pub_for_upload is not None:
                 existing_yt_id = getattr(_pub_for_upload, "external_post_id", None)
+
+            if not existing_yt_id:
+                live_destination = db.get(Destination, destination_id)
+                if live_destination is not None:
+                    db.refresh(live_destination)
+                    reason = _upload_policy_block(db, live_destination, job_id)
+                    if reason:
+                        raise RuntimeError(f"UPLOAD_POLICY_WAIT: {reason}")
 
             try:
                 if existing_yt_id:

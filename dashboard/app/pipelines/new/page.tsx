@@ -1,5 +1,6 @@
 "use client";
 
+import { ScheduleFields } from "@/components/pipeline/ScheduleFields";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -67,10 +68,7 @@ export default function NewPipelinePage() {
                 <label className={labelCls} htmlFor="language">Language</label>
                 <input id="language" name="language" defaultValue="en" className={inputCls} />
               </div>
-              <div>
-                <label className={labelCls} htmlFor="timezone">Timezone</label>
-                <input id="timezone" name="timezone" defaultValue="Asia/Ho_Chi_Minh" className={inputCls} />
-              </div>
+
             </div>
             <div>
               <label className={labelCls} htmlFor="niche">Niche</label>
@@ -85,16 +83,8 @@ export default function NewPipelinePage() {
                   <option value="private">private</option>
                 </select>
               </div>
-              <div>
-                <label className={labelCls} htmlFor="daily_upload_limit">Daily upload limit</label>
-                <input id="daily_upload_limit" name="daily_upload_limit" type="number" min={1} max={50} defaultValue={6} className={inputCls} />
-              </div>
             </div>
-            <div>
-              <label className={labelCls} htmlFor="upload_slots">Upload slots (cách nhau bằng dấu phẩy)</label>
-              <input id="upload_slots" name="upload_slots" defaultValue="09:00,12:00,18:00,21:00" className={inputCls} />
-              <p className="mt-1 text-[11px] text-slate-500">Ví dụ backlog 20 video với slots 09:00,18:00 → video1 Sep 26 09:00, video2 Sep 26 18:00, video3 Sep 27 09:00…</p>
-            </div>
+            <ScheduleFields initial={{daily_upload_limit:4,auto_distribute_upload_slots:true,timezone:"Asia/Ho_Chi_Minh",backlog_slots_per_day:3,new_slots_per_day:1}}/>
             <div>
               <label className={labelCls} htmlFor="publishing_strategy">Publishing strategy</label>
               <select id="publishing_strategy" name="publishing_strategy" defaultValue="immediate" className={inputCls}>

@@ -7,7 +7,30 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class PipelineBase(BaseModel):
+class ScheduleInput(BaseModel):
+    backlog_slots_per_day: int = Field(default=3, ge=0)
+    new_slots_per_day: int = Field(default=1, ge=0)
+    publishing_start_time: str = "08:00"
+    publishing_end_time: str = "23:00"
+    auto_distribute_upload_slots: bool = False
+    publishing_overnight: bool = False
+    min_upload_interval_minutes: int = Field(default=1, ge=0)
+    slot_fallback_enabled: bool = True
+
+
+class SchedulePatch(BaseModel):
+    publishing_start_time: str | None = None
+    publishing_end_time: str | None = None
+    auto_distribute_upload_slots: bool | None = None
+    publishing_overnight: bool | None = None
+    min_upload_interval_minutes: int | None = Field(default=None, ge=1)
+    slot_fallback_enabled: bool | None = None
+    schedule_override_enabled: bool | None = None
+    backlog_slots_per_day: int | None = Field(default=None, ge=0)
+    new_slots_per_day: int | None = Field(default=None, ge=0)
+
+
+class PipelineBase(ScheduleInput):
     name: str = Field(
         max_length=200,
     )
@@ -38,7 +61,7 @@ class PipelineBase(BaseModel):
     ] = "public"
     enabled: bool = True
 
-    daily_upload_limit: int = 4
+    daily_upload_limit: int = Field(default=4, ge=1, strict=True)
     upload_slots: list[str] | None = Field(
         default=["10:00", "14:00", "18:00", "22:00"],
     )
@@ -55,7 +78,7 @@ class PipelineCreate(PipelineBase):
     pass
 
 
-class PipelineUpdate(BaseModel):
+class PipelineUpdate(SchedulePatch):
     name: str | None = Field(
         default=None,
         max_length=200,
@@ -93,6 +116,7 @@ class PipelineUpdate(BaseModel):
     )
     daily_upload_limit: int | None = Field(
         default=None,
+        strict=True,
         ge=1,
     )
     upload_slots: list[str] | None = Field(
@@ -126,6 +150,7 @@ class PipelineUpdate(BaseModel):
 
 
 class PipelineOut(PipelineBase):
+    effective_schedule: dict[str, Any] | None = None
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -364,7 +389,9 @@ class JobOut(BaseModel):
     updated_at: datetime
 
 
-class DestinationBase(BaseModel):
+class DestinationBase(ScheduleInput):
+    schedule_override_enabled: bool = False
+    effective_schedule: dict[str, Any] | None = None
     pipeline_id: str = Field(
         max_length=36,
     )
@@ -381,7 +408,7 @@ class DestinationBase(BaseModel):
         max_length=300,
     )
     enabled: bool = True
-    daily_upload_limit: int = 4
+    daily_upload_limit: int = Field(default=4, ge=1, strict=True)
     timezone: str = "Asia/Ho_Chi_Minh"
     youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] = "immediate"
     upload_slots: list[str] | None = Field(
@@ -416,7 +443,8 @@ class DestinationBase(BaseModel):
     comment_reply_new_only: bool = True
 
 
-class DestinationCreate(BaseModel):
+class DestinationCreate(ScheduleInput):
+    schedule_override_enabled: bool = False
     pipeline_id: str | None = Field(
         default=None,
         max_length=36,
@@ -434,7 +462,7 @@ class DestinationCreate(BaseModel):
         max_length=300,
     )
     enabled: bool = True
-    daily_upload_limit: int = Field(default=4, ge=1, le=50)
+    daily_upload_limit: int = Field(default=4, ge=1, strict=True)
     timezone: str = Field(default="Asia/Ho_Chi_Minh", max_length=50)
     youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] = "immediate"
     upload_slots: list[str] | None = Field(
@@ -459,7 +487,7 @@ class DestinationCreate(BaseModel):
     )
 
 
-class DestinationUpdate(BaseModel):
+class DestinationUpdate(SchedulePatch):
     platform: Literal["youtube", "facebook"] | None = Field(
         default=None,
     )
@@ -480,6 +508,7 @@ class DestinationUpdate(BaseModel):
     )
     daily_upload_limit: int | None = Field(
         default=None,
+        strict=True,
         ge=1,
     )
     youtube_default_publish_mode: Literal["immediate", "scheduled", "private", "unlisted"] | None = Field(
@@ -849,8 +878,18 @@ class ChannelItem(BaseModel):
 
 
 class ChannelDetailResponse(BaseModel):
+    schedule_override_enabled: bool = False
+    effective_schedule: dict[str, Any] | None = None
+    publishing_start_time: str = "08:00"
+    publishing_end_time: str = "23:00"
+    auto_distribute_upload_slots: bool = False
+    publishing_overnight: bool = False
+    min_upload_interval_minutes: int = 1
+    backlog_slots_per_day: int = 0
+    new_slots_per_day: int = 0
+    slot_fallback_enabled: bool = True
     channel: ChannelItem
-    daily_upload_limit: int = 4
+    daily_upload_limit: int = Field(default=4, ge=1, strict=True)
     metadata_profile: str | None = None
     metadata_language: str | None = None
     fixed_hashtags: list[str] | None = None
@@ -901,9 +940,9 @@ class ChannelDetailResponse(BaseModel):
     research_region: str = "VN"
 
 
-class ChannelUpdateRequest(BaseModel):
+class ChannelUpdateRequest(SchedulePatch):
     name: str | None = None
-    daily_upload_limit: int | None = None
+    daily_upload_limit: int | None = Field(default=None, ge=1, strict=True)
     metadata_profile: str | None = None
     metadata_language: str | None = None
     fixed_hashtags: list[str] | None = None

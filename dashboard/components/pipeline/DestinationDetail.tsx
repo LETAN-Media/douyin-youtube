@@ -1,5 +1,6 @@
 "use client";
 
+import { ScheduleFields } from "./ScheduleFields";
 import { useTransition } from "react";
 import { useToast } from "@/components/Toast";
 import { ConfirmButton } from "@/components/ConfirmButton";
@@ -108,18 +109,7 @@ export function DestinationEditForm({
           <label className={labelCls}>Name</label>
           <input name="name" defaultValue={destination.name} className={inputCls} />
         </div>
-        <div>
-          <label className={labelCls}>Daily upload limit</label>
-          <input name="daily_upload_limit" type="number" min={1} max={50} defaultValue={destination.daily_upload_limit} className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls}>Timezone</label>
-          <input name="timezone" defaultValue={destination.timezone} className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls}>Upload slots</label>
-          <input name="upload_slots" defaultValue={(destination.upload_slots ?? []).join(",")} className={inputCls} />
-        </div>
+        <ScheduleFields initial={destination} destination/>
         <div>
           <label className={labelCls}>Publish strategy</label>
           <select name="publish_strategy" defaultValue={destination.publish_strategy} className={inputCls}>

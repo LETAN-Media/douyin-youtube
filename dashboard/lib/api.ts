@@ -312,6 +312,7 @@ export async function createDestination(
   pipelineId: string,
   input: {
     platform: string;
+    schedule_override_enabled?: boolean;
     name: string;
     publish_strategy?: string;
     daily_upload_limit?: number;

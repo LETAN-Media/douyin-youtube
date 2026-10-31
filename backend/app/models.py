@@ -150,6 +150,18 @@ class Pipeline(Base):
         lazy="selectin",
     )
 
+    publishing_start_time: Mapped[str] = mapped_column(String(5), default="08:00", server_default="08:00", nullable=False)
+    publishing_end_time: Mapped[str] = mapped_column(String(5), default="23:00", server_default="23:00", nullable=False)
+    auto_distribute_upload_slots: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    publishing_overnight: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    slot_fallback_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    schedule_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    min_upload_interval_minutes: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    @property
+    def effective_schedule(self):
+        from app.schedule_policy import schedule_for_display
+        return schedule_for_display(pipeline=self)
+
     daily_upload_limit: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -986,7 +998,7 @@ class Destination(Base):
     )
 
     pipeline: Mapped["Pipeline"] = relationship(
-        back_populates="destinations",
+        back_populates="destinations", lazy="joined",
     )
 
     platform: Mapped[str] = mapped_column(
@@ -1025,6 +1037,19 @@ class Destination(Base):
         nullable=False,
         default=True,
     )
+
+    publishing_start_time: Mapped[str] = mapped_column(String(5), default="08:00", server_default="08:00", nullable=False)
+    publishing_end_time: Mapped[str] = mapped_column(String(5), default="23:00", server_default="23:00", nullable=False)
+    auto_distribute_upload_slots: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    publishing_overnight: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    slot_fallback_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+    schedule_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_override_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+
+    @property
+    def effective_schedule(self):
+        from app.schedule_policy import schedule_for_display
+        return schedule_for_display(self)
 
     daily_upload_limit: Mapped[int] = mapped_column(
         Integer,

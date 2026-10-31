@@ -1,5 +1,7 @@
 "use client";
 
+import { ScheduleFields } from "@/components/pipeline/ScheduleFields";
+import { scheduleFormData } from "@/lib/schedule";
 import { useState, useTransition, useCallback, useRef, useEffect } from "react";
 import Link from "next/link";
 import { Badge, Card, ProgressBar } from "@/components/ui";
@@ -350,27 +352,9 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
     await handlePublish(false, true);
   };
 
-  const handleConfirmOverride = async () => {
-    if (!limitModal) return;
-    const destId = limitModal.destination_id;
+  const handleConfirmOverride = () => {
     setLimitModal(null);
-    setPublishing(true);
-    try {
-      await fetch(`/api/channels/${encodeURIComponent(destId)}/overrides`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          extra_allowed: 1,
-          reason: "User confirmed override via UI",
-          source: "ui_confirmation",
-        }),
-      });
-      await handlePublish(false, false);
-      reloadDetail();
-    } catch (err: unknown) {
-      setPublishError(err instanceof Error ? err.message : "Tạo override thất bại");
-      setPublishing(false);
-    }
+    setActiveTab("settings");
   };
 
   // Polling for active publications in manual tab
@@ -738,33 +722,23 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   // ==========================================
   // TAB: AUTO SETTINGS STATE
   // ==========================================
-  const [autoSlots, setAutoSlots] = useState(
-    ((detail as unknown as { upload_slots?: string[] }).upload_slots || detail.pipeline?.upload_slots || ["09:00", "12:00", "18:00", "21:00"]).join(", ")
-  );
-  const [autoLimit, setAutoLimit] = useState(detail.daily_upload_limit || 4);
-  const [autoTimezone, setAutoTimezone] = useState(detail.timezone || "Asia/Ho_Chi_Minh");
   const [autoPublishMode, setAutoPublishMode] = useState<"immediate" | "scheduled" | "private" | "unlisted">(
     ((detail as unknown as { youtube_default_publish_mode?: string }).youtube_default_publish_mode as "immediate" | "scheduled" | "private" | "unlisted") || "immediate",
   );
   const [savingAuto, setSavingAuto] = useState(false);
   const [autoSuccess, setAutoSuccess] = useState(false);
 
-  const handleSaveAuto = async (e: React.FormEvent) => {
+  const handleSaveAuto = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSavingAuto(true);
     setAutoSuccess(false);
     try {
-      const slotList = autoSlots
-        .split(/[\s,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const form = new FormData(e.currentTarget);
       const res = await fetch(`/api/channels/${channel.destination_id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          daily_upload_limit: Number(autoLimit),
-          upload_slots: slotList,
-          timezone: autoTimezone,
+          ...scheduleFormData(form, true),
           youtube_default_publish_mode: autoPublishMode,
         }),
       });
@@ -1101,30 +1075,28 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
   // TAB: SETTINGS FORM STATE & ACTIONS
   // ==========================================
   const [settingsName, setSettingsName] = useState(channel.channel_title || "");
-  const [settingsLimit, setSettingsLimit] = useState(detail.daily_upload_limit || 4);
   const [settingsPrivacy, setSettingsPrivacy] = useState(detail.pipeline?.default_privacy || "public");
-  const [settingsTz, setSettingsTz] = useState(detail.timezone || "Asia/Ho_Chi_Minh");
   const [settingsPublishMode, setSettingsPublishMode] = useState(
     ((detail as unknown as { youtube_default_publish_mode?: string }).youtube_default_publish_mode as string) || "immediate",
   );
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
 
-  const handleSaveSettings = async (e: React.FormEvent) => {
+  const handleSaveSettings = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSavingSettings(true);
     setSettingsSuccess(false);
 
     try {
+      const form = new FormData(e.currentTarget);
       const res = await fetch(`/api/channels/${channel.destination_id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: settingsName,
           prompt_override: aiPrompt,
-          daily_upload_limit: Number(settingsLimit),
+          ...scheduleFormData(form, true),
           default_privacy: settingsPrivacy,
-          timezone: settingsTz,
           youtube_default_publish_mode: settingsPublishMode,
         }),
       });
@@ -1610,7 +1582,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   <IconClock size={14} />
                 </div>
                 <p className="mt-2 text-2xl font-black text-slate-900">{detail.daily_upload_limit} / ngày</p>
-                <p className="mt-0.5 text-[11px] text-slate-500">{detail.pipeline?.upload_slots?.length || 0} slots giờ</p>
+                <p className="mt-0.5 text-[11px] text-slate-500">{detail.effective_schedule?.upload_slots?.length ?? detail.upload_slots?.length ?? 0} slots giờ</p>
                 <button
                   type="button"
                   onClick={() => setActiveTab("auto")}
@@ -2113,7 +2085,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 </div>
               </div>
               {autoSuccess && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-bold text-emerald-800">✓ Đã lưu cài đặt Auto Mode thành công!</div>}
-              <div><label className="text-xs font-bold text-slate-700">Daily Upload Limit (videos/ngày)</label><input type="number" min={1} max={50} value={autoLimit} onChange={(e) => setAutoLimit(Number(e.target.value) || 1)} className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" /></div>
+              <ScheduleFields initial={detail} destination/>
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                 <p className="text-xs font-extrabold text-slate-700">Publishing strategy</p>
                 <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -2146,8 +2118,6 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                   </select>
                 </label>
               </div>
-              <div><label className="text-xs font-bold text-slate-700">Upload Slots (Giờ xuất bản, phân cách bằng dấu phẩy)</label><input type="text" value={autoSlots} onChange={(e) => setAutoSlots(e.target.value)} placeholder="09:00, 12:00, 18:00, 21:00" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 font-mono text-sm font-bold text-indigo-600 shadow-sm focus:border-indigo-500 focus:outline-none" /><p className="mt-1 text-[11px] text-slate-500">Định dạng 24h: <code>09:00, 12:00, 18:00, 21:00</code> — mỗi kênh lịch riêng</p></div>
-              <div><label className="text-xs font-bold text-slate-700">Múi giờ (Timezone)</label><input type="text" value={autoTimezone} onChange={(e) => setAutoTimezone(e.target.value)} placeholder="Asia/Ho_Chi_Minh" className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none" /></div>
               <div className="pt-2"><button type="submit" disabled={savingAuto} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white shadow-md hover:bg-indigo-500 disabled:opacity-50">{savingAuto ? "Đang lưu…" : "Lưu cài đặt Auto"}</button></div>
             </form>
           </Card>
@@ -2779,7 +2749,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                               className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-600 shadow-sm hover:bg-slate-50"
                             >
                               <IconX size={14} />
-                              Huỷ
+                              Xếp vào slot còn trống
                             </button>
                           </div>
                         </div>
@@ -2977,17 +2947,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               />
             </div>
 
-            <div>
-              <label className="text-xs font-bold text-slate-700">Daily Upload Limit</label>
-              <input
-                type="number"
-                min={1}
-                max={50}
-                value={settingsLimit}
-                onChange={(e) => setSettingsLimit(Number(e.target.value) || 1)}
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none"
-              />
-            </div>
+            <ScheduleFields initial={detail} destination/>
 
             <div>
               <label className="text-xs font-bold text-slate-700">Quyền riêng tư mặc định (Default Privacy)</label>
@@ -3000,17 +2960,6 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 <option value="unlisted">Unlisted</option>
                 <option value="private">Private</option>
               </select>
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-slate-700">Timezone</label>
-              <input
-                type="text"
-                value={settingsTz}
-                onChange={(e) => setSettingsTz(e.target.value)}
-                placeholder="Asia/Ho_Chi_Minh"
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none"
-              />
             </div>
 
             <div>
@@ -3254,7 +3203,7 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
               Channel này đã đạt giới hạn {limitModal.daily_limit} Shorts hôm nay.
             </p>
             <p className="mt-2 text-sm text-slate-700 font-semibold">
-              Bạn có muốn vượt giới hạn và đăng thêm video này hôm nay không?
+              Để tăng số video/ngày, hãy đổi Daily Upload Limit trong Settings. Hệ thống không đăng vượt giới hạn đã lưu.
             </p>
             <div className="mt-6 flex items-center justify-end gap-3">
               <button
@@ -3262,14 +3211,14 @@ export function ChannelWorkspaceClient({ initialDetail }: ChannelWorkspaceClient
                 onClick={handleCancelLimit}
                 className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition"
               >
-                Huỷ
+                Xếp vào slot còn trống
               </button>
               <button
                 type="button"
                 onClick={handleConfirmOverride}
                 className="rounded-xl bg-rose-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-rose-500 transition"
               >
-                Vẫn đăng
+                Mở Settings
               </button>
             </div>
           </div>

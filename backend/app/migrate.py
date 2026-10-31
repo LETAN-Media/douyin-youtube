@@ -1,4 +1,5 @@
 import logging
+import json
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -1221,7 +1222,61 @@ def _apply_018(cache: SchemaCache, engine: Any) -> None:
 
 
 # Registry of all migrations in chronological order
+# Dynamic schedules: additive migration; never edits existing publications/jobs.
+_SCHEDULE_COLUMNS = [
+    ("publishing_start_time", "VARCHAR(5) DEFAULT '08:00' NOT NULL"),
+    ("publishing_end_time", "VARCHAR(5) DEFAULT '23:00' NOT NULL"),
+    ("auto_distribute_upload_slots", "BOOLEAN DEFAULT FALSE NOT NULL"),
+    ("publishing_overnight", "BOOLEAN DEFAULT FALSE NOT NULL"),
+    ("slot_fallback_enabled", "BOOLEAN DEFAULT TRUE NOT NULL"),
+    ("schedule_updated_at", "TIMESTAMP"),
+]
+
+
+def _verify_019(cache, engine):
+    return all(cache.column_exists(t, c) for t in ("pipelines", "destinations") for c, _ in _SCHEDULE_COLUMNS) and cache.column_exists("destinations", "schedule_override_enabled") and cache.column_exists("pipelines", "min_upload_interval_minutes")
+
+
+def _apply_019(cache, engine):
+    with engine.begin() as conn:
+        for table in ("pipelines", "destinations"):
+            columns = list(_SCHEDULE_COLUMNS)
+            columns += [("min_upload_interval_minutes", "INTEGER DEFAULT 1 NOT NULL")] if table == "pipelines" else [("schedule_override_enabled", "BOOLEAN DEFAULT TRUE NOT NULL")]
+            new_window = not cache.column_exists(table, "publishing_start_time")
+            new_override = table == "destinations" and not cache.column_exists(table, "schedule_override_enabled")
+            for name, sqltype in columns:
+                if not cache.column_exists(table, name):
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sqltype}"))
+                    cache.add_column(table, name)
+            if new_window:
+                # Derive legacy manual windows from their actual existing hours;
+                # adding Settings fields must not invalidate e.g. 01:00 slots.
+                for row in conn.execute(text(f"SELECT id, upload_slots FROM {table}")):
+                    try:
+                        slots = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+                        from app.schedule_policy import minute
+                        hours = sorted({str(x) for x in slots or [] if minute(str(x)) >= 0})
+                    except (ValueError, TypeError):
+                        hours = []
+                    if hours:
+                        conn.execute(text(f"UPDATE {table} SET publishing_start_time=:start, publishing_end_time=:end WHERE id=:id"), {"id":row[0],"start":hours[0],"end":hours[-1]})
+            if new_override:
+                # Existing rows default to override=True, preserving custom schedules
+                # even if migration is interrupted before this backfill. Exact copies
+                # follow the pipeline, so future pipeline saves actually take effect.
+                conn.execute(text("""UPDATE destinations SET schedule_override_enabled = FALSE
+                    WHERE EXISTS (SELECT 1 FROM pipelines p WHERE p.id = destinations.pipeline_id
+                      AND p.daily_upload_limit = destinations.daily_upload_limit
+                      AND p.timezone = destinations.timezone
+                      AND p.backlog_slots_per_day = destinations.backlog_slots_per_day
+                      AND p.new_slots_per_day = destinations.new_slots_per_day
+                      AND CASE WHEN destinations.min_upload_interval_minutes > 1 THEN destinations.min_upload_interval_minutes ELSE 1 END = p.min_upload_interval_minutes
+                      AND COALESCE(CAST(p.upload_slots AS TEXT),'') = COALESCE(CAST(destinations.upload_slots AS TEXT),''))"""))
+            conn.execute(text(f"UPDATE {table} SET schedule_updated_at = CURRENT_TIMESTAMP WHERE schedule_updated_at IS NULL"))
+
+
 MIGRATIONS = [
+    # Entries remain ordered; dynamic schedule migration is last.
     MigrationDefinition("20240101_001_core_tables", "Core base tables", _verify_001, _apply_001),
     MigrationDefinition("20240102_002_analytics_tables", "Analytics & research tables", _verify_002, _apply_002),
     MigrationDefinition("20240103_003_core_columns", "Core column additions", _verify_003, _apply_003),
@@ -1240,6 +1295,7 @@ MIGRATIONS = [
     MigrationDefinition("20240116_016_douyin_video_duration", "Douyin video duration seconds", _verify_016, _apply_016),
     MigrationDefinition("20240117_017_douyin_source_scan_stats", "Douyin source last scan stats", _verify_017, _apply_017),
     MigrationDefinition("20240118_018_douyin_scan_jobs", "Douyin scan jobs queue", _verify_018, _apply_018),
+    MigrationDefinition("20261031_019_dynamic_schedule", "Dynamic inherited upload schedules", _verify_019, _apply_019),
 ]
 
 

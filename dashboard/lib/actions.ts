@@ -1,5 +1,6 @@
 "use server";
 
+import { scheduleFormData } from "./schedule";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
@@ -55,9 +56,7 @@ export async function actionCreatePipeline(
       niche: String(form.get("niche") ?? "").trim() || undefined,
       language: String(form.get("language") ?? "").trim() || undefined,
       default_privacy: String(form.get("default_privacy") ?? "public"),
-      timezone: String(form.get("timezone") ?? "Asia/Ho_Chi_Minh").trim() || "Asia/Ho_Chi_Minh",
-      daily_upload_limit: Number(form.get("daily_upload_limit") ?? 6) || 6,
-      upload_slots: parseSlots(String(form.get("upload_slots") ?? "09:00,12:00,18:00,21:00")),
+      ...scheduleFormData(form),
       youtube_default_publish_mode: strat === "scheduled" ? "scheduled" : "immediate",
     } as never);
     revalidatePath("/");
@@ -93,11 +92,7 @@ export async function actionUpdatePipelineSettings(
     const language = String(form.get("language") ?? "").trim();
     if (language) payload.language = language;
     payload.default_privacy = String(form.get("default_privacy") ?? "public");
-    payload.timezone = String(form.get("timezone") ?? "UTC").trim() || "UTC";
-    payload.daily_upload_limit = Number(form.get("daily_upload_limit") ?? 6) || 6;
-    payload.upload_slots = parseSlots(String(form.get("upload_slots") ?? ""));
-    payload.backlog_slots_per_day = Number(form.get("backlog_slots_per_day") ?? 4);
-    payload.new_slots_per_day = Number(form.get("new_slots_per_day") ?? 2);
+    Object.assign(payload, scheduleFormData(form));
     payload.backlog_order = String(form.get("backlog_order") ?? "asc");
     payload.backlog_threshold_days = Number(form.get("backlog_threshold_days") ?? 7) || 7;
     await updatePipeline(id, payload);
@@ -273,11 +268,7 @@ export async function actionCreateDestination(
       platform: String(form.get("platform") ?? "youtube"),
       name,
       publish_strategy: String(form.get("publish_strategy") ?? "broadcast"),
-      daily_upload_limit: Number(form.get("daily_upload_limit") ?? 6) || 6,
-      timezone: String(form.get("timezone") ?? "UTC").trim() || "UTC",
-      upload_slots: parseSlots(
-        String(form.get("upload_slots") ?? "08:00,11:00,14:00,17:00,20:00,23:00"),
-      ),
+      schedule_override_enabled: false,
       metadata_language: String(form.get("metadata_language") ?? "").trim() || undefined,
       metadata_profile: String(form.get("metadata_profile") ?? "").trim() || undefined,
     });
@@ -339,10 +330,7 @@ export async function actionUpdateDestination(
     const payload: Record<string, unknown> = {};
     const name = String(form.get("name") ?? "").trim();
     if (name) payload.name = name;
-    payload.daily_upload_limit = Number(form.get("daily_upload_limit") ?? 6) || 6;
-    payload.timezone = String(form.get("timezone") ?? "UTC").trim() || "UTC";
-    const slots = parseSlots(String(form.get("upload_slots") ?? ""));
-    if (slots.length > 0) payload.upload_slots = slots;
+    Object.assign(payload, scheduleFormData(form, true));
     payload.publish_strategy = String(form.get("publish_strategy") ?? "broadcast");
     const lang = String(form.get("metadata_language") ?? "").trim();
     if (lang) payload.metadata_language = lang;

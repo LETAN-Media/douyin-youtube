@@ -89,7 +89,8 @@ def test_flow_state_schema_and_counts_with_real_publications():
             name="JoyBeat YouTube Channel",
             connected=True,
             enabled=True,
-            daily_upload_limit=10,
+            schedule_override_enabled=True,
+        daily_upload_limit=10,
         )
         db.add_all([source, dest])
         db.flush()

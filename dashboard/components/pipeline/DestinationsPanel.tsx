@@ -260,7 +260,7 @@ export function DestinationCard({
           </span>
           <div className="min-w-0">
             <p className="truncate text-sm font-extrabold text-slate-900">{d.name}</p>
-            <p className="text-xs text-slate-500">{platformLabel(d.platform)} · {d.daily_upload_limit}/day</p>
+            <p className="text-xs text-slate-500">{platformLabel(d.platform)} · {d.effective_schedule?.daily_upload_limit ?? d.daily_upload_limit}/day</p>
           </div>
         </div>
         {connected ? (
@@ -289,7 +289,7 @@ export function DestinationCard({
             </p>
           ) : null}
           <p className="tnum mt-0.5">
-            Today {todayCount}/{d.daily_upload_limit} · Next: {next ? formatTime(next) : "—"}
+            Today {todayCount}/{d.effective_schedule?.daily_upload_limit ?? d.daily_upload_limit} · Next: {next ? formatTime(next) : "—"}
           </p>
         </div>
       )}
@@ -301,7 +301,7 @@ export function DestinationCard({
 
       {/* Schedule slots */}
       <div className="mt-2 flex flex-wrap gap-1">
-        {(d.upload_slots ?? []).map((s) => (
+        {(d.effective_schedule?.upload_slots ?? d.upload_slots ?? []).map((s) => (
           <span key={s} className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-700">
             {s}
           </span>
@@ -562,18 +562,7 @@ function DestinationWizard({
             <option value="selected">selected</option>
           </select>
         </div>
-        <div>
-          <label className={labelCls} htmlFor="w-limit">Daily upload limit</label>
-          <input id="w-limit" name="daily_upload_limit" type="number" min={1} max={50} defaultValue={6} className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls} htmlFor="w-tz">Timezone</label>
-          <input id="w-tz" name="timezone" defaultValue="Asia/Ho_Chi_Minh" className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls} htmlFor="w-slots">Upload slots</label>
-          <input id="w-slots" name="upload_slots" defaultValue="08:00,11:00,14:00,17:00,20:00,23:00" className={inputCls} />
-        </div>
+        <p className="text-xs text-slate-500 sm:col-span-2">Destination mới dùng lịch mặc định từ Pipeline. Sau khi tạo, bạn có thể chủ động bật Override để đặt lịch riêng.</p>
         <div>
           <label className={labelCls} htmlFor="w-lang">Metadata language</label>
           <input id="w-lang" name="metadata_language" placeholder="en" className={inputCls} />

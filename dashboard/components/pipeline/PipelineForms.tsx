@@ -1,5 +1,6 @@
 "use client";
 
+import { ScheduleFields } from "./ScheduleFields";
 import { useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/Toast";
@@ -83,7 +84,7 @@ export function SettingsForm({
 
   return (
     <Card>
-      <CardHeader title="Settings" subtitle="Schedule ở pipeline chỉ là mặc định; schedule thực tế nằm ở từng destination" icon={<IconSettings size={16} />} />
+      <CardHeader title="Settings" subtitle="Mặc định cho Destination không bật override; lịch đã Scheduled được giữ nguyên" icon={<IconSettings size={16} />} />
       <form
         className="grid gap-4 p-4 sm:grid-cols-2 sm:px-5"
         onSubmit={(e) => {
@@ -102,10 +103,6 @@ export function SettingsForm({
           <input id="s-name" name="name" defaultValue={pipeline.name} className={inputCls} />
         </div>
         <div>
-          <label className={labelCls} htmlFor="s-tz">Timezone</label>
-          <input id="s-tz" name="timezone" defaultValue={pipeline.timezone} className={inputCls} />
-        </div>
-        <div>
           <label className={labelCls} htmlFor="s-privacy">Default privacy</label>
           <select id="s-privacy" name="default_privacy" defaultValue={pipeline.default_privacy} className={inputCls}>
             <option value="public">public</option>
@@ -113,22 +110,7 @@ export function SettingsForm({
             <option value="private">private</option>
           </select>
         </div>
-        <div>
-          <label className={labelCls} htmlFor="s-limit">Daily upload limit</label>
-          <input id="s-limit" name="daily_upload_limit" type="number" min={1} max={50} defaultValue={pipeline.daily_upload_limit} className={inputCls} />
-        </div>
-        <div className="sm:col-span-2">
-          <label className={labelCls} htmlFor="s-slots">Upload slots</label>
-          <input id="s-slots" name="upload_slots" defaultValue={(pipeline.upload_slots ?? []).join(",")} className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls} htmlFor="s-backlog">Backlog slots/day</label>
-          <input id="s-backlog" name="backlog_slots_per_day" type="number" min={0} defaultValue={pipeline.backlog_slots_per_day} className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls} htmlFor="s-new">New slots/day</label>
-          <input id="s-new" name="new_slots_per_day" type="number" min={0} defaultValue={pipeline.new_slots_per_day} className={inputCls} />
-        </div>
+        <ScheduleFields initial={pipeline}/>
         <div>
           <label className={labelCls} htmlFor="s-order">Backlog order</label>
           <select id="s-order" name="backlog_order" defaultValue={pipeline.backlog_order} className={inputCls}>

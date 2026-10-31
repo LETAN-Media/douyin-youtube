@@ -229,8 +229,8 @@ class TestScheduler(unittest.TestCase):
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
         self.assertEqual(scheduled, 1)
 
-    def test_four_shorts_per_day_cap(self):
-        # Fixed rule: max 4 shorts/day/channel even with 6 configured slots.
+    def test_configured_six_per_day_cap(self):
+        # The configured limit and six slots are both honored.
         pipeline = self._make_pipeline()
         self._make_destination(pipeline)
         source = self._make_source(pipeline)
@@ -246,7 +246,7 @@ class TestScheduler(unittest.TestCase):
             self.db.commit()
 
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
-        self.assertEqual(scheduled, 4)
+        self.assertEqual(scheduled, 6)
 
     def test_one_job_per_slot_poll_10_times(self):
         pipeline = self._make_pipeline()
@@ -452,8 +452,8 @@ class TestScheduler(unittest.TestCase):
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").count()
         self.assertEqual(scheduled, 3)
 
-    def test_new_videos_preferred_then_backlog(self):
-        # Fixed 4/day cap: genuinely new videos are selected before backlog.
+    def test_configured_backlog_and_new_distribution(self):
+        # Six configured positions allocate four backlog and two new videos.
         pipeline = self._make_pipeline()
         self._make_destination(pipeline)
         source = self._make_source(pipeline)
@@ -475,9 +475,9 @@ class TestScheduler(unittest.TestCase):
         scheduled = self.db.query(DouyinVideo).filter(DouyinVideo.status == "scheduled").all()
         backlog_scheduled = [v for v in scheduled if v.is_backlog]
         new_scheduled = [v for v in scheduled if not v.is_backlog]
-        self.assertEqual(len(scheduled), 4)
+        self.assertEqual(len(scheduled), 6)
         self.assertEqual(len(new_scheduled), 2)
-        self.assertEqual(len(backlog_scheduled), 2)
+        self.assertEqual(len(backlog_scheduled), 4)
 
     def test_round_robin_between_sources(self):
         pipeline = self._make_pipeline()

@@ -113,8 +113,13 @@ class Settings(BaseSettings):
     scheduler_startup_delay_seconds: int = 10
     scheduler_cycle_timeout_seconds: int = 180
 
-    # YouTube Shorts fixed rule: max N shorts per day per channel.
+    # Default only; each effective Pipeline/Destination limit is authoritative.
     youtube_shorts_daily_limit: int = 4
+    scheduler_max_daily_uploads: int = Field(default=1440, ge=1, le=1440)
+    scheduler_min_slot_interval_minutes: int = Field(default=1, ge=1, le=1440)
+    scheduler_daily_upload_warning_threshold: int = Field(default=20, ge=1)
+    # Optional conservative project upload budget; 0 means remaining quota is unknown.
+    youtube_project_daily_upload_budget: int = Field(default=0, ge=0)
 
     # ---- AI Comment Reply ----
     # A subsystem independent of publishing: its own worker and interval so

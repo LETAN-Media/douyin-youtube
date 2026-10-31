@@ -1,4 +1,5 @@
-export interface Pipeline {
+import type { ScheduleValues } from "./schedule";
+export interface Pipeline extends ScheduleValues {
   id: string;
   name: string;
   slug: string;
@@ -157,7 +158,7 @@ export interface VideoWithPublications extends InventoryVideo {
 
 export type YouTubePublishMode = "immediate" | "scheduled" | "private" | "unlisted";
 
-export interface Destination {
+export interface Destination extends ScheduleValues {
   id: string;
   pipeline_id: string;
   platform: "youtube" | "facebook" | string;
@@ -557,7 +558,7 @@ export interface ChannelInventoryItem {
   created_at?: string | null;
 }
 
-export interface ChannelDetail {
+export interface ChannelDetail extends ScheduleValues {
   channel: ChannelItem;
   daily_upload_limit: number;
   metadata_profile?: string | null;

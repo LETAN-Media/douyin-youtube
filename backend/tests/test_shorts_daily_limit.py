@@ -328,7 +328,7 @@ def test_case_g_failed_releases_and_retry_keeps_slot(db):
     assert jobs == []
 
 
-def test_promote_fifo_and_cap(db):
+def test_promote_current_slot_leaves_missed_slots_for_review(db):
     pipe = make_pipeline(db)
     dest = make_destination(db, pipe)
     pubs = []
@@ -336,17 +336,17 @@ def test_promote_fifo_and_cap(db):
         v = make_video(db, pipe)
         pub, _, _ = allocate_publication(db, dest, pipe, v, T0)
         pubs.append(pub)
-    # 14:05 ICT Sep 26: first two slots (10:00, 14:00 ICT) due -> FIFO.
+    # 14:05 ICT: promote current 14:00 slot only; do not catch up 10:00.
     now = datetime(2026, 9, 26, 7, 5, tzinfo=timezone.utc)
     n = promote_due_publications(db, dest, now)
-    assert n == 2
+    assert n == 1
     jobs = db.execute(
         select(VideoJob).where(VideoJob.destination_id == dest.id)
         .order_by(VideoJob.created_at.asc())
     ).scalars().all()
-    assert len(jobs) == 2
-    assert jobs[0].publication_id == pubs[0].id
-    assert jobs[1].publication_id == pubs[1].id
+    assert len(jobs) == 1
+    assert jobs[0].publication_id == pubs[1].id
+    assert pubs[0].status == "queued"  # Missed reservation is unchanged.
     # Second call promotes nothing new (idempotent).
     assert promote_due_publications(db, dest, now) == 0
 
@@ -467,7 +467,7 @@ def test_api_capacity_endpoint(tclient, db):
     assert body["timezone"] == "Asia/Ho_Chi_Minh"
 
 
-def test_api_manual_409_and_override_flow(tclient, db):
+def test_api_manual_409_and_configured_limit_flow(tclient, db):
     """Tests 4-6: 4/4 -> 409 + override_required -> override -> publish ok."""
     from app.models import YouTubeDailyPublishOverride
 
@@ -492,7 +492,7 @@ def test_api_manual_409_and_override_flow(tclient, db):
     assert body["daily_limit"] == 4
     assert body["published_today"] == 4
     assert body["remaining"] == 0
-    assert body["override_required"] is True
+    assert body["override_required"] is False
 
     # queue_if_full keeps it queued instead.
     res2 = tclient.post(
@@ -505,17 +505,17 @@ def test_api_manual_409_and_override_flow(tclient, db):
         select(func.count(YouTubeDailyPublishOverride.id))
     ).scalar_one() == 0
 
-    # User confirms -> override -> publish accepted (5/4).
+    # Legacy publish-anyway API is rejected; changing Settings is required.
     ores = tclient.post(
         f"/api/channels/{dest.id}/overrides",
         json={"extra_allowed": 1, "reason": "user confirmed", "source": "ui_confirmation"},
     )
-    assert ores.status_code == 201
+    assert ores.status_code == 422
     res3 = tclient.post(
         "/api/manual/publish",
         json={**payload, "video_id": "manual2", "source_url": "https://v.douyin.com/manual2/"},
     )
-    assert res3.status_code == 202, res3.text
+    assert res3.status_code == 409, res3.text
 
     # Scheduler must not auto-publish a 6th.
     schedule_for_destination(db, dest, now=now)
@@ -536,7 +536,7 @@ def test_api_inventory_publish_409(tclient, db):
         json={"destination_id": dest.id},
     )
     assert res.status_code == 409
-    assert res.json()["detail"]["override_required"] is True
+    assert res.json()["detail"]["override_required"] is False
     # queue_if_full instead.
     res2 = tclient.post(
         f"/api/pipelines/{pipe.id}/inventory/{v.id}/publish",
@@ -606,7 +606,9 @@ def test_short_daily_limit_config(db):
     dest = make_destination(db, pipe, daily_upload_limit=2)
     assert shorts_daily_limit(dest) == 2
     dest.daily_upload_limit = 10
-    assert shorts_daily_limit(dest) == 4
+    assert shorts_daily_limit(dest) == 2  # Inherits pipeline until explicitly overridden.
+    dest.schedule_override_enabled = True
+    assert shorts_daily_limit(dest) == 10
     assert count_published_day(db, dest, datetime.now(timezone.utc).date()) == 0
 
 
@@ -704,7 +706,7 @@ def test_4_four_of_four_manual_publish_409(tclient, db):
     assert detail["daily_limit"] == 4
     assert detail["published_today"] == 4
     assert detail["remaining"] == 0
-    assert detail["override_required"] is True
+    assert detail["override_required"] is False
 
 
 def test_5_user_cancels_keeps_queue(tclient, db):
@@ -736,45 +738,22 @@ def test_5_user_cancels_keeps_queue(tclient, db):
     assert len(jobs) == 0
 
 
-def test_6_user_publishes_anyway_override_5_of_4(tclient, db):
-    """Test 6: user chọn Publish anyway -> tạo override -> publish thành 5/4."""
+def test_6_legacy_overrides_cannot_bypass_configured_limit(tclient, db):
     from app.models import YouTubeDailyPublishOverride
-
+    from app.scheduler import destination_today
     pipe, dest = _api_setup(db)
     now = datetime.now(timezone.utc)
     for _ in range(4):
         make_published(db, pipe, dest, make_video(db, pipe), now)
-
-    # Explicit user override created
-    ores = tclient.post(
-        f"/api/channels/{dest.id}/overrides",
-        json={"extra_allowed": 1, "reason": "user confirmed", "source": "ui_confirmation"},
-    )
-    assert ores.status_code == 201
-
-    # Audit record verified
-    override_row = db.execute(
-        select(YouTubeDailyPublishOverride)
-        .where(YouTubeDailyPublishOverride.destination_id == dest.id)
-    ).scalar_one()
-    assert override_row.extra_allowed == 1
-    assert override_row.source == "ui_confirmation"
-
-    # Now manual publish succeeds
-    payload = {
-        "source_url": "https://v.douyin.com/spec6/",
-        "video_id": "spec6",
-        "destination_ids": [dest.id],
-        "metadata_mode": "same",
-        "title": "Title 6",
-        "privacy_status": "public",
-    }
-    res = tclient.post("/api/manual/publish", json=payload)
-    assert res.status_code == 202, res.text
-
-    # Capacity reflects 5 allowed today
-    cap = tclient.get(f"/api/channels/{dest.id}/schedule-capacity").json()
-    assert cap["allowed_today"] == 5
+    row = YouTubeDailyPublishOverride(destination_id=dest.id,date=destination_today(dest,now).isoformat(),extra_allowed=1,reason="legacy approval",source="ui_confirmation")
+    db.add(row);db.commit()
+    ores=tclient.post(f"/api/channels/{dest.id}/overrides",json={"extra_allowed":1,"source":"ui_confirmation"})
+    assert ores.status_code==422
+    res=tclient.post("/api/manual/publish",json={"source_url":"https://v.douyin.com/spec6/","video_id":"spec6","destination_ids":[dest.id],"metadata_mode":"same","title":"Title 6","privacy_status":"public"})
+    assert res.status_code==409
+    cap=tclient.get(f"/api/channels/{dest.id}/schedule-capacity").json()
+    assert cap["allowed_today"]==4
+    assert db.get(YouTubeDailyPublishOverride,row.id).extra_allowed==1  # History retained.
 
 
 def test_7_override_scheduler_never_auto_publishes_6th(tclient, db):
@@ -902,7 +881,7 @@ def test_9_channel_isolation_a_blocked_b_allowed(tclient, db):
         json={**base, "source_url": "https://v.douyin.com/spec9_a/", "video_id": "spec9_a", "destination_ids": [dest_a.id]},
     )
     assert ra.status_code == 409
-    assert ra.json()["detail"]["override_required"] is True
+    assert ra.json()["detail"]["override_required"] is False
 
 
 def test_10_day_rollover_resets_quota_queue_continues(tclient, db):

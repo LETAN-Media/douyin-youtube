@@ -29,6 +29,7 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session, lazyload
 
 from app.config import settings
+from app.schedule_policy import effective_schedule, prepare_schedule_update, ScheduleError, SCHEDULE_FIELDS
 from app.db import (
     Base,
     engine,
@@ -148,6 +149,41 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("douyin-youtube-api")
+
+
+
+
+def _apply_schedule(owner, data, pipeline=None, db=None):
+    try:
+        data = prepare_schedule_update(owner, dict(data), pipeline)
+    except ScheduleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    for key, value in data.items():
+        setattr(owner, key, value)
+    if db is not None and set(data) & SCHEDULE_FIELDS:
+        affected = [owner] if isinstance(owner, Destination) else list(db.scalars(
+            select(Destination).where(Destination.pipeline_id == owner.id, Destination.schedule_override_enabled == False)))
+        for dest in affected:
+            schedule = effective_schedule(dest)
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(schedule.timezone)
+            today = datetime.now(timezone.utc).astimezone(tz).date()
+            counts = {}
+            rows = db.scalars(select(Publication).where(Publication.destination_id == dest.id,
+                Publication.status.in_(["published", "queued", "scheduled", "pending", "downloading", "ai_metadata", "uploading", "processing"])))
+            for pub in rows:
+                stamp = pub.published_at if pub.status == "published" else (pub.scheduled_at or pub.created_at)
+                if stamp is None:
+                    continue
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                day = stamp.astimezone(tz).date()
+                if day >= today:
+                    counts[day] = counts.get(day, 0) + 1
+            for day, count in counts.items():
+                if count > schedule.daily_upload_limit:
+                    raise HTTPException(status_code=409, detail=f"Destination {dest.name} already has {count} published/reserved videos on {day}; limit {schedule.daily_upload_limit} cannot be applied without changing existing schedules. No jobs were changed.")
+
 
 
 def _utcnow() -> datetime:
@@ -284,6 +320,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(ScheduleError)
+async def invalid_schedule_response(request: Request, exc: ScheduleError):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=422, content={"code": "INVALID_SCHEDULE", "detail": str(exc)})
+
+
+@app.get("/api/scheduler/policy", dependencies=[Depends(authenticate_request)])
+def scheduler_policy():
+    return {
+        "max_daily_uploads": settings.scheduler_max_daily_uploads,
+        "minimum_interval_minutes": settings.scheduler_min_slot_interval_minutes,
+        "warning_threshold": settings.scheduler_daily_upload_warning_threshold,
+        "project_daily_upload_budget": settings.youtube_project_daily_upload_budget,
+        "quota_remaining_known": False,
+    }
+
+
+@app.post("/api/scheduler/preview", dependencies=[Depends(authenticate_request)])
+def preview_schedule(payload: PipelineUpdate):
+    from types import SimpleNamespace
+    data = payload.model_dump(exclude_none=True)
+    base = SimpleNamespace(daily_upload_limit=4, upload_slots=None, auto_distribute_upload_slots=True,
+                           publishing_start_time="08:00", publishing_end_time="23:00", timezone="UTC")
+    _apply_schedule(base, data)
+    return effective_schedule(base).to_dict()
 
 
 @app.get("/health")
@@ -1689,6 +1752,14 @@ def create_pipeline(
     except Exception:
         pass
 
+    schedule_data = {k: v for k, v in payload.model_dump().items() if k in SCHEDULE_FIELDS}
+    if "upload_slots" not in payload.model_fields_set:
+        schedule_data["auto_distribute_upload_slots"] = True
+    # Default backlog/new proportions are normalized when not explicitly edited.
+    for k in ("backlog_slots_per_day", "new_slots_per_day"):
+        if k not in payload.model_fields_set:
+            schedule_data.pop(k, None)
+    _apply_schedule(pipeline, schedule_data)
     db.add(pipeline)
     db.commit()
     db.refresh(pipeline)
@@ -1732,8 +1803,7 @@ def update_pipeline(
         exclude_none=True,
     )
 
-    for key, value in update_data.items():
-        setattr(pipeline, key, value)
+    _apply_schedule(pipeline, update_data, db=db)
 
     db.commit()
     db.refresh(pipeline)
@@ -2062,7 +2132,7 @@ def create_pipeline_destination(
         external_account_name=payload.external_account_name,
         enabled=payload.enabled,
         daily_upload_limit=payload.daily_upload_limit,
-        timezone=payload.timezone or "Asia/Ho_Chi_Minh",
+        timezone=payloaeffective_schedule(d).timezone,
         youtube_default_publish_mode=getattr(payload, "youtube_default_publish_mode", "immediate") or "immediate",
         upload_slots=payload.upload_slots,
         publish_strategy=payload.publish_strategy,
@@ -2073,6 +2143,15 @@ def create_pipeline_destination(
         prompt_override=payload.prompt_override,
     )
 
+    destination.schedule_override_enabled = payload.schedule_override_enabled
+    if payload.schedule_override_enabled:
+        own = {k: v for k, v in payload.model_dump().items() if k in SCHEDULE_FIELDS}
+        if "upload_slots" not in payload.model_fields_set:
+            own["auto_distribute_upload_slots"] = True
+        for k in ("backlog_slots_per_day", "new_slots_per_day"):
+            if k not in payload.model_fields_set:
+                own.pop(k, None)
+        _apply_schedule(destination, own, pipeline)
     db.add(destination)
     db.commit()
     db.refresh(destination)
@@ -2116,8 +2195,7 @@ def update_destination(
         exclude_none=True,
     )
 
-    for key, value in update_data.items():
-        setattr(destination, key, value)
+    _apply_schedule(destination, update_data, db.get(Pipeline, destination.pipeline_id), db=db)
 
     db.commit()
     db.refresh(destination)
@@ -2209,40 +2287,14 @@ def list_publications(
 
 
 def _destination_next_upload(destination: Destination) -> str | None:
-    """Compute next upload slot without any DB access (pure)."""
+    """Compute the next slot using the effective destination timezone."""
+    from app.scheduler import get_next_upload_slot
     try:
-        slots = destination.upload_slots or []
-        if not slots:
-            return None
-        slot_times = []
-        for slot_str in slots:
-            try:
-                hour, minute = map(int, str(slot_str).split(":"))
-                slot_time = datetime.combine(
-                    datetime.now().date(),
-                    datetime.min.time().replace(hour=hour, minute=minute),
-                )
-                if slot_time.tzinfo is None:
-                    slot_time = slot_time.replace(tzinfo=timezone.utc)
-                slot_times.append(slot_time)
-            except (ValueError, AttributeError):
-                continue
-        future_slots = [s for s in slot_times if s >= datetime.now(timezone.utc)]
-        if future_slots:
-            return min(future_slots).isoformat()
-        if slot_times:
-            tomorrow = datetime.now().date() + timedelta(days=1)
-            hour, minute = map(int, str(slots[0]).split(":"))
-            slot_time = datetime.combine(
-                tomorrow,
-                datetime.min.time().replace(hour=hour, minute=minute),
-            )
-            if slot_time.tzinfo is None:
-                slot_time = slot_time.replace(tzinfo=timezone.utc)
-            return slot_time.isoformat()
-    except Exception:
+        schedule = effective_schedule(destination)
+        slot = get_next_upload_slot(schedule.upload_slots, schedule.timezone, _utcnow())
+        return slot.isoformat() if slot else None
+    except ScheduleError:
         return None
-    return None
 
 
 @app.get(
@@ -2259,23 +2311,14 @@ def destination_status(
 ) -> dict:
     destination = require_destination(db, destination_id)
 
-    today_start = datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-
-    today_published = db.execute(
-        select(func.count(Publication.id))
-        .where(Publication.destination_id == destination_id)
-        .where(Publication.status == "published")
-        .where(Publication.published_at >= today_start)
-    ).scalar_one_or_none()
-    today_published = today_published or 0
+    from app.scheduler import count_published_day, destination_today
+    today_published = count_published_day(db, destination, destination_today(destination, _utcnow()))
 
     return {
         "connected": destination.connected,
         "platform": destination.platform,
         "name": destination.name,
-        "daily_upload_limit": destination.daily_upload_limit,
+        "daily_upload_limit": effective_schedule(destination).daily_upload_limit,
         "today_published": today_published,
         "next_upload": _destination_next_upload(destination),
         "enabled": destination.enabled,
@@ -2310,9 +2353,13 @@ def pipeline_destination_statuses(
     )
     if not destinations:
         return []
-    today_start = datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    from app.scheduler import get_local_day_bounds
+    from sqlalchemy import and_, or_
+    day_conditions = []
+    for destination in destinations:
+        start, end = get_local_day_bounds(effective_schedule(destination).timezone, _utcnow())
+        day_conditions.append(and_(Publication.destination_id == destination.id,
+            Publication.published_at >= start, Publication.published_at < end))
     dest_ids = [d.id for d in destinations]
     rows = db.execute(
         select(
@@ -2321,7 +2368,7 @@ def pipeline_destination_statuses(
         )
         .where(Publication.destination_id.in_(dest_ids))
         .where(Publication.status == "published")
-        .where(Publication.published_at >= today_start)
+        .where(or_(*day_conditions))
         .group_by(Publication.destination_id)
     ).all()
     counts = {str(r[0]): int(r[1] or 0) for r in rows}
@@ -2331,7 +2378,7 @@ def pipeline_destination_statuses(
             "connected": d.connected,
             "platform": d.platform,
             "name": d.name,
-            "daily_upload_limit": d.daily_upload_limit,
+            "daily_upload_limit": effective_schedule(d).daily_upload_limit,
             "today_published": counts.get(str(d.id), 0),
             "next_upload": _destination_next_upload(d),
             "enabled": d.enabled,
@@ -2662,7 +2709,7 @@ def pipeline_flow_state(
                 "connected": bool(d.connected),
                 "enabled": bool(d.enabled),
                 "today_published": int(today_by_dest.get(str(d.id), 0)),
-                "daily_upload_limit": int(d.daily_upload_limit or 0),
+                "daily_upload_limit": effective_schedule(d).daily_upload_limit,
                 "next_upload": _destination_next_upload(d),
                 "last_published_at": last_pub_by_dest.get(str(d.id)),
             }
@@ -3151,12 +3198,12 @@ def pipeline_stats(
     now = _utcnow()
     next_publication = None
     for destination in destinations:
-        if not destination.enabled or not destination.upload_slots:
+        if not destination.enabled or not effective_schedule(destination).upload_slots:
             continue
         try:
             slot = get_next_upload_slot(
-                destination.upload_slots or [],
-                destination.timezone or "UTC",
+                effective_schedule(destination).upload_slots,
+                effective_schedule(destination).timezone,
                 now,
             )
         except Exception:
@@ -3345,7 +3392,7 @@ def publish_inventory_video_now(
 
     now = _utcnow()
 
-    # Shorts 4/day rule for immediate publish (override-aware).
+    # Daily upload limit rule for immediate publish (override-aware).
     from app.scheduler import (
         destination_today as _dest_today2,
         day_allowance as _day_allowance2,
@@ -3410,7 +3457,8 @@ def publish_inventory_video_now(
                 "daily_limit": _cap2,
                 "published_today": _pub_n2,
                 "remaining": 0,
-                "override_required": True,
+                "override_required": False,
+                        "settings_change_required": True,
                 "extra_allowed_today": _extra_n2,
                 "options": ["Queue for tomorrow", "Replace a scheduled slot"],
             },
@@ -4063,7 +4111,7 @@ def retry_publication(
     if publication.scheduled_at is None:
         publication.scheduled_at = _utcnow()
 
-    # Enqueue a worker job only when the slot is due and the 4/day cap
+    # Enqueue a worker job only when the slot is due and the effective daily cap
     # allows it; otherwise promotion picks it up later. Never lose the item.
     from app.scheduler import (
         count_day_usage as _count_day_usage3,
@@ -4262,10 +4310,10 @@ def pipeline_scheduler_status(
     next_slots: list[str] = []
     try:
         for d in destinations:
-            if not d.enabled or not (d.upload_slots or []):
+            if not d.enabled or not effective_schedule(d).upload_slots:
                 continue
             nxt = get_next_upload_slot(
-                d.upload_slots or [], d.timezone or "UTC", now
+                effective_schedule(d).upload_slots, effective_schedule(d).timezone, now
             )
             if nxt is not None:
                 next_slots.append(nxt.isoformat())
@@ -4276,7 +4324,7 @@ def pipeline_scheduler_status(
     today_rows: list[dict] = []
     for d in destinations:
         try:
-            day_start, _ = get_local_day_bounds(d.timezone or "UTC", now)
+            day_start, _ = get_local_day_bounds(effective_schedule(d).timezone, now)
         except Exception:
             day_start = now.replace(
                 hour=0, minute=0, second=0, microsecond=0
@@ -4290,7 +4338,7 @@ def pipeline_scheduler_status(
         released = count_todays_released_jobs(db, pipeline, day_start, d)
         try:
             nxt = get_next_upload_slot(
-                d.upload_slots or [], d.timezone or "UTC", now
+                effective_schedule(d).upload_slots, effective_schedule(d).timezone, now
             )
             nxt_iso = nxt.isoformat() if nxt is not None else None
         except Exception:
@@ -4302,7 +4350,7 @@ def pipeline_scheduler_status(
                 reason = "SCHEDULER_DISABLED"
             elif not (d.enabled and d.connected and d.credentials):
                 reason = "DESTINATION_NOT_CONNECTED"
-            elif int(released or 0) >= int(d.daily_upload_limit or 6):
+            elif int(released or 0) >= effective_schedule(d).daily_upload_limit:
                 reason = "DAILY_LIMIT_REACHED"
             elif int(inventory_available or 0) <= 0:
                 reason = "NO_AVAILABLE_INVENTORY"
@@ -4316,7 +4364,8 @@ def pipeline_scheduler_status(
             "connected": bool(d.connected),
             "published": int(published or 0),
             "released": int(released or 0),
-            "limit": int(d.daily_upload_limit or 6),
+            "limit": effective_schedule(d).daily_upload_limit,
+            "effective_schedule": effective_schedule(d).to_dict(),
             "next_slot": nxt_iso,
             "last_skip_reason": reason,
             "last_check_at": (
@@ -4941,7 +4990,7 @@ def manual_publish_endpoint(
                 except Exception:
                     _used = set()
                 publish_at_utc = _find_slot(
-                    dest.upload_slots or [], sched_tz, _used, now=now
+                    effective_schedule(dest).upload_slots, effective_schedule(dest).timezone, _used, now=now
                 )
                 if publish_at_utc is None:
                     raise HTTPException(status_code=400, detail="INVALID_PUBLISH_AT: no free slot")
@@ -4988,8 +5037,8 @@ def manual_publish_endpoint(
                 pass
         privacy = MODE_TO_PRIVACY.get(raw_mode, "public")
 
-        # Shorts 4/day rule: immediate Publish Now must respect the quota.
-        # allowed = 4 + user-approved extra (scheduler never auto-overrides).
+        # Daily upload limit rule: immediate Publish Now must respect the quota.
+        # The configured effective limit applies to manual and auto uploads alike.
         if raw_mode == "immediate":
             from app.scheduler import (
                 destination_today as _dest_today,
@@ -5051,7 +5100,8 @@ def manual_publish_endpoint(
                         "daily_limit": _cap,
                         "published_today": _pub_n,
                         "remaining": 0,
-                        "override_required": True,
+                        "override_required": False,
+                        "settings_change_required": True,
                         "extra_allowed_today": _extra_n,
                         "options": ["Queue for tomorrow", "Replace a scheduled slot"],
                     },
@@ -5428,6 +5478,10 @@ def get_channel_detail_endpoint(
     if row is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy channel")
     d, pipeline = row
+    # This hot path disables relationship loading. Bind the already selected
+    # parent in memory so effective schedules still inherit correctly.
+    from sqlalchemy.orm.attributes import set_committed_value
+    set_committed_value(d, "pipeline", pipeline)
     if (d.platform or "").lower() != "youtube":
         raise HTTPException(status_code=404, detail="Không tìm thấy YouTube channel")
     if not ctx.is_system_admin and d.workspace_id not in ctx.workspace_ids:
@@ -5635,8 +5689,8 @@ def get_channel_detail_endpoint(
     limit = shorts_daily_limit(d)
     extra = int(pub_agg.extra_allowed or 0) if pub_agg else 0
     used = cap_pub + cap_res + cap_leg
-    slots = d.upload_slots or (pipeline.upload_slots if pipeline else []) or ["08:00", "12:00", "16:00"]
-    nxt = get_next_upload_slot(slots, d.timezone or "UTC", now_utc)
+    slots = effective_schedule(d).upload_slots
+    nxt = get_next_upload_slot(slots, effective_schedule(d).timezone, now_utc)
     next_slot_str = nxt.isoformat() if nxt else None
     
     shorts_capacity = {
@@ -5648,8 +5702,9 @@ def get_channel_detail_endpoint(
         "scheduled_today": cap_res + cap_leg,
         "used_today": used,
         "remaining_today": max(0, limit - used),
-        "extra_allowed_today": extra,
-        "allowed_today": limit + extra,
+        "extra_allowed_today": 0,
+        "legacy_extra_allowance": extra,
+        "allowed_today": limit,
         "queued": int(pub_agg.exact_queued or 0) if pub_agg else 0,
         "next_available_slot": next_slot_str,
     }
@@ -5689,15 +5744,25 @@ def get_channel_detail_endpoint(
         analytics_reconnect_required=analytics_reconnect_required,
         research_region=getattr(d, "research_region", "VN") or "VN",
         channel=channel_item,
-        daily_upload_limit=d.daily_upload_limit,
+        daily_upload_limit=effective_schedule(d).daily_upload_limit,
+        schedule_override_enabled=d.schedule_override_enabled,
+        effective_schedule=effective_schedule(d).to_dict(),
+        publishing_start_time=effective_schedule(d).publishing_start_time,
+        publishing_end_time=effective_schedule(d).publishing_end_time,
+        auto_distribute_upload_slots=effective_schedule(d).auto_distribute_upload_slots,
+        publishing_overnight=effective_schedule(d).publishing_overnight,
+        min_upload_interval_minutes=effective_schedule(d).min_upload_interval_minutes,
+        backlog_slots_per_day=effective_schedule(d).backlog_slots_per_day,
+        new_slots_per_day=effective_schedule(d).new_slots_per_day,
+        slot_fallback_enabled=effective_schedule(d).slot_fallback_enabled,
         metadata_profile=d.metadata_profile,
         metadata_language=d.metadata_language,
         fixed_hashtags=d.fixed_hashtags,
         adaptive_hashtags=d.adaptive_hashtags,
         prompt_override=d.prompt_override,
-        timezone=d.timezone or "Asia/Ho_Chi_Minh",
+        timezone=effective_schedule(d).timezone,
         youtube_default_publish_mode=getattr(d, "youtube_default_publish_mode", "immediate") or "immediate",
-        upload_slots=d.upload_slots or (pipeline.upload_slots if pipeline else []) or [],
+        upload_slots=effective_schedule(d).upload_slots,
         pipeline=pipeline_info,
         sources=sources_data,
         queue=queue_list,
@@ -5734,10 +5799,9 @@ def update_channel_endpoint(
         d.name = payload.name
         if pipeline:
             pipeline.name = payload.name
-    if payload.daily_upload_limit is not None:
-        d.daily_upload_limit = payload.daily_upload_limit
-        if pipeline:
-            pipeline.daily_upload_limit = payload.daily_upload_limit
+    schedule_data = {k: v for k, v in payload.model_dump(exclude_none=True).items() if k in SCHEDULE_FIELDS}
+    if schedule_data:
+        _apply_schedule(d, schedule_data, pipeline, db=db)
     if payload.metadata_profile is not None:
         d.metadata_profile = payload.metadata_profile
         if pipeline:
@@ -5758,14 +5822,6 @@ def update_channel_endpoint(
         d.prompt_override = payload.prompt_override
         if pipeline:
             pipeline.prompt_profile = payload.prompt_override
-    if payload.timezone is not None:
-        d.timezone = payload.timezone
-        if pipeline:
-            pipeline.timezone = payload.timezone
-    if payload.upload_slots is not None:
-        d.upload_slots = payload.upload_slots
-        if pipeline:
-            pipeline.upload_slots = payload.upload_slots
     if payload.enabled is not None:
         d.enabled = payload.enabled
     if payload.default_privacy is not None and pipeline:
@@ -6315,7 +6371,7 @@ def channel_auto_status_endpoint(
         ).scalars().all()
     )
     now = _utcnow()
-    day_start, _ = get_local_day_bounds(d.timezone or "UTC", now)
+    day_start, _ = get_local_day_bounds(effective_schedule(d).timezone, now)
 
     today_published = count_todays_released_jobs(
         db,
@@ -6360,7 +6416,7 @@ def channel_auto_status_endpoint(
         "last_scan_at": max(scans).isoformat() if scans else None,
         "next_scan_at": min(nexts).isoformat() if nexts else None,
         "today_published": int(today_published or 0),
-        "today_limit": int(d.daily_upload_limit or 0),
+        "today_limit": effective_schedule(d).daily_upload_limit,
         "queue_count": int(queue_count),
         "failed_count": int(failed_count),
         "held_count": int(held_count),
@@ -6652,7 +6708,7 @@ def channel_schedule_capacity_endpoint(
     destination_id: str,
     db: Session = Depends(get_db),
 ) -> ScheduleCapacityOut:
-    """Shorts 4/day capacity snapshot for one channel. Read-only."""
+    """Daily upload limit capacity snapshot for one channel. Read-only."""
     from app.scheduler import get_capacity
 
     d = require_destination(db, destination_id, youtube_only=True)
@@ -6672,7 +6728,7 @@ def channel_batch_import_endpoint(
     """Batch-import Douyin URLs into one channel with FIFO cross-day slots.
 
     Every resolvable URL is persisted (never discarded); each video is
-    assigned to the nearest day with a free slot (max 4/day/channel).
+    assigned to the nearest day with a free slot (the effective per-channel limit).
     """
     from app.scheduler import (
         allocate_publication,
@@ -6841,25 +6897,9 @@ def create_daily_override_endpoint(
     payload: DailyOverrideCreate,
     db: Session = Depends(get_db),
 ) -> Any:
-    """Explicit user approval for extra slots today. Never auto-created."""
-    from app.models import YouTubeDailyPublishOverride
-    from app.scheduler import destination_today
-
-    d = require_destination(db, destination_id, youtube_only=True)
-    today_str = destination_today(d, _utcnow()).isoformat()
-    row = YouTubeDailyPublishOverride(
-        destination_id=d.id,
-        workspace_id=d.workspace_id,
-        date=today_str,
-        approved_by=(payload.approved_by or "")[:200] or None,
-        reason=(payload.reason or "")[:2000] or None,
-        extra_allowed=int(payload.extra_allowed),
-        source=payload.source,
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
+    """Legacy records remain readable; new limits must be set in Settings."""
+    require_destination(db, destination_id, youtube_only=True)
+    raise HTTPException(status_code=422, detail="Publish-anyway allowances cannot bypass Daily Upload Limit. Change Pipeline Settings or explicitly enable Destination schedule override.")
 
 
 @app.get(
@@ -7292,7 +7332,7 @@ def get_upcoming_scheduled_endpoint(
     items = []
     for pub, video in rows:
         yt_at = getattr(pub, "youtube_publish_at", None)
-        yt_tz = getattr(pub, "youtube_schedule_timezone", None) or d.timezone or "Asia/Ho_Chi_Minh"
+        yt_tz = getattr(pub, "youtube_schedule_timezone", None) or effective_schedule(d).timezone
         preview = None
         try:
             if yt_at is not None:
@@ -7339,7 +7379,7 @@ def change_publication_schedule_endpoint(
     if pub.status == "published":
         raise HTTPException(status_code=409, detail="Video đã published, không thể đổi lịch")
     dest = db.get(Destination, pub.destination_id)
-    default_tz = (getattr(pub, "youtube_schedule_timezone", None) or (dest.timezone if dest else None) or "Asia/Ho_Chi_Minh")
+    default_tz = (getattr(pub, "youtube_schedule_timezone", None) or (effective_schedule(dest).timezone if dest else None) or "Asia/Ho_Chi_Minh")
     new_at, tz_name = _resolve_schedule_datetime(req, default_tz)
     try:
         validate_publish_at(new_at)
@@ -7545,11 +7585,11 @@ def next_free_slot_endpoint(
         used = {r[0].isoformat() for r in rows if r[0] is not None}
     except Exception:
         used = set()
-    nxt = find_next_free_slot(d.upload_slots or [], d.timezone or "Asia/Ho_Chi_Minh", used, now=_utcnow())
+    nxt = find_next_free_slot(effective_schedule(d).upload_slots, effective_schedule(d).timezone, used, now=_utcnow())
     return {
         "destination_id": destination_id,
-        "timezone": d.timezone or "Asia/Ho_Chi_Minh",
-        "slots": d.upload_slots or [],
+        "timezone": effective_schedule(d).timezone,
+        "slots": effective_schedule(d).upload_slots,
         "next_slot": nxt.isoformat() if nxt else None,
     }
 
