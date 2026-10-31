@@ -3131,10 +3131,27 @@ def delete_pipeline(
         get_db
     ),
 ) -> None:
-    pipeline = require_pipeline(db, pipeline_id)
+    """Delete one pipeline and only its own management data.
 
-    db.delete(pipeline)
-    db.commit()
+    ``db.delete(pipeline)`` cannot be used: the ORM would null NOT NULL child
+    foreign keys (HTTP 500) and leave the queue orphaned. The service below
+    disables the pipeline, purges children in FK order and rolls back safely.
+    """
+    from app.pipeline_deletion import (
+        PipelineDeleteError,
+        delete_pipeline as purge_pipeline,
+    )
+    from app.tenancy import require_pipeline_delete_permission
+
+    pipeline = require_pipeline(db, pipeline_id)
+    require_pipeline_delete_permission(db, pipeline)
+    try:
+        purge_pipeline(db, pipeline)
+    except PipelineDeleteError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
 
 
 @app.get(

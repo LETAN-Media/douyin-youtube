@@ -272,6 +272,40 @@ def require_pipeline(
     return pipe
 
 
+def require_pipeline_delete_permission(db: Session, pipeline: Pipeline) -> None:
+    """Destructive pipeline deletion needs workspace owner/admin rights.
+
+    Visibility is already enforced by require_pipeline (404 outside scope).
+    Deleting an entire pipeline is destructive, so a plain ``member`` cannot
+    do it: system admin or owner/admin of the owning workspace only.
+    """
+    ctx = tenant_ctx()
+    if ctx.is_system_admin:
+        return
+    workspace_id = pipeline.workspace_id
+    if not workspace_id or not _workspace_allows(ctx, workspace_id):
+        raise HTTPException(status_code=404, detail="Không tìm thấy pipeline")
+    if not ctx.user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="PIPELINE_DELETE_FORBIDDEN: cần quyền owner/admin của workspace.",
+        )
+    role = db.execute(
+        select(WorkspaceMember.role).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == ctx.user_id,
+        )
+    ).scalar_one_or_none()
+    if str(role or "").lower() not in {"owner", "admin"}:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "PIPELINE_DELETE_FORBIDDEN: chỉ owner/admin của workspace "
+                "được xóa pipeline."
+            ),
+        )
+
+
 def require_destination(
     db: Session, destination_id: str, youtube_only: bool = False
 ) -> Destination:

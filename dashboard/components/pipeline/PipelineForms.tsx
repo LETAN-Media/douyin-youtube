@@ -148,11 +148,16 @@ export function DangerZone({
           Xóa pipeline <span className="font-semibold">{name}</span> và toàn bộ dữ liệu liên quan.
         </p>
         <ConfirmButton
-          title="Xóa pipeline?"
-          message={`Xóa pipeline "${name}"? Không thể hoàn tác.`}
+          title={`Xóa pipeline ${name}?`}
+          message="Hành động này sẽ xóa Pipeline và dữ liệu quản lý liên quan trong hệ thống."
+          details="Video đã đăng trên YouTube sẽ không bị xóa. Thao tác này không thể hoàn tác."
+          requireText={name}
           onConfirm={async () => {
             const r = await actionDeletePipeline(pipelineId);
-            if (r.ok) router.push("/");
+            if (r.ok) {
+              router.push("/");
+              router.refresh();
+            }
             return r;
           }}
         />
