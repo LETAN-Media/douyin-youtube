@@ -5,6 +5,13 @@ import { useToast } from "./Toast";
 import { btnDangerGhost, btnDanger, btnSecondary, inputCls, labelCls } from "./ui";
 import type { ActionResult } from "@/lib/types";
 
+// Compare the typed confirmation loosely: case, surrounding/extra spaces and
+// Unicode composition must never block a destructive action the user clearly
+// intends (e.g. pipeline "TC Media" typed as "tc media").
+function normalizeConfirmation(value: string): string {
+  return value.normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
 /**
  * Destructive-action confirmation.
  *
@@ -36,13 +43,31 @@ export function ConfirmButton({
   const [pending, start] = useTransition();
   const { toast } = useToast();
 
-  const matches = !requireText || typed.trim() === requireText.trim();
+  const matches =
+    !requireText ||
+    normalizeConfirmation(typed) === normalizeConfirmation(requireText);
 
   const close = () => {
     if (pending) return;
     setOpen(false);
     setTyped("");
     setError(null);
+  };
+
+  const confirm = () => {
+    if (pending || !matches) return;
+    setError(null);
+    start(async () => {
+      const r = await onConfirm();
+      if (r.ok) {
+        toast("Đã xóa.", "success");
+        setOpen(false);
+        setTyped("");
+      } else {
+        setError(r.error);
+        toast(r.error, "error");
+      }
+    });
   };
 
   return (
@@ -92,8 +117,19 @@ export function ConfirmButton({
                   autoCapitalize="off"
                   spellCheck={false}
                   disabled={pending}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      confirm();
+                    }
+                  }}
                   className={`${inputCls} mt-1`}
                 />
+                {typed.length > 0 && !matches ? (
+                  <span className="mt-1 block text-[11px] font-normal text-amber-700">
+                    Tên chưa khớp (không phân biệt hoa/thường).
+                  </span>
+                ) : null}
               </label>
             ) : null}
 
@@ -119,20 +155,7 @@ export function ConfirmButton({
                 type="button"
                 className={`${btnDanger} flex-1`}
                 disabled={pending || !matches}
-                onClick={() =>
-                  start(async () => {
-                    setError(null);
-                    const r = await onConfirm();
-                    if (r.ok) {
-                      toast("Đã xóa.", "success");
-                      setOpen(false);
-                      setTyped("");
-                    } else {
-                      setError(r.error);
-                      toast(r.error, "error");
-                    }
-                  })
-                }
+                onClick={confirm}
               >
                 {pending ? "Đang xóa…" : confirmLabel}
               </button>
