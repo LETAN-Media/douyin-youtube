@@ -31,7 +31,7 @@ def test_parse_chat_body_toolnet_trailing_done():
     assert usage["total_tokens"] == 42
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_generate_metadata_with_mock_toolnet(monkeypatch):
     import os
     monkeypatch.setenv("TOOLNET_BASE_URL", "https://api.toolnet.tech/v1")
@@ -72,7 +72,7 @@ async def test_generate_metadata_with_mock_toolnet(monkeypatch):
     assert meta.model == "groq/qwen/qwen3.8-27b"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_generate_metadata_falls_back_to_secondary_model(monkeypatch):
     from app.config import settings as app_settings
 

@@ -61,8 +61,8 @@ class Settings(BaseSettings):
     # ToolNet OpenAI-compatible AI (read-only from env, never logged).
     TOOLNET_BASE_URL: str | None = None
     TOOLNET_API_KEY: str | None = None
-    TOOLNET_MODEL: str | None = None
-    TOOLNET_FALLBACK_MODEL: str | None = None
+    TOOLNET_MODEL: str | None = "groq/qwen/qwen3.8-27b"
+    TOOLNET_FALLBACK_MODEL: str | None = "agnes/agnes-3.0-flash"
     TOOLNET_AI_ENABLED: bool = True
     TOOLNET_TIMEOUT: float = 60.0
     TOOLNET_MAX_REQUESTS_PER_MINUTE: int = 30
