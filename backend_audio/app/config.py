@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     PHIMTAT_MAX_BYTES: int = 500 * 1024 * 1024
     PHIMTAT_VER: str = "8"          # rollback = "7" via env, no code change
     PHIMTAT_PREFER_SD: bool = True  # audio pipeline: SD is enough, smaller fetch
+    PHIMTAT_MIN_INTERVAL_SECONDS: float = 300.0  # 5 minutes pacing between Phimtat downloads
 
     # ToolNet OpenAI-compatible AI (read-only from env, never logged).
     TOOLNET_BASE_URL: str | None = None

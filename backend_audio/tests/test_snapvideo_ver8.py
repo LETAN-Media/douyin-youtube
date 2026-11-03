@@ -31,6 +31,7 @@ def _decode_fetch(request: httpx.Request) -> str:
 @pytest.fixture()
 def phimtat(monkeypatch):
     from app.config import settings
+    from app.services import snapvideo
 
     monkeypatch.setattr(settings, "PHIMTAT_ENABLED", True)
     monkeypatch.setattr(settings, "PHIMTAT_API_KEY", "phimtat_test_key")
@@ -40,10 +41,13 @@ def phimtat(monkeypatch):
                         "https://api.phimtat.vn/snapvideo/red64.php")
     monkeypatch.setattr(settings, "PHIMTAT_VER", "8")
     monkeypatch.setattr(settings, "PHIMTAT_PREFER_SD", False)
+    monkeypatch.setattr(settings, "PHIMTAT_MIN_INTERVAL_SECONDS", 0.0)
     # Keep fallback out of the picture unless a test opts in explicitly.
     monkeypatch.setattr(settings, "AUDIO_FASTSAVER_BASE_URL", "")
     monkeypatch.setattr(settings, "AUDIO_FASTSAVER_API_KEY", "")
+    snapvideo.reset_phimtat_cooldown()
     yield settings
+    snapvideo.reset_phimtat_cooldown()
 
 
 def _v8_medias(sd_first: bool = False) -> dict:
@@ -226,3 +230,24 @@ def test_pick_media_url_object_and_string_variants():
     assert sv._pick_media_url({
         "✅ Đồng ý": {"url": "https://api.phimtat.vn/snapvideo/agree-terms.php?sid=x"},
     }) is None
+
+
+def test_phimtat_cooldown_enforcement(phimtat, monkeypatch):
+    import time
+    from app.services import snapvideo as sv
+
+    monkeypatch.setattr(phimtat, "PHIMTAT_MIN_INTERVAL_SECONDS", 300.0)
+    sv.reset_phimtat_cooldown()
+
+    # Initially cooldown is 0
+    assert sv.get_phimtat_cooldown_remaining() == 0.0
+
+    # Simulate activity
+    sv.record_phimtat_activity()
+    remaining = sv.get_phimtat_cooldown_remaining()
+    assert 295.0 <= remaining <= 300.0
+
+    # Fast forward time
+    base_time = sv._last_phimtat_time
+    monkeypatch.setattr(time, "monotonic", lambda: base_time + 301.0)
+    assert sv.get_phimtat_cooldown_remaining() == 0.0

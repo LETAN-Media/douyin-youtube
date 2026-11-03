@@ -24,6 +24,7 @@ targets), content-type and ffprobe structure.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import ipaddress
 import logging
@@ -45,6 +46,54 @@ PROVIDER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
 
 _SKIP_LABEL_HINTS = ("jpg", "png", "guide", "close", "update")
+
+_last_phimtat_time: float = 0.0
+_phimtat_lock: asyncio.Lock | None = None
+
+
+def _get_phimtat_lock() -> asyncio.Lock:
+    global _phimtat_lock
+    if _phimtat_lock is None:
+        _phimtat_lock = asyncio.Lock()
+    return _phimtat_lock
+
+
+def record_phimtat_activity() -> None:
+    """Record the timestamp of Phimtat resolve or download completion/failure."""
+    global _last_phimtat_time
+    _last_phimtat_time = time.monotonic()
+
+
+def get_phimtat_cooldown_remaining() -> float:
+    """Return remaining cooldown seconds before Phimtat can be called again."""
+    from app.config import settings
+
+    interval = float(getattr(settings, "PHIMTAT_MIN_INTERVAL_SECONDS", 300.0) or 0.0)
+    if interval <= 0 or _last_phimtat_time <= 0:
+        return 0.0
+    elapsed = time.monotonic() - _last_phimtat_time
+    return max(0.0, interval - elapsed)
+
+
+async def wait_for_phimtat_cooldown() -> float:
+    """Ensure at least PHIMTAT_MIN_INTERVAL_SECONDS gap between Phimtat downloads."""
+    from app.config import settings
+
+    wait_s = get_phimtat_cooldown_remaining()
+    if wait_s > 0:
+        interval = int(getattr(settings, "PHIMTAT_MIN_INTERVAL_SECONDS", 300.0) or 300.0)
+        logger.info(
+            "Phimtat cooldown active: waiting %.1fs to maintain %ds interval between downloads...",
+            wait_s, interval
+        )
+        await asyncio.sleep(wait_s)
+    return wait_s
+
+
+def reset_phimtat_cooldown() -> None:
+    """Reset the cooldown timer (primarily for tests)."""
+    global _last_phimtat_time
+    _last_phimtat_time = 0.0
 
 
 class SnapVideoError(Exception):
@@ -225,45 +274,50 @@ async def _resolve_phimtat(target: str, transport,
                            prefer_sd: bool = False) -> dict:
     from app.config import settings
 
-    base = (settings.PHIMTAT_API_BASE_URL or "").strip()
-    redirect = (settings.PHIMTAT_REDIRECT_URL or "").strip() or "https://api.phimtat.vn/snapvideo/red64.php"
-    key = (settings.PHIMTAT_API_KEY or "").strip()
-    try:
-        timeout = float(settings.PHIMTAT_TIMEOUT_SECONDS or 60)
-    except (TypeError, ValueError):
-        timeout = 60.0
-    version = str((getattr(settings, "PHIMTAT_VER", "8") or "8")).strip() or "8"
-    started = time.monotonic()
-    b64url = base64.b64encode(target.encode("utf-8")).decode("ascii")
-    # New Snap Video shortcut contract (verified live Oct 2026): ver=8,
-    # ask_format=true, show_menu=true — identical param order.
-    api_url = (f"{base}?api-key={key}&lang=vi&ver={version}&ask_format=true"
-               f"&show_menu=true&skip_update=false&b64={b64url}")
-    wrapped = base64.b64encode(api_url.encode("utf-8")).decode("ascii")
-    fetch_url = f"{redirect}?url={quote(wrapped, safe='')}"
-    try:
-        async with httpx.AsyncClient(transport=transport, timeout=timeout,
-                                     headers={"User-Agent": PROVIDER_UA},
-                                     follow_redirects=True) as client:
-            data = await _parse_phimtat_payload(client, fetch_url)
-    except httpx.TimeoutException:
-        raise SnapVideoError(RESOLVE_FAILED, "PHIMTAT resolve timed out.")
-    except (httpx.ConnectError, httpx.NetworkError) as exc:
-        raise SnapVideoError(RESOLVE_FAILED,
-                             f"PHIMTAT unreachable: {type(exc).__name__}.")
-    picked = _pick_media_url(data.get("medias"), prefer_sd=prefer_sd)
-    if not picked:
-        raise SnapVideoError(UNRESOLVABLE, "PHIMTAT response has no media URL.")
-    logger.info("phimtat resolved in %.1fs (prefer_sd=%s, ver=%s)",
-                time.monotonic() - started, prefer_sd, version)
-    duration = data.get("duration")
-    try:
-        duration = float(duration) if duration is not None else None
-    except (TypeError, ValueError):
-        duration = None
-    return {"media_url": picked, "title": data.get("title"),
-            "thumbnail": data.get("thumbnail"), "duration": duration,
-            "provider": "phimtat"}
+    async with _get_phimtat_lock():
+        await wait_for_phimtat_cooldown()
+        try:
+            base = (settings.PHIMTAT_API_BASE_URL or "").strip()
+            redirect = (settings.PHIMTAT_REDIRECT_URL or "").strip() or "https://api.phimtat.vn/snapvideo/red64.php"
+            key = (settings.PHIMTAT_API_KEY or "").strip()
+            try:
+                timeout = float(settings.PHIMTAT_TIMEOUT_SECONDS or 60)
+            except (TypeError, ValueError):
+                timeout = 60.0
+            version = str((getattr(settings, "PHIMTAT_VER", "8") or "8")).strip() or "8"
+            started = time.monotonic()
+            b64url = base64.b64encode(target.encode("utf-8")).decode("ascii")
+            # New Snap Video shortcut contract (verified live Oct 2026): ver=8,
+            # ask_format=true, show_menu=true — identical param order.
+            api_url = (f"{base}?api-key={key}&lang=vi&ver={version}&ask_format=true"
+                       f"&show_menu=true&skip_update=false&b64={b64url}")
+            wrapped = base64.b64encode(api_url.encode("utf-8")).decode("ascii")
+            fetch_url = f"{redirect}?url={quote(wrapped, safe='')}"
+            try:
+                async with httpx.AsyncClient(transport=transport, timeout=timeout,
+                                             headers={"User-Agent": PROVIDER_UA},
+                                             follow_redirects=True) as client:
+                    data = await _parse_phimtat_payload(client, fetch_url)
+            except httpx.TimeoutException:
+                raise SnapVideoError(RESOLVE_FAILED, "PHIMTAT resolve timed out.")
+            except (httpx.ConnectError, httpx.NetworkError) as exc:
+                raise SnapVideoError(RESOLVE_FAILED,
+                                     f"PHIMTAT unreachable: {type(exc).__name__}.")
+            picked = _pick_media_url(data.get("medias"), prefer_sd=prefer_sd)
+            if not picked:
+                raise SnapVideoError(UNRESOLVABLE, "PHIMTAT response has no media URL.")
+            logger.info("phimtat resolved in %.1fs (prefer_sd=%s, ver=%s)",
+                        time.monotonic() - started, prefer_sd, version)
+            duration = data.get("duration")
+            try:
+                duration = float(duration) if duration is not None else None
+            except (TypeError, ValueError):
+                duration = None
+            return {"media_url": picked, "title": data.get("title"),
+                    "thumbnail": data.get("thumbnail"), "duration": duration,
+                    "provider": "phimtat"}
+        finally:
+            record_phimtat_activity()
 
 
 async def _fetch_phimtat_json(client: httpx.AsyncClient,

@@ -128,6 +128,12 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
 
     # ---- resolving ----
     _step(job_id, "resolving", "running", 5)
+    if snapvideo._phimtat_configured():
+        cooldown_remaining = snapvideo.get_phimtat_cooldown_remaining()
+        if cooldown_remaining > 0:
+            logger.info("job %s: waiting %.1fs for Phimtat cooldown", job_id, cooldown_remaining)
+            jobs_repo.add_event(job_id, "resolving", "waiting",
+                                f"Đang chờ giãn cách Phimtat {cooldown_remaining:.0f}s để tránh lỗi liên tiếp...")
     try:
         resolved = await snapvideo.resolve_media_url(source_url)
         media_url = resolved["media_url"]
@@ -142,6 +148,9 @@ async def _run_stages(job: dict, job_dir: Path, source_url: str,
         await snapvideo.stream_download(media_url, source_mp4)
     except snapvideo.SnapVideoError as exc:
         return _fail(job_id, exc.code, str(exc), "downloading")
+    finally:
+        if resolved.get("provider") == "phimtat":
+            snapvideo.record_phimtat_activity()
 
     # ---- extracting audio ----
     _step(job_id, "extracting_audio", "running", 25)
