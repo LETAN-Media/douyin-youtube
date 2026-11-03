@@ -112,6 +112,12 @@ async def run_audio_job(job_id: str, *, workdir: Path,
             _run_stages(job, job_dir, source_url, inventory), timeout=timeout_s)
     except asyncio.TimeoutError:
         return _fail(job_id, "JOB_TIMEOUT", "Job exceeded timeout.", "running")
+    finally:
+        try:
+            if job_dir.exists():
+                shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception as exc:
+            logger.warning("job %s cleanup warning: %s", job_id, exc)
 
 
 async def _run_stages(job: dict, job_dir: Path, source_url: str,

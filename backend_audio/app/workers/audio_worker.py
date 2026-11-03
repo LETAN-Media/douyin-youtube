@@ -28,6 +28,13 @@ async def _loop() -> None:
 
     workdir = Path(settings.AUDIO_WORKDIR)
     workdir.mkdir(parents=True, exist_ok=True)
+    import shutil
+    try:
+        for p in workdir.iterdir():
+            if p.is_dir() and p.name.startswith("ajob_"):
+                shutil.rmtree(p, ignore_errors=True)
+    except Exception as exc:
+        logger.warning("failed to purge stale workdir: %s", exc)
     recovered = jobs_repo.recover_stale_running()
     if recovered:
         logger.info("recovered %d stale jobs to queued", recovered)
@@ -48,6 +55,10 @@ async def _loop() -> None:
                         from app.services.processing import _handle_failed_inventory
 
                         _handle_failed_inventory(job["inventory_id"], "WORKER_CRASH")
+                finally:
+                    jdir = workdir / job["id"]
+                    if jdir.exists():
+                        shutil.rmtree(jdir, ignore_errors=True)
                 continue
             for pipe in pipe_repo.list_pipelines():
                 if pipe.get("pipeline_type") == "manual":
