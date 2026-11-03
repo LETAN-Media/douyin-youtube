@@ -145,6 +145,22 @@ async def resolve_shortcut_media(
                 raise ManualMediaError(INVALID_RESPONSE, "Invalid JSON from provider.")
             if not isinstance(data, dict):
                 raise ManualMediaError(INVALID_RESPONSE, "Response is not an object.")
+
+            if data.get("source") == "notice" and isinstance(data.get("medias"), dict):
+                # Auto-accept terms of service prompt from provider
+                for item in data.get("medias", {}).values():
+                    agree_url = item.get("url") if isinstance(item, dict) else (item if isinstance(item, str) else None)
+                    if agree_url and "agree-terms" in agree_url:
+                        try:
+                            await client.get(agree_url)
+                            retry_resp = await client.get(fetch_url)
+                            if retry_resp.status_code == 200:
+                                retry_data = retry_resp.json()
+                                if isinstance(retry_data, dict) and retry_data.get("source") != "notice":
+                                    data = retry_data
+                        except Exception:
+                            pass
+                        break
     except httpx.TimeoutException:
         raise ManualMediaError(TIMEOUT, "Provider resolve timed out.")
     except (httpx.ConnectError, httpx.NetworkError) as exc:

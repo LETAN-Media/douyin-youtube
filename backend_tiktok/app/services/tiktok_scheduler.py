@@ -128,7 +128,8 @@ async def _run_due_scans() -> None:
 async def _active_scan(source_id: str) -> bool:
     res = await execute(
         "SELECT COUNT(*) as cnt FROM tiktok_scan_runs "
-        "WHERE source_id = :sid AND status = 'running'",
+        "WHERE source_id = :sid AND status = 'running' "
+        "AND started_at >= datetime('now', '-15 minutes')",
         {"sid": source_id},
     )
     return (res.rows[0][0] > 0) if res.rows else False
@@ -501,6 +502,12 @@ async def calculate_schedule_plan(
                     ai_model = ai_meta.get("model")
             except Exception as exc:
                 logger.warning("AI generation during schedule failed: %s", exc)
+
+        # Clean up any stale failed/cancelled publication row to satisfy UNIQUE(reel_db_id, destination_id)
+        await execute(
+            "DELETE FROM tiktok_publications WHERE reel_db_id = :rid AND destination_id = :did AND status IN ('failed', 'cancelled')",
+            {"rid": reel_db_id, "did": resolved_destination_id},
+        )
 
         pub_id = f"pub_{secrets.token_hex(8)}"
         await publications.create_publication(

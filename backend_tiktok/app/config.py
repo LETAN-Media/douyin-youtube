@@ -79,7 +79,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TIKTOK_SOURCE_TIMEOUT_SECONDS"),
     )
     tiktok_source_max_count: int = Field(
-        default=30,
+        default=200,
         validation_alias=AliasChoices("TIKTOK_SOURCE_MAX_COUNT"),
     )
 

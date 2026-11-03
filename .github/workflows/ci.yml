@@ -27,11 +27,13 @@ jobs:
       facebook: ${{ steps.filter.outputs.facebook }}
       tiktok: ${{ steps.filter.outputs.tiktok }}
       audio: ${{ steps.filter.outputs.audio }}
+      youtube: ${{ steps.filter.outputs.youtube }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       docker_backend: ${{ steps.filter.outputs.docker_backend }}
       docker_facebook: ${{ steps.filter.outputs.docker_facebook }}
       docker_tiktok: ${{ steps.filter.outputs.docker_tiktok }}
       docker_audio: ${{ steps.filter.outputs.docker_audio }}
+      docker_youtube: ${{ steps.filter.outputs.docker_youtube }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -51,6 +53,8 @@ jobs:
               - 'backend_tiktok/**'
             audio:
               - 'backend_audio/**'
+            youtube:
+              - 'backend_youtube/**'
             dashboard:
               - 'dashboard/**'
             docker_backend:
@@ -66,6 +70,9 @@ jobs:
               - 'backend_audio/Dockerfile'
               - 'backend_audio/requirements.txt'
               - 'backend_audio/assets/**'
+            docker_youtube:
+              - 'backend_youtube/Dockerfile'
+              - 'backend_youtube/requirements.txt'
 
   douyin-tests:
     name: Douyin Tests
@@ -152,6 +159,63 @@ jobs:
           PYTHONPATH: .
         working-directory: backend_facebook
         run: pytest tests/
+
+  youtube-tests:
+    name: YouTube Tests
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.youtube == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (ffmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend_youtube/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend_youtube/requirements.txt
+
+      - name: Check Python syntax
+        run: python -m compileall -q backend_youtube/app
+
+      - name: Run Alembic migrations (SQLite)
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./ci_youtube_migrate.db
+        working-directory: backend_youtube
+        run: alembic -c alembic.ini upgrade head
+
+      - name: Run YouTube tests
+        env:
+          ADMIN_TOKEN: test-admin-token-xyz
+          YOUTUBE_DATA_API_KEY: test_yt_key
+          FACEBOOK_APP_ID: test_app_id
+          FACEBOOK_APP_SECRET: test_app_secret
+          FACEBOOK_PAGE_ACCESS_TOKEN: test_page_token
+          TOOLNET_AI_ENABLED: "true"
+          TOOLNET_BASE_URL: http://toolnet-test
+          TOOLNET_API_KEY: test_toolnet_key
+          TOOLNET_MODEL: gpt-4o-mini
+          FASTSAVER_API_KEY: test_fastsaver_key
+          WORKER_ENABLED: "false"
+          PYTHONPATH: .
+        working-directory: backend_youtube
+        run: pytest tests/
+
+      - name: Clean up
+        if: always()
+        run: rm -f ci_youtube_migrate.db
 
   tiktok-tests:
     name: TikTok Tests
@@ -292,3 +356,7 @@ jobs:
       - name: Build Audio Docker image
         if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.docker_audio == 'true'
         run: docker build -t audio-ci:test -f backend_audio/Dockerfile backend_audio
+
+      - name: Build YouTube Docker image
+        if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.workflow == 'true' || needs.changes.outputs.docker_youtube == 'true'
+        run: docker build -t youtube-ci:test -f backend_youtube/Dockerfile backend_youtube

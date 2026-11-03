@@ -202,10 +202,15 @@ class DouyinSelfHostedClient:
         base_url: str,
         target_url: str,
         max_count: int,
+        cookie: str | None = None,
     ) -> dict[str, Any]:
         """Make a single POST request to the designated service endpoint."""
         url = base_url.rstrip("/") + self.config.endpoint_path
-        payload = {"url": target_url, "max_count": max_count}
+        payload: dict[str, Any] = {
+            "url": target_url,
+            "max_count": max_count,
+            "cookie": cookie if cookie is not None else " ",
+        }
         label = self._provider_label(base_url)
 
         logger.info(
@@ -332,6 +337,7 @@ class DouyinSelfHostedClient:
         self,
         target_url: str,
         max_count: int | None = None,
+        cookie: str | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch video URLs from self-hosted API and convert them to normalized video dicts.
 
@@ -361,7 +367,7 @@ class DouyinSelfHostedClient:
             max_retries = 0 if has_alternative else max(0, int(self.config.max_endpoint_retries))
             for attempt in range(max_retries + 1):
                 try:
-                    data = self._call_service(base, target_url, count)
+                    data = self._call_service(base, target_url, count, cookie=cookie)
                     circuit_breaker.record_success(base)
                     break
                 except DouyinSelfHostedError as exc:
