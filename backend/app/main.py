@@ -1,7 +1,11 @@
 import asyncio
 import html
 import logging
+import socket
 import uuid
+
+# Safety: prevent any untimed socket from hanging a thread indefinitely
+socket.setdefaulttimeout(30.0)
 from contextlib import asynccontextmanager
 from datetime import (
     datetime,
@@ -369,7 +373,7 @@ def preview_schedule(payload: PipelineUpdate):
 
 
 @app.get("/health")
-def health() -> dict:
+async def health() -> dict:
     from app.scheduler import scheduler_runtime
     from app.monitor import monitor_runtime
 
@@ -398,11 +402,16 @@ def health() -> dict:
 
 
 @app.get("/ready")
-def ready() -> dict:
-    try:
+async def ready() -> dict:
+    def _ping():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1")).fetchone()
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_ping), timeout=5.0)
         return {"ready": True, "database": "connected"}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Database ping timed out after 5s")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
 
@@ -919,6 +928,13 @@ def dashboard_stats(
         _agg_sql, {"pids": pipeline_ids, "today": today_val}
     ).all()
     timings["q_agg_ms"] = int((time.perf_counter() - _t_agg) * 1000)
+
+    if (time.perf_counter() - t0) > 12.0:
+        logger.warning("dashboard.abort: queries took > 12s, aborting before client timeout")
+        raise HTTPException(
+            status_code=504,
+            detail="Dashboard queries took longer than 12s. Cơ sở dữ liệu đang bận, vui lòng thử lại.",
+        )
 
     _m: dict[str, dict[str, str]] = {}
     for _r in _agg_rows:
