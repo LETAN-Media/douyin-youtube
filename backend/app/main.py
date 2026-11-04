@@ -26,6 +26,9 @@ from fastapi import (
 from fastapi.middleware.cors import (
     CORSMiddleware,
 )
+from fastapi.middleware.gzip import (
+    GZipMiddleware,
+)
 from fastapi.responses import (
     HTMLResponse,
 )
@@ -317,6 +320,10 @@ app = FastAPI(
 
 origins = settings.allowed_origins
 
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=1000,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -816,6 +823,14 @@ def admin_reset_password_endpoint(
     return {"ok": True}
 
 
+_DASHBOARD_CACHE_TTL: float = 4.0  # seconds (coalesces burst calls from UI & avoids cross-regional DB round-trips)
+_dashboard_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def invalidate_dashboard_cache():
+    _dashboard_cache.clear()
+
+
 @app.get(
     "/api/dashboard",
     dependencies=[
@@ -823,6 +838,7 @@ def admin_reset_password_endpoint(
     ],
 )
 def dashboard_stats(
+    request: Request = None,
     db: Session = Depends(
         get_db
     ),
@@ -830,6 +846,30 @@ def dashboard_stats(
     import time
     t0 = time.perf_counter()
     t_mark = t0
+
+    # In-memory short cache (TTL: 4s) to coalesce bursts of dashboard calls
+    # and avoid cross-regional round-trips to Turso.
+    _can_cache = (
+        request is not None
+        and not os.environ.get("PYTEST_CURRENT_TEST")
+        and request.headers.get("cache-control") != "no-cache"
+    )
+    _ckey = None
+    if _can_cache:
+        try:
+            _ctx = tenant_ctx()
+            _ckey = (
+                _ctx.user_id if _ctx else None,
+                tuple(sorted(_ctx.workspace_ids)) if _ctx and _ctx.workspace_ids else (),
+                bool(_ctx.is_system_admin) if _ctx else False,
+            )
+            _hit = _dashboard_cache.get(_ckey)
+            if _hit is not None:
+                _ts, _cached_data = _hit
+                if (t0 - _ts) < _DASHBOARD_CACHE_TTL:
+                    return _cached_data
+        except Exception:
+            _ckey = None
 
     def _ms_since(mark: float) -> tuple[int, float]:
         now = time.perf_counter()
@@ -1300,9 +1340,15 @@ def dashboard_stats(
         ",".join(f"{k}={v}" for k, v in sorted(_q_ms.items())),
     )
 
-    return {
+    response_data = {
         "pipelines": result,
     }
+    if _can_cache and _ckey is not None:
+        _dashboard_cache[_ckey] = (time.perf_counter(), response_data)
+        if len(_dashboard_cache) > 100:
+            _dashboard_cache.clear()
+
+    return response_data
 
 
 @app.get("/", include_in_schema=False)

@@ -55,4 +55,5 @@ COPY prompts ./prompts
 # --proxy-headers: trust the platform reverse proxy (Northflank) so
 # X-Forwarded-Proto=https is honoured platform-wide. OAuth itself no longer
 # depends on this (authorization_response is rebuilt on PUBLIC_BASE_URL).
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
+# --timeout-keep-alive 75: keep upstream TCP/TLS connections warm with Cloudflare.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*' --timeout-keep-alive 75"]
