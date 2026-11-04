@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     AUDIO_JOB_TIMEOUT_SECONDS: int = 7200
     AUDIO_WORKDIR: str = "/tmp/backend-audio/jobs"
     AUDIO_MAX_UPLOAD_BYTES: int = 2 * 1024 * 1024 * 1024
+    AUDIO_ALLOW_LOUDNORM: bool = False
 
     # Optional JianYing ASR bridge (node). Empty = ASR disabled.
     JIANYING_BRIDGE_DIR: str | None = None

@@ -16,7 +16,7 @@ CAPTION_FAILED = "CAPTION_UPLOAD_FAILED"
 DISCLOSURE_MANUAL = "AI_DISCLOSURE_REQUIRES_MANUAL_REVIEW"
 
 MAX_RETRIES = 3
-_CHUNK_SIZE = 8 * 1024 * 1024
+_CHUNK_SIZE = 32 * 1024 * 1024
 
 
 class PublisherError(Exception):
@@ -72,7 +72,15 @@ def _blocking_upload(refresh_token: str, path: Path, metadata: dict,
         try:
             response = None
             while response is None:
-                _, response = request.next_chunk()
+                upload_status, response = request.next_chunk()
+                if upload_status:
+                    pct = upload_status.progress() * 100
+                    logger.info(
+                        "YouTube upload progress: %.1f%% (%.1f / %.1f MB)",
+                        pct,
+                        upload_status.resumable_progress / (1024 * 1024),
+                        (upload_status.total_size or 0) / (1024 * 1024),
+                    )
             video_id = (response or {}).get("id")
             if not video_id:
                 raise PublisherError(UPLOAD_FAILED, "YouTube returned no video id.")

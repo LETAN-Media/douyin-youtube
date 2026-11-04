@@ -98,8 +98,16 @@ def extract_audio(source: Path, dest: Path, normalize: bool = False,
                              "Source video has no audio stream.")
         raise
     dest.parent.mkdir(parents=True, exist_ok=True)
+    from app.config import settings
+    should_normalize = bool(normalize and getattr(settings, "AUDIO_ALLOW_LOUDNORM", False))
+    if normalize and not should_normalize:
+        logger.info(
+            "normalize_audio requested but AUDIO_ALLOW_LOUDNORM is False; "
+            "skipping loudnorm to protect low-CPU instance."
+        )
+
     codec = (info.get("audio_codec") or "").lower()
-    if not normalize and codec == "aac":
+    if not should_normalize and codec == "aac":
         method = "STREAM_COPY"
         cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y",
                "-i", str(source), "-map", "0:a:0", "-vn", "-c:a", "copy",
@@ -110,7 +118,7 @@ def extract_audio(source: Path, dest: Path, normalize: bool = False,
         cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y",
                "-i", str(source), "-map", "0:a:0", "-vn", "-c:a", "aac",
                "-b:a", "128k", "-threads", str(threads)]
-        if normalize:
+        if should_normalize:
             cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
         cmd.append(str(dest))
     try:
