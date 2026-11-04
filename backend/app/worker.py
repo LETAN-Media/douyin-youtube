@@ -702,9 +702,13 @@ async def worker_loop() -> None:
 
     while True:
         try:
-            await asyncio.to_thread(reconcile_known_uploads)
-            job_id = await asyncio.to_thread(
-                claim_job
+            await asyncio.wait_for(
+                asyncio.to_thread(reconcile_known_uploads),
+                timeout=30.0,
+            )
+            job_id = await asyncio.wait_for(
+                asyncio.to_thread(claim_job),
+                timeout=30.0,
             )
 
             if not job_id:
@@ -713,10 +717,15 @@ async def worker_loop() -> None:
                 )
                 continue
 
-            await asyncio.to_thread(
-                process_job,
-                job_id,
+            job_timeout = float(getattr(settings, "worker_job_timeout_seconds", 600.0) or 600.0)
+            await asyncio.wait_for(
+                asyncio.to_thread(process_job, job_id),
+                timeout=job_timeout,
             )
+
+        except asyncio.TimeoutError:
+            logger.error("Worker task timed out; continuing loop")
+            await asyncio.sleep(settings.worker_poll_seconds)
 
         except asyncio.CancelledError:
             raise

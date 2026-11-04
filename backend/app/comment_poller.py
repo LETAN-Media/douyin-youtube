@@ -670,8 +670,14 @@ async def comment_worker_loop() -> None:
 
     while True:
         try:
-            summary = await asyncio.to_thread(run_comment_scan_once)
+            scan_timeout = float(getattr(settings, "comment_scan_timeout_seconds", 180.0) or 180.0)
+            summary = await asyncio.wait_for(
+                asyncio.to_thread(run_comment_scan_once),
+                timeout=scan_timeout,
+            )
             logger.info("Comment scan finished: %s", summary)
+        except asyncio.TimeoutError:
+            logger.error("Comment reply scan timed out after %.0fs", scan_timeout)
         except asyncio.CancelledError:
             raise
         except Exception:

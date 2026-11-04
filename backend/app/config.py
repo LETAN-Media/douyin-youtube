@@ -14,9 +14,9 @@ class Settings(BaseSettings):
     turso_url: str = ""
     turso_token: str = ""
     database_provider: str = "postgresql"
-    db_pool_size: int = Field(default=5, ge=1, le=50)
-    db_pool_max_overflow: int = Field(default=5, ge=0, le=50)
-    db_pool_timeout_seconds: float = Field(default=30, gt=0)
+    db_pool_size: int = Field(default=10, ge=1, le=50)
+    db_pool_max_overflow: int = Field(default=10, ge=0, le=50)
+    db_pool_timeout_seconds: float = Field(default=10, gt=0)
     db_pool_recycle_seconds: int = Field(default=60, ge=1)
 
     public_base_url: str = "http://localhost:8000"
@@ -30,6 +30,9 @@ class Settings(BaseSettings):
 
     worker_enabled: bool = True
     worker_poll_seconds: int = 5
+    worker_job_timeout_seconds: float = 600.0
+    monitor_cycle_timeout_seconds: float = 300.0
+    comment_scan_timeout_seconds: float = 180.0
 
     temp_dir: str = "/tmp/douyin-youtube"
     upload_journal_dir: str = "/tmp/douyin-youtube-upload-receipts"

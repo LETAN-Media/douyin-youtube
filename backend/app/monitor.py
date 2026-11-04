@@ -419,7 +419,13 @@ async def monitor_loop() -> None:
     while True:
         try:
             logger.info("Starting monitor cycle")
-            await asyncio.to_thread(run_monitor_once)
+            cycle_timeout = float(getattr(settings, "monitor_cycle_timeout_seconds", 300.0) or 300.0)
+            await asyncio.wait_for(
+                asyncio.to_thread(run_monitor_once),
+                timeout=cycle_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Monitor cycle timed out after %.0fs", cycle_timeout)
         except asyncio.CancelledError:
             raise
         except Exception:
