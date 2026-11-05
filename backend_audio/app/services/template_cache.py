@@ -2,7 +2,7 @@
 
 Normalizes template (or background video/MOV) to standardized H.264 MP4 once.
 If static logo is enabled, bakes logo directly into the normalized video.
-Caches optimized template on R2 under audio/pipelines/{pipeline_id}/templates_optimized/.
+Caches optimized template on R2 under audio/pipelines/{pipeline_id}/templates/.
 Subsequent jobs download the cached optimized template in seconds (Cache HIT).
 """
 
@@ -33,7 +33,7 @@ def get_optimized_template_key(
     logo_position: str = "top-right",
 ) -> str:
     logo_suffix = f"_logo_{logo_id}_{logo_position}" if logo_id else "_nologo"
-    return f"audio/pipelines/{pipeline_id}/templates_optimized/{asset_id}_{orientation}{logo_suffix}.mp4"
+    return f"audio/pipelines/{pipeline_id}/templates/{asset_id}_{orientation}{logo_suffix}.mp4"
 
 
 def normalize_template_video(
