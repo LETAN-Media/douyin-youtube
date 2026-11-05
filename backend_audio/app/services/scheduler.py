@@ -98,9 +98,13 @@ def pipeline_due(pipeline_id: str) -> tuple[bool, str]:
     tz_name = sched.get("timezone") or "Asia/Ho_Chi_Minh"
     day_start = _today_utc_start(tz_name)
     client = get_client()
+    # Count only auto-published videos today (manual uploads do NOT consume auto daily quota)
     row = client.execute(
-        "SELECT COUNT(*) AS n FROM audio_publications WHERE pipeline_id = ? "
-        "AND published_at >= ?", (pipeline_id, day_start)).fetchone()
+        "SELECT COUNT(*) AS n FROM audio_publications p "
+        "LEFT JOIN audio_processing_jobs j ON p.job_id = j.id "
+        "WHERE p.pipeline_id = ? AND p.published_at >= ? "
+        "AND (j.mode = 'auto' OR (j.mode IS NULL AND p.inventory_id IS NOT NULL))",
+        (pipeline_id, day_start)).fetchone()
     try:
         published_today = int(row["n"]) if row and row.get("n") is not None else 0
     except (ValueError, TypeError):
