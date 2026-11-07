@@ -14,6 +14,14 @@ AUDIO_DB_PATH=/tmp/backend_audio.sqlite3 AUDIO_TURSO_URL="" \
 uvicorn app.main:app --port 8080
 ```
 
+## Template & Fast Mux Architecture
+
+See details in [TEMPLATES_GUIDE.md](TEMPLATES_GUIDE.md).
+- Templates on VPS: `/root/douyin-youtube/backend_audio/assets/template/<Channel Name>/`
+- Templates on R2: `audio/pipelines/{pipeline_id}/templates/` (standardized H.264 MP4 ~220kbps).
+- Import tool: `python3 import_templates.py` (auto-scans and matches channel names to pipeline IDs).
+- Fast Mux: stream copy in 2-3s, 0% CPU, output ~150MB/hour.
+
 ## Deploy (Northflank)
 
 - Build context: `backend_audio`, Dockerfile: `backend_audio/Dockerfile`, port `8080`.
