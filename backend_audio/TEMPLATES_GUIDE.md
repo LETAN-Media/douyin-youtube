@@ -17,13 +17,14 @@ Tất cả video template tải lên VPS được tổ chức trong thư mục c
 ---
 
 ## 2. Cấu trúc lưu trữ trên Cloudflare R2 (Object Storage)
-Trên Cloudflare R2 (Bucket `backend-audio`), dữ liệu được tổ chức chuẩn theo **Pipeline ID**:
+Trên Cloudflare R2 (Bucket `backend-audio`), dữ liệu được tổ chức chuẩn theo **Pipeline Slug (snake_case)** đồng bộ 1:1 với thư mục VPS:
 ```text
-audio/pipelines/{pipeline_id}/templates/
+audio/pipelines/{pipeline_slug}/templates/
 ```
 - **Ví dụ**:
-  - Kênh `Audio Truyện`: `audio/pipelines/apl_fb648f456bc0/templates/`
-  - Kênh `Mao Sơn Audio`: `audio/pipelines/apl_fb26d6b4c315/templates/`
+  - Kênh `Audio Truyện`: `audio/pipelines/audio_truyen/templates/`
+  - Kênh `Mao Sơn Audio`: `audio/pipelines/mao_son_audio/templates/`
+  - Kênh `Chuyện Ma Nè`: `audio/pipelines/chuyen_ma_ne/templates/`
 - **Quy cách file**: 
   - Đã được chuẩn hóa H.264 MP4 720p 24fps.
   - Bitrate siêu nhẹ: `-crf 27 -maxrate 220k -bufsize 440k`.
