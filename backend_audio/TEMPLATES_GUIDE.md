@@ -5,14 +5,14 @@ Tài liệu này quy chuẩn toàn bộ kiến trúc lưu trữ và đồng bộ
 ---
 
 ## 1. Cấu trúc thư mục trên VPS Local
-Tất cả video template tải lên VPS được tổ chức trong thư mục:
+Tất cả video template tải lên VPS được tổ chức trong thư mục chuẩn `snake_case` (chữ thường, không dấu, nối bằng gạch dưới):
 ```text
 /root/douyin-youtube/backend_audio/assets/template/
-  ├── audio truyện/      # Chứa video template của Kênh "Audio Truyện" (ID: apl_fb648f456bc0)
-  ├── Mao Sơn Audio/     # Chứa video template của Kênh "Mao Sơn Audio" (ID: apl_fb26d6b4c315)
-  └── Chuyện Ma Nè/      # Chứa video template của Kênh "Chuyện Ma Nè"
+  ├── audio_truyen/      # Kênh "Audio Truyện" (ID: apl_fb648f456bc0)
+  ├── mao_son_audio/     # Kênh "Mao Sơn Audio" (ID: apl_fb26d6b4c315)
+  └── chuyen_ma_ne/      # Kênh "Chuyện Ma Nè"
 ```
-- **Quy tắc**: Tên thư mục con đặt theo **Tên Kênh (tiếng Việt có dấu hoặc không dấu)** để người dùng dễ nhìn, dễ kéo thả file từ máy tính lên VPS.
+- **Quy tắc**: Tên thư mục con đặt theo dạng `snake_case` không dấu (`audio_truyen`, `mao_son_audio`, `chuyen_ma_ne`) giúp gõ lệnh terminal dễ dàng, không bị lỗi khoảng trắng hay ký tự Unicode.
 
 ---
 
