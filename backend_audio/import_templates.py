@@ -31,6 +31,9 @@ def find_pipeline(query: str):
     cur = db.execute("SELECT id, name, slug FROM audio_pipelines")
     pipes = [dict(r) for r in cur.fetchall()]
     q_clean = query.strip()
+    # Typo tolerance: 'ap1_' -> 'apl_'
+    if q_clean.startswith("ap1_"):
+        q_clean = "apl_" + q_clean[4:]
     q_norm = strip_accents(q_clean).replace("-", " ").replace("_", " ")
 
     for p in pipes:
