@@ -1,12 +1,11 @@
 """Import and optimize templates from local VPS directories into Cloudflare R2 and Turso DB.
 
 Usage:
-    # 1. Single pipeline:
-    python3 import_templates.py --pipeline <pipeline_id> [--dir /root/templates/<pipeline_id>]
+    # 1. Auto scan all folders in assets/template (e.g. 'audio truyện', 'Mao Sơn Audio', etc.):
+    python3 import_templates.py --auto-scan
 
-    # 2. Batch all subdirectories inside /root/templates/:
-    # (Where each subfolder is named after the pipeline_id or slug)
-    python3 import_templates.py --auto-scan /root/templates
+    # 2. Or import a single pipeline by Name, Slug, or ID:
+    python3 import_templates.py --pipeline "Mao Sơn Audio"
 """
 
 import argparse
@@ -14,6 +13,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 # Add backend_audio to sys.path
@@ -23,11 +23,29 @@ from app.db.client import get_client
 from app.db.repositories import audio as audio_repo
 from app.services import r2_storage, template_cache, audio_extractor
 
-def process_pipeline_templates(pipeline_id: str, src_dir: Path, orientation: str = "landscape"):
+def strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn").lower().strip()
+
+def find_pipeline(query: str):
     db = get_client()
-    pipe = db.execute("SELECT id, name, slug FROM audio_pipelines WHERE id = ? OR slug = ?", (pipeline_id, pipeline_id)).fetchone()
+    cur = db.execute("SELECT id, name, slug FROM audio_pipelines")
+    pipes = [dict(r) for r in cur.fetchall()]
+    q_clean = query.strip()
+    q_norm = strip_accents(q_clean).replace("-", " ").replace("_", " ")
+
+    for p in pipes:
+        if q_clean == p["id"] or q_clean == p["slug"]:
+            return p
+        if strip_accents(p["name"]) == q_norm:
+            return p
+        if strip_accents(p["slug"]).replace("-", " ") == q_norm:
+            return p
+    return None
+
+def process_pipeline_templates(pipeline_query: str, src_dir: Path, orientation: str = "landscape"):
+    pipe = find_pipeline(pipeline_query)
     if not pipe:
-        print(f"❌ Error: Pipeline '{pipeline_id}' not found in database!")
+        print(f"❌ Warning: Cannot match folder '{pipeline_query}' with any pipeline in database. Skipping.")
         return 0
 
     real_pipeline_id = pipe["id"]
@@ -45,6 +63,7 @@ def process_pipeline_templates(pipeline_id: str, src_dir: Path, orientation: str
 
     print(f"Found {len(files)} video files.")
     success_count = 0
+    db = get_client()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -103,14 +122,17 @@ def process_pipeline_templates(pipeline_id: str, src_dir: Path, orientation: str
     return success_count
 
 def main():
+    default_template_root = Path("/root/douyin-youtube/backend_audio/assets/template")
+
     parser = argparse.ArgumentParser(description="Ingest templates into R2 & Turso")
-    parser.add_argument("--pipeline", help="Pipeline ID or Slug (e.g. apl_fb648f456bc0)")
+    parser.add_argument("--pipeline", help="Pipeline Name, Slug, or ID (e.g. 'Mao Sơn Audio')")
     parser.add_argument("--dir", help="Path to local directory with video files")
-    parser.add_argument("--auto-scan", help="Scan parent directory (e.g. /root/templates) where subfolders are pipeline IDs")
+    parser.add_argument("--auto-scan", nargs="?", const=str(default_template_root),
+                        help="Scan parent directory (default: assets/template)")
     parser.add_argument("--orientation", default="landscape", help="landscape or portrait")
     args = parser.parse_args()
 
-    if args.auto-scan if hasattr(args, 'auto_scan') else args.auto_scan:
+    if args.auto_scan:
         scan_dir = Path(args.auto_scan)
         if not scan_dir.exists() or not scan_dir.is_dir():
             print(f"❌ Scan directory not found: {scan_dir}")
@@ -122,15 +144,33 @@ def main():
         total = 0
         for d in subdirs:
             total += process_pipeline_templates(d.name, d, orientation=args.orientation)
-        print(f"\n🌟 ALL DONE! Processed {total} templates across {len(subdirs)} pipelines.")
+        print(f"\n🌟 ALL DONE! Processed {total} templates across {len(subdirs)} folders.")
     elif args.pipeline:
-        src_dir = Path(args.dir) if args.dir else Path(f"/root/templates/{args.pipeline}")
+        if args.dir:
+            src_dir = Path(args.dir)
+        else:
+            # Try to match inside default_template_root
+            matched_pipe = find_pipeline(args.pipeline)
+            src_dir = default_template_root / args.pipeline
+            if not src_dir.exists() and matched_pipe:
+                src_dir = default_template_root / matched_pipe["name"]
+        
         if not src_dir.exists():
             print(f"❌ Error: Directory not found: {src_dir}")
             sys.exit(1)
         process_pipeline_templates(args.pipeline, src_dir, orientation=args.orientation)
     else:
-        parser.print_help()
+        # Default action: auto-scan assets/template
+        scan_dir = default_template_root
+        if scan_dir.exists() and scan_dir.is_dir():
+            subdirs = [d for d in sorted(scan_dir.iterdir()) if d.is_dir()]
+            print(f"🔎 Auto-scanning default folder: {scan_dir} ({len(subdirs)} subfolders found)...")
+            total = 0
+            for d in subdirs:
+                total += process_pipeline_templates(d.name, d, orientation=args.orientation)
+            print(f"\n🌟 ALL DONE! Processed {total} templates across {len(subdirs)} folders.")
+        else:
+            parser.print_help()
 
 if __name__ == "__main__":
     main()
