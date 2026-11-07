@@ -32,8 +32,9 @@ def get_optimized_template_key(
     logo_id: str | None = None,
     logo_position: str = "top-right",
 ) -> str:
+    folder = r2_storage.resolve_pipeline_folder(pipeline_id)
     logo_suffix = f"_logo_{logo_id}_{logo_position}" if logo_id else "_nologo"
-    return f"audio/pipelines/{pipeline_id}/templates/{asset_id}_{orientation}{logo_suffix}.mp4"
+    return f"audio/pipelines/{folder}/templates/{asset_id}_{orientation}{logo_suffix}.mp4"
 
 
 def normalize_template_video(
@@ -133,6 +134,9 @@ def get_or_create_optimized_template(
     cache_key = get_optimized_template_key(
         pipeline_id, asset_id, orientation, logo_id, logo_position
     )
+    if not r2_storage.object_exists(cache_key) and bg_asset.get("object_key"):
+        if r2_storage.object_exists(bg_asset["object_key"]):
+            cache_key = bg_asset["object_key"]
 
     t0 = time.perf_counter()
 

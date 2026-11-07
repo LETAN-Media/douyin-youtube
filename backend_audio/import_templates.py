@@ -74,10 +74,11 @@ def process_pipeline_templates(pipeline_query: str, src_dir: Path, orientation: 
             print(f"\n[{i}/{len(files)}] Processing: {src_file.name} ({src_file.stat().st_size / (1024*1024):.1f} MB)...", flush=True)
             
             # 1. Register asset in DB
+            pipeline_folder = pipe.get("slug") or real_pipeline_id
             asset = audio_repo.add_asset(
                 pipeline_id=real_pipeline_id,
                 kind="template",
-                object_key=f"audio/pipelines/{real_pipeline_id}/templates/pending_{src_file.name}",
+                object_key=f"audio/pipelines/{pipeline_folder}/templates/pending_{src_file.name}",
                 file_name=src_file.name,
                 mime="video/mp4",
                 enabled=1
@@ -99,7 +100,7 @@ def process_pipeline_templates(pipeline_query: str, src_dir: Path, orientation: 
                 continue
 
             # 3. Upload to R2
-            target_key = f"audio/pipelines/{real_pipeline_id}/templates/{norm_mp4.name}"
+            target_key = f"audio/pipelines/{pipeline_folder}/templates/{norm_mp4.name}"
             try:
                 r2_storage.upload_file(norm_mp4, target_key, content_type="video/mp4")
             except Exception as exc:

@@ -16,6 +16,11 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+import unicodedata
+
+
 def slugify(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
-    return slug or f"pipeline-{uuid.uuid4().hex[:6]}"
+    s = "".join(c for c in unicodedata.normalize("NFD", name or "") if unicodedata.category(c) != "Mn")
+    s = s.replace("đ", "d").replace("Đ", "d")
+    slug = re.sub(r"[^a-z0-9]+", "_", s.strip().lower()).strip("_")
+    return slug or f"pipeline_{uuid.uuid4().hex[:6]}"

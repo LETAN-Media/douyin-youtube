@@ -43,8 +43,20 @@ def _bucket() -> str:
     return bucket
 
 
+def resolve_pipeline_folder(pipeline_id: str) -> str:
+    try:
+        from app.db.repositories import pipelines as pipe_repo
+        pipe = pipe_repo.get_pipeline(pipeline_id)
+        if pipe and pipe.get("slug"):
+            return pipe["slug"]
+    except Exception:
+        pass
+    return pipeline_id
+
+
 def pipeline_prefix(pipeline_id: str, kind: str = "backgrounds") -> str:
-    return f"audio/pipelines/{pipeline_id}/{kind}/"
+    folder = resolve_pipeline_folder(pipeline_id)
+    return f"audio/pipelines/{folder}/{kind}/"
 
 
 def upload_file(local_path: Path, object_key: str,
