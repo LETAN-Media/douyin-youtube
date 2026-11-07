@@ -5,15 +5,34 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { Shell } from "@/components/Shell";
 
+function toSlug(str: string): string {
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 function NewAudioPipelineForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialType = searchParams.get("type") === "manual" ? "manual" : "auto";
 
   const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [slugTouched, setSlugTouched] = useState(false);
   const [pipelineType, setPipelineType] = useState<"auto" | "manual">(initialType);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function handleNameChange(val: string) {
+    setName(val);
+    if (!slugTouched) {
+      setSlug(toSlug(val));
+    }
+  }
 
   async function handleCreate() {
     if (!name.trim() || saving) return;
@@ -25,6 +44,7 @@ function NewAudioPipelineForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: name.trim(),
+          slug: slug.trim() ? toSlug(slug.trim()) : undefined,
           pipeline_type: pipelineType,
           auto_publish: pipelineType !== "manual",
         }),
@@ -89,19 +109,59 @@ function NewAudioPipelineForm() {
           </p>
         </div>
 
-        <label className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
-          Tên pipeline
-        </label>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder={pipelineType === "manual" ? "VD: Audio Thủ Công 1" : "VD: Audio Ngôn Tình"}
-          className="mt-2 block min-h-[44px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-        />
+        <div>
+          <label className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+            Tên pipeline
+          </label>
+          <input
+            value={name}
+            onChange={(e) => handleNameChange(e.target.value)}
+            placeholder={pipelineType === "manual" ? "VD: Audio Thủ Công 1" : "VD: Chuyện Ma Nè"}
+            className="mt-2 block min-h-[44px] w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+          />
+        </div>
+
+        <div className="mt-4">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+              Slug pipeline (Thư mục R2 &amp; VPS)
+            </label>
+            {slugTouched && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSlug(toSlug(name));
+                  setSlugTouched(false);
+                }}
+                className="text-[11px] font-semibold text-indigo-600 hover:underline"
+              >
+                Tự động theo tên
+              </button>
+            )}
+          </div>
+          <div className="mt-2 flex items-center rounded-xl border border-slate-200 bg-slate-50 px-3 focus-within:border-indigo-500 focus-within:bg-white">
+            <span className="font-mono text-xs font-medium text-slate-400">/</span>
+            <input
+              value={slug}
+              onChange={(e) => {
+                setSlugTouched(true);
+                setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_"));
+              }}
+              placeholder="VD: chuyen_ma_ne"
+              className="min-h-[44px] flex-1 bg-transparent py-2 font-mono text-sm text-slate-800 outline-none placeholder:text-slate-400"
+            />
+          </div>
+          <p className="mt-1.5 text-xs text-slate-500">
+            Thư mục R2: <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-indigo-600">audio/pipelines/{slug || "chuyen_ma_ne"}/templates/</code>
+            <br />
+            Thư mục VPS: <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-indigo-600">assets/template/{slug || "chuyen_ma_ne"}/</code>
+          </p>
+        </div>
+
         {error ? (
-          <p className="mt-2 text-xs font-semibold text-rose-600">{error}</p>
+          <p className="mt-3 text-xs font-semibold text-rose-600">{error}</p>
         ) : null}
-        <div className="mt-4 flex gap-2">
+        <div className="mt-5 flex gap-2">
           <button
             type="button"
             onClick={() => void handleCreate()}

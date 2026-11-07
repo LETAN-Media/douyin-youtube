@@ -88,6 +88,11 @@ export function AudioPipelineClient({
           ← Audio
         </Link>
         <h1 className="text-lg font-extrabold text-slate-900">{pipeline.name}</h1>
+        {pipeline.slug ? (
+          <span className="font-mono text-xs text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md">
+            /{pipeline.slug}
+          </span>
+        ) : null}
         {isManual ? (
           <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-800">
             Thủ Công

@@ -15,6 +15,7 @@ def _err(status: int, error: str, message: str) -> JSONResponse:
 
 class PipelineCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    slug: str | None = Field(default=None, max_length=120)
     enabled: bool = True
     auto_publish: bool = True
     pipeline_type: str = Field(default="auto", pattern="^(auto|manual)$")
@@ -22,6 +23,7 @@ class PipelineCreate(BaseModel):
 
 class PipelineUpdate(BaseModel):
     name: str | None = None
+    slug: str | None = Field(default=None, max_length=120)
     enabled: bool | None = None
     auto_publish: bool | None = None
     pipeline_type: str | None = Field(default=None, pattern="^(auto|manual)$")
@@ -43,7 +45,7 @@ async def list_pipelines(type: str | None = None,
 async def create_pipeline(body: PipelineCreate, _: None = Depends(require_admin)):
     pipe_type = body.pipeline_type
     auto_pub = False if pipe_type == "manual" else body.auto_publish
-    pipe = repo.create_pipeline(body.name, enabled=body.enabled,
+    pipe = repo.create_pipeline(body.name, slug=body.slug, enabled=body.enabled,
                                 auto_publish=auto_pub,
                                 pipeline_type=pipe_type)
     return {**pipe, **repo.pipeline_stats(pipe["id"])}

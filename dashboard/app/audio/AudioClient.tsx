@@ -171,6 +171,11 @@ export function AudioPipelineList({
                   className="min-w-0 text-sm font-extrabold text-slate-900 hover:text-indigo-700"
                 >
                   <span className="block truncate">{p.name}</span>
+                  {p.slug ? (
+                    <span className="block truncate font-mono text-[11px] font-normal text-slate-400">
+                      /{p.slug}
+                    </span>
+                  ) : null}
                 </Link>
 
                 <div className="flex shrink-0 items-center gap-1.5">

@@ -44,7 +44,8 @@ def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
 
 def create_pipeline(name: str, **fields: Any) -> dict[str, Any]:
     pid = new_id("apl")
-    slug = slugify(name)
+    custom_slug = fields.get("slug")
+    slug = slugify(custom_slug) if (custom_slug and str(custom_slug).strip()) else slugify(name)
     pipeline_type = fields.get("pipeline_type", "auto")
     if pipeline_type not in ("auto", "manual"):
         pipeline_type = "auto"
@@ -73,13 +74,15 @@ def create_pipeline(name: str, **fields: Any) -> dict[str, Any]:
 
 
 def update_pipeline(pipeline_id: str, **fields: Any) -> dict[str, Any] | None:
-    allowed = {"name", "enabled", "auto_publish", "pipeline_type"}
+    allowed = {"name", "slug", "enabled", "auto_publish", "pipeline_type"}
     sets, params = [], []
     has_auto_publish = "auto_publish" in fields and fields["auto_publish"] is not None
     for key in allowed:
         if key in fields and fields[key] is not None:
             value = fields[key]
-            if key in ("enabled", "auto_publish"):
+            if key == "slug":
+                value = slugify(str(value))
+            elif key in ("enabled", "auto_publish"):
                 value = 1 if value else 0
             elif key == "pipeline_type":
                 if value not in ("auto", "manual"):
